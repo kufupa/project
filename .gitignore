@@ -1,0 +1,29 @@
+# General runtime/cache
+artifacts/
+.cache/
+.venv/
+.env
+paths.local.env
+wandb/
+run/
+runs/
+out/
+outputs/
+data/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.pytest/
+.ruff_cache/
+.pdm-build/
+poetry.lock
+
+# Editors and OS
+.DS_Store
