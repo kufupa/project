@@ -10,13 +10,16 @@ LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_p
 ORACLE_XVFB_ENABLED="${ORACLE_XVFB_ENABLED:-1}"
 
 EPISODES="${ORACLE_BASELINE_EPISODES:-15}"
-SEED="${ORACLE_BASELINE_SEED:-123}"
+# Match phase06 oracle campaign convention (e.g. run_*_voracle_*_s1000_*).
+SEED="${ORACLE_BASELINE_SEED:-1000}"
 TASK="${ORACLE_BASELINE_TASK:-push-v3}"
 OUTPUT_ROOT="${ORACLE_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts/phase06_oracle_baseline}"
 VIDEO="${ORACLE_BASELINE_VIDEO:-true}"
-EPISODE_LENGTH="${ORACLE_BASELINE_EPISODE_LENGTH:-400}"
+EPISODE_LENGTH="${ORACLE_BASELINE_EPISODE_LENGTH:-120}"
 FPS="${ORACLE_BASELINE_FPS:-30}"
 SAVE_FRAMES="${ORACLE_SAVE_FRAMES:-true}"
+CAMERA_NAME="${ORACLE_METAWORLD_CAMERA_NAME:-corner2}"
+FLIP_CORNER2="${ORACLE_FLIP_CORNER2:-true}"
 
 log_info() { echo "[INFO] $*"; }
 log_warn() { echo "[WARN] $*" >&2; }
@@ -77,6 +80,14 @@ while [[ $# -gt 0 ]]; do
       SAVE_FRAMES="${2}"
       shift 2
       ;;
+    --camera-name)
+      CAMERA_NAME="${2}"
+      shift 2
+      ;;
+    --flip-corner2)
+      FLIP_CORNER2="${2}"
+      shift 2
+      ;;
     *)
       log_error "Unknown arg: ${1}"
       exit 2
@@ -90,6 +101,11 @@ assert_non_negative_int "episode_length" "${EPISODE_LENGTH}"
 assert_non_negative_int "fps" "${FPS}"
 assert_bool "video" "${VIDEO}"
 assert_bool "save_frames" "${SAVE_FRAMES}"
+assert_bool "flip_corner2" "${FLIP_CORNER2}"
+if [[ -z "${CAMERA_NAME}" ]]; then
+  log_error "Invalid camera_name: must be non-empty."
+  exit 2
+fi
 
 if [[ ! -x "${LEROBOT_ENV_DIR}/bin/python" ]]; then
   log_error "Python not found in env: ${LEROBOT_ENV_DIR}/bin/python"
@@ -124,10 +140,12 @@ run_cmd="'${LEROBOT_ENV_DIR}/bin/python' '${ORACLE_EVAL_SCRIPT}' \
   --max-steps ${EPISODE_LENGTH} \
   --video '${VIDEO}' \
   --fps ${FPS} \
+  --camera-name '${CAMERA_NAME}' \
+  --flip-corner2 '${FLIP_CORNER2}' \
   --save-frames '${SAVE_FRAMES}' \
   --output-dir '${output_dir}'"
 
-log_info "Running oracle baseline task=${TASK}: episodes=${EPISODES}, seed=${SEED}, episode_length=${EPISODE_LENGTH}, video=${VIDEO}, fps=${FPS}, save_frames=${SAVE_FRAMES}"
+log_info "Running oracle baseline task=${TASK}: episodes=${EPISODES}, seed=${SEED}, episode_length=${EPISODE_LENGTH}, video=${VIDEO}, fps=${FPS}, camera_name=${CAMERA_NAME}, flip_corner2=${FLIP_CORNER2}, save_frames=${SAVE_FRAMES}"
 xvfb_enabled="$(printf '%s' "${ORACLE_XVFB_ENABLED}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${xvfb_enabled}" == "1" || "${xvfb_enabled}" == "true" || "${xvfb_enabled}" == "yes" ]]; then
   xvfb-run -a -s "-screen 0 1280x1024x24" bash -lc "${run_cmd}"
