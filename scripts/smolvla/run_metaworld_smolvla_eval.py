@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overlay-mode",
         default="cumulative_reward",
-        choices=["cumulative_reward", "reward"],
+        choices=["cumulative_reward", "reward", "reward_delta"],
     )
     parser.add_argument(
         "--save-frames",
