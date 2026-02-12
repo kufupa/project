@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 from typing import Any, Literal
 
 import importlib.util
@@ -104,6 +105,14 @@ class EpisodeLog:
     latent_scores: list[float] = field(default_factory=list)
     selected_scores: list[float] = field(default_factory=list)
     selected_indices: list[int] = field(default_factory=list)
+    goal_frame_index: int | None = None
+    goal_source: str | None = None
+    start_frame_similarity: float | None = None
+    reset_frame_warning: bool = False
+    selected_candidate_indices: list[int] = field(default_factory=list)
+    candidate_distances: list[float] = field(default_factory=list)
+    comparison_strip_path: str | None = None
+    comparison_video_path: str | None = None
     segments: list[SegmentLog] = field(default_factory=list)
     done: bool = False
     steps: int = 0
@@ -123,6 +132,14 @@ class EpisodeLog:
             "latent_scores": [float(x) for x in self.latent_scores],
             "selected_scores": [float(x) for x in self.selected_scores],
             "selected_indices": [int(i) for i in self.selected_indices],
+            "selected_candidate_indices": [int(i) for i in self.selected_candidate_indices],
+            "goal_frame_index": self.goal_frame_index,
+            "goal_source": self.goal_source,
+            "start_frame_similarity": self.start_frame_similarity,
+            "reset_frame_warning": bool(self.reset_frame_warning),
+            "candidate_distances": [float(x) for x in self.candidate_distances],
+            "comparison_strip_path": self.comparison_strip_path,
+            "comparison_video_path": self.comparison_video_path,
             "segments": [s.to_dict() for s in self.segments],
             "metadata": dict(self.metadata),
         }
@@ -153,11 +170,20 @@ def _load_jepa_helper_module() -> Any:
             "Expected copied file vendor/pi05/jepa_cem_paired_pushv3_export.py."
         )
 
-    spec = importlib.util.spec_from_file_location("jepa_cem_paired_pushv3_export", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load helper spec from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module_name = "jepa_cem_paired_pushv3_export"
+    try:
+        loader = importlib.machinery.SourceFileLoader(module_name, str(module_path))
+        module = loader.load_module(module_name)
+    except Exception as exc:
+        # Fallback to explicit spec-based import if runtime complains.
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Unable to load helper spec from {module_path}") from exc
+        module = importlib.util.module_from_spec(spec)
+        import sys
+
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
     _HELPER_MODULE = module
     return module
 
@@ -238,6 +264,132 @@ def _ensure_action_matrix(actions: np.ndarray, action_dim: int, length: int) -> 
         )
         arr = np.concatenate([arr, pad_rows], axis=0)
     return arr
+
+
+def _frame_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Return mean absolute difference normalized to [0,1], with resize fallback."""
+    arr_a = np.asarray(a, dtype=np.float32)
+    arr_b = np.asarray(b, dtype=np.float32)
+    if arr_a.shape != arr_b.shape:
+        try:
+            from PIL import Image
+
+            arr_b = np.array(Image.fromarray(np.asarray(arr_b, dtype=np.uint8)).resize((arr_a.shape[1], arr_a.shape[0])))
+        except Exception as exc:
+            raise ValueError(f"Unable to compare frame shapes {arr_a.shape} and {arr_b.shape}: {exc}") from exc
+    if arr_a.ndim != 3 or arr_b.ndim != 3:
+        raise ValueError(f"Frame similarity expects HWC images, got {arr_a.shape} and {arr_b.shape}")
+    if arr_a.dtype == np.uint8 or arr_a.max() > 1.0:
+        arr_a = arr_a / 255.0
+    if arr_b.dtype == np.uint8 or arr_b.max() > 1.0:
+        arr_b = arr_b / 255.0
+    return float(np.mean(np.abs(arr_a - arr_b)))
+
+
+def _to_channel_last(image_like: Any) -> np.ndarray:
+    frame = np.asarray(image_like)
+    if frame.ndim != 3:
+        raise ValueError(f"Decoded frame expected HWC or CHW image, got shape {frame.shape}")
+    if frame.shape[0] == 3 and frame.shape[-1] != 3:
+        frame = np.transpose(frame, (1, 2, 0))
+    return _to_rgb_uint8(frame)
+
+
+def _decode_latent_trace_to_frames(model_bundle: WMBundle, latent_trace: list[np.ndarray]) -> list[np.ndarray]:
+    if not latent_trace:
+        return []
+    decode_fn = getattr(model_bundle.model, "decode_unroll", None)
+    if decode_fn is None:
+        decode_fn = getattr(model_bundle.model, "decode", None)
+    if decode_fn is None:
+        return []
+
+    try:
+        lat = np.asarray(latent_trace, dtype=np.float32)
+        lat_t = torch.as_tensor(lat, dtype=torch.float32, device=model_bundle.device)
+        if lat_t.ndim == 2:
+            lat_t = lat_t.unsqueeze(0)
+
+        decoded = None
+        try:
+            decoded = decode_fn(lat_t, debug=False)
+        except TypeError:
+            decoded = decode_fn(lat_t)
+
+        if isinstance(decoded, dict):
+            if "recon" in decoded:
+                decoded = decoded["recon"]
+            elif "decoded" in decoded:
+                decoded = decoded["decoded"]
+            else:
+                decoded = next(iter(decoded.values()))
+        decoded_np = np.asarray(decoded)
+        if decoded_np.size == 0:
+            return []
+
+        if decoded_np.ndim == 5:
+            decoded_np = decoded_np[0]
+        if decoded_np.ndim == 4:
+            return [_to_channel_last(frame) for frame in decoded_np]
+        if decoded_np.ndim == 3:
+            return [_to_channel_last(decoded_np)]
+    except Exception:
+        return []
+    return []
+
+
+def _build_real_vs_pred_strip(real_frames: list[np.ndarray], pred_frames: list[np.ndarray]) -> np.ndarray:
+    if not real_frames or not pred_frames:
+        raise ValueError("Real and predicted frames are required for strip rendering.")
+    total = min(len(real_frames), len(pred_frames))
+    pairs: list[np.ndarray] = []
+    for idx in range(total):
+        real_rgb = _to_rgb_uint8(real_frames[idx])
+        pred_rgb = _to_rgb_uint8(pred_frames[idx])
+        if pred_rgb.shape != real_rgb.shape:
+            from PIL import Image
+
+            pred_rgb = np.array(Image.fromarray(pred_rgb).resize((real_rgb.shape[1], real_rgb.shape[0])))
+        pairs.append(np.concatenate([real_rgb, pred_rgb], axis=0))
+    return np.concatenate(pairs, axis=1)
+
+
+def _write_comparison_segment_strip(
+    out_dir: Path,
+    episode_index: int,
+    segment_index: int,
+    real_frames: list[np.ndarray],
+    pred_frames: list[np.ndarray],
+) -> Path | None:
+    if not real_frames or not pred_frames:
+        return None
+    out_dir = Path(out_dir)
+    try:
+        strip = _build_real_vs_pred_strip(real_frames, pred_frames)
+    except Exception:
+        return None
+    import imageio.v2 as imageio
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"episode_{episode_index:04d}_segment_{segment_index:04d}.png"
+    imageio.imwrite(path, strip)
+    return path
+
+
+def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> Path | None:
+    if not segments:
+        return None
+    import imageio.v2 as imageio
+
+    strips: list[np.ndarray] = []
+    for seg in segments:
+        strips.append(imageio.imread(seg))
+    if not strips:
+        return None
+    stitched = np.concatenate(strips, axis=1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.imwrite(output_path, stitched)
+    return output_path
 
 
 def _extract_image_and_proprio(obs: Any, env: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -334,6 +486,9 @@ def load_wm_bundle(
             raise RuntimeError("Failed to infer JEPA-WM action dimensions.") from exc
         action_dims = [4]
     planner_action_dim = int(max(action_dims)) if action_dims else 4
+    model_action_dim = _infer_model_action_dim(model)
+    if model_action_dim > 0:
+        planner_action_dim = max(planner_action_dim, model_action_dim)
 
     proprio_mean = getattr(preprocessor, "proprio_mean", None)
     proprio_dim = int(np.asarray(proprio_mean).reshape(-1).size) if proprio_mean is not None else 0
@@ -351,18 +506,110 @@ def load_wm_bundle(
 
 def _extract_latent(z_pred: Any) -> torch.Tensor:
     _require_torch("Latent extraction requires torch.")
+    candidate: Any = z_pred
     if isinstance(z_pred, dict):
         if "latent" in z_pred:
             candidate = z_pred["latent"]
         elif len(z_pred) > 0:
             candidate = next(iter(z_pred.values()))
         else:
-            raise RuntimeError("Empty unroll result dict.")
-    else:
-        candidate = z_pred
+            raise RuntimeError("Empty latent dict.")
+    elif hasattr(z_pred, "keys"):
+        try:
+            if "latent" in z_pred:  # type: ignore[index]
+                candidate = z_pred["latent"]  # type: ignore[index]
+            else:
+                preferred_keys = ("proprio", "visual", "state", "prediction", "pred", "z", "latent")
+                found = False
+                for key in preferred_keys:
+                    try:
+                        value = z_pred[key]  # type: ignore[index]
+                    except Exception:
+                        continue
+                    if torch.is_tensor(value):
+                        candidate = value
+                        found = True
+                        break
+                if not found:
+                    try:
+                        values = list(z_pred.values())  # type: ignore[call-arg]
+                    except Exception as exc:
+                        raise RuntimeError("Could not iterate latent dictionary.") from exc
+                    for value in values:
+                        if torch.is_tensor(value):
+                            candidate = value
+                            found = True
+                            break
+                    if not found:
+                        raise RuntimeError("No tensor-valued latent found in dictionary output.")
+        except TypeError:
+            # If z_pred behaves like a mapping but cannot be indexed as expected,
+            # fall back to numpy/torch conversion below.
+            candidate = z_pred
+    if candidate is None:
+        raise RuntimeError("Failed to resolve latent candidate from model output.")
     if torch.is_tensor(candidate):
-        return candidate
-    return torch.as_tensor(np.asarray(candidate), dtype=torch.float32)
+        candidate_t = candidate
+    else:
+        candidate_t = torch.as_tensor(np.asarray(candidate), dtype=torch.float32)
+    if candidate_t.numel() <= 0:
+        raise RuntimeError("Empty latent tensor extracted from model output.")
+    return candidate_t
+
+
+def _next_latent_state_after_unroll(out: Any) -> Any:
+    """Reduce multi-step unroll output to latent state suitable for another one-step unroll."""
+    if isinstance(out, dict):
+        nxt: dict[str, Any] = {}
+        for key, val in out.items():
+            if torch is not None and torch.is_tensor(val) and val.dim() >= 1:
+                nxt[key] = val[-1:].detach() if int(val.shape[0]) > 1 else val.detach()
+            else:
+                nxt[key] = val
+        return nxt
+    if torch is not None and torch.is_tensor(out):
+        if out.dim() >= 1 and int(out.shape[0]) > 1:
+            return out[-1:].detach()
+        return out.detach()
+    return out
+
+
+def _latent_vector_from_unroll_step(unroll_out: Any) -> torch.Tensor:
+    """Single-step latent used for distance scoring and trace (flattened 1-D)."""
+    _require_torch("WM scoring requires torch.")
+    lat = _extract_latent(unroll_out)
+    if lat.ndim >= 3:
+        final = lat[-1]
+    elif lat.ndim == 2 and int(lat.shape[0]) > 1:
+        final = lat[-1]
+    else:
+        final = lat
+    return final.reshape(-1)
+
+
+def _infer_model_action_dim(model: Any) -> int:
+    model_root = getattr(model, "model", model)
+    candidates: list[int] = []
+
+    def _add(value: Any) -> None:
+        try:
+            dim = int(value)
+        except (TypeError, ValueError):
+            return
+        if dim > 0:
+            candidates.append(dim)
+
+    _add(getattr(model_root, "action_dim", 0))
+    action_encoder = getattr(model_root, "action_encoder", None)
+    _add(getattr(action_encoder, "in_features", 0))
+    predictor = getattr(model_root, "predictor", None)
+    _add(getattr(getattr(predictor, "action_encoder", None), "in_features", 0))
+    if not candidates:
+        predictor = model_root
+        _add(getattr(predictor, "action_dim", 0))
+    if not candidates:
+        return 0
+    return max(int(x) for x in candidates)
 
 
 def score_chunk_by_goal_latent(
@@ -373,34 +620,74 @@ def score_chunk_by_goal_latent(
     goal_latent: torch.Tensor,
     *,
     chunk_len: int | None = None,
-) -> float:
+    return_latent_trace: bool = False,
+    wm_rollout_mode: str = "iterative",
+) -> float | tuple[float, list[np.ndarray]]:
     """
     Score a candidate chunk by JEPA-WM latent distance to goal latent.
 
-    Returns euclidean distance (smaller is better).
+    ``wm_rollout_mode``:
+    - ``iterative``: one ``model.unroll`` call per action in the chunk (state carried forward).
+    - ``batched``: single ``unroll`` over the full action suffix (legacy).
+
+    Returns euclidean distance (smaller is better), and optionally latent trace.
     """
     if not isinstance(chunk_actions, np.ndarray):
         chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
     if chunk_actions.ndim != 2:
         raise RuntimeError(f"chunk_actions must be 2-D, got shape {chunk_actions.shape}")
 
+    model_action_dim = _infer_model_action_dim(wm_bundle.model)
+    target_action_dim = wm_bundle.planner_action_dim
+    if model_action_dim and model_action_dim != target_action_dim:
+        target_action_dim = model_action_dim
+
     actions = _ensure_action_matrix(
         chunk_actions,
-        wm_bundle.planner_action_dim,
+        target_action_dim,
         int(chunk_len or chunk_actions.shape[0]),
     )
     actions_t = torch.from_numpy(actions).to(wm_bundle.device).to(dtype=torch.float32)
+    mode = str(wm_rollout_mode or "iterative").strip().lower()
+    if mode not in ("iterative", "batched"):
+        raise ValueError(f"wm_rollout_mode must be 'iterative' or 'batched', got {wm_rollout_mode!r}")
+
     with torch.no_grad():
         visual = _to_wm_visual(image, wm_bundle.device)
         proprio_t = _to_wm_proprio(proprio, wm_bundle.proprio_dim, wm_bundle.device)
-        z = wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
-        z_pred = wm_bundle.model.unroll(z, act_suffix=actions_t.unsqueeze(1), debug=False)
-        pred = _extract_latent(z_pred).reshape(-1)
+        latent_state = wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
+        seq_actions = actions_t.to(wm_bundle.device).to(dtype=torch.float32).unsqueeze(1)
+        if seq_actions.ndim != 3:
+            raise RuntimeError(f"Expected action sequence tensor shape (T, B, A), got {seq_actions.shape}")
+
+        latent_trace: list[torch.Tensor] = []
+        if mode == "batched":
+            unroll_output = wm_bundle.model.unroll(latent_state, act_suffix=seq_actions, debug=False)
+            rollout_trace = _extract_latent(unroll_output)
+            if rollout_trace.ndim < 3:
+                raise RuntimeError(
+                    f"Expected rollout latent trace with time dimension, got shape {tuple(rollout_trace.shape)}"
+                )
+            latent_trace.extend(rollout_trace)
+            pred = rollout_trace[-1].reshape(-1)
+        else:
+            z_t: Any = latent_state
+            for t in range(int(seq_actions.shape[0])):
+                one = seq_actions[t : t + 1]
+                unroll_out = wm_bundle.model.unroll(z_t, act_suffix=one, debug=False)
+                step_vec = _latent_vector_from_unroll_step(unroll_out)
+                latent_trace.append(step_vec)
+                z_t = _next_latent_state_after_unroll(unroll_out)
+            pred = latent_trace[-1].reshape(-1)
+
         goal = goal_latent.reshape(-1).to(wm_bundle.device)
         if pred.numel() == 0 or goal.numel() == 0:
             raise RuntimeError("Invalid latent shape for scoring.")
         n = min(pred.numel(), goal.numel())
         distance = torch.linalg.vector_norm(pred[:n] - goal[:n], ord=2).item()
+    if return_latent_trace:
+        decoded_trace = [torch.as_tensor(v).reshape(-1).detach().cpu().numpy() for v in latent_trace]
+        return float(distance), decoded_trace
     return float(distance)
 
 
@@ -535,6 +822,8 @@ def _load_goal_latent(
     wm_bundle: WMBundle | None,
     fallback_image: np.ndarray | None,
     fallback_proprio: np.ndarray | None,
+    *,
+    goal_frame: np.ndarray | None = None,
 ) -> torch.Tensor | None:
     """
     Resolve a goal latent from a source file with fallback to current state latent.
@@ -560,6 +849,14 @@ def _load_goal_latent(
             img = np.asarray(payload_obj["image"])
             proprio = np.asarray(payload_obj["proprio"], dtype=np.float32)
             return _encode_state_to_latent(wm_bundle, img, proprio)
+
+    if wm_bundle is not None and goal_frame is not None:
+        proprio = (
+            np.asarray(fallback_proprio, dtype=np.float32).reshape(-1)
+            if fallback_proprio is not None
+            else np.zeros(int(wm_bundle.proprio_dim), dtype=np.float32)
+        )
+        return _encode_state_to_latent(wm_bundle, goal_frame, proprio)
 
     if wm_bundle is not None and fallback_image is not None and fallback_proprio is not None:
         return _encode_state_to_latent(wm_bundle, fallback_image, fallback_proprio)
@@ -675,10 +972,17 @@ def rollout_with_chunks(
     carry_mode: CarryMode,
     replay_root: str | Path | None = None,
     goal_latent_source: str | None = None,
+    goal_frame: np.ndarray | None = None,
+    start_frame: np.ndarray | None = None,
+    goal_frame_index: int | None = None,
+    goal_source: str | None = None,
+    comparison_root: Path | str | None = None,
+    reset_frame_warning_threshold: float = 0.08,
     seed: int = 0,
     train_steps: int = 0,
     dry_run: bool = False,
     adapter: nn.Module | None = None,
+    wm_rollout_mode: str = "iterative",
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -718,15 +1022,19 @@ def rollout_with_chunks(
             try:
                 import metaworld
 
-                ml1 = metaworld.ML1(task, seed=seed)
-                env_cls = ml1.train_classes[task]
-                env = env_cls()
+                mt1 = metaworld.MT1(task)
+                env_cls = mt1.train_classes[task]
+                os.environ.setdefault("MUJOCO_GL", "egl")
                 try:
-                    if hasattr(env, "render_mode"):
-                        env.render_mode = "rgb_array"
-                except Exception:
-                    pass
-                tasks = getattr(ml1, "train_tasks", None)
+                    env = env_cls(render_mode="rgb_array")
+                except TypeError:
+                    env = env_cls()
+                    try:
+                        if hasattr(env, "render_mode"):
+                            env.render_mode = "rgb_array"
+                    except Exception:
+                        pass
+                tasks = getattr(mt1, "train_tasks", None)
                 if tasks:
                     env.set_task(tasks[0])
                 current_image, current_proprio, _ = _reset_env(env, seed=seed)
@@ -746,6 +1054,22 @@ def rollout_with_chunks(
             current_proprio = proprio_seq[0]
             env_done = False
 
+    comparison_root_path = Path(comparison_root) if comparison_root is not None else None
+    episode_strip_parts: list[Path] = []
+    start_frame_similarity = None
+    reset_frame_warning = False
+    if start_frame is not None:
+        try:
+            start_frame_similarity = _frame_similarity(current_image, start_frame)
+            if start_frame_similarity > float(reset_frame_warning_threshold):
+                reset_frame_warning = True
+                print(
+                    f"[segment_grpo] reset frame mismatch for episode {episode_index}: "
+                    f"distance={start_frame_similarity:.6f}, threshold={reset_frame_warning_threshold:.3f}"
+                )
+        except Exception as exc:
+            print(f"[segment_grpo] reset frame compare failed for episode {episode_index}: {exc}")
+
     if smolvla_bundle is None:
         if not dry_run:
             raise RuntimeError("SmolVLA bundle is required when not in dry-run mode.")
@@ -757,6 +1081,7 @@ def rollout_with_chunks(
             wm_bundle,
             fallback_image=current_image,
             fallback_proprio=current_proprio,
+            goal_frame=goal_frame,
         )
     else:
         goal_latent = None
@@ -772,12 +1097,19 @@ def rollout_with_chunks(
         chunk_len=chunk_len,
         num_candidates=num_candidates,
         max_steps=max_steps,
+        goal_frame_index=(int(goal_frame_index) if goal_frame_index is not None else None),
+        goal_source=goal_source,
+        start_frame_similarity=start_frame_similarity,
+        reset_frame_warning=bool(reset_frame_warning),
         metadata={
             "dry_run": dry_run,
             "wm_loaded": wm_bundle is not None,
             "goal_latent_loaded": goal_latent is not None,
+            "goal_frame_index": int(goal_frame_index) if goal_frame_index is not None else None,
+            "goal_source": goal_source,
             "carry_mode": carry_mode,
             "train_steps": int(train_steps),
+            "wm_rollout_mode": str(wm_rollout_mode),
         },
     )
 
@@ -788,6 +1120,8 @@ def rollout_with_chunks(
         effective_len = min(chunk_len, max_steps - current_step)
 
         segment_candidates: list[ChunkCandidate] = []
+        candidate_traces: dict[int, list[np.ndarray] | None] = {}
+        segment_real_frames: list[np.ndarray] = [np.asarray(current_image, copy=True)]
         for candidate_idx in range(num_candidates):
             if smolvla_bundle is not None and not dry_run:
                 chunk = _sample_smolvla_chunk(
@@ -803,20 +1137,32 @@ def rollout_with_chunks(
                 chunk = _synthetic_chunk(planner_action_dim, effective_len, candidate_idx, rng)
 
             # Score by latent distance when possible; fallback to deterministic synthetic score otherwise.
+            latent_trace: list[np.ndarray] | None = None
             if wm_bundle is not None and goal_latent is not None:
                 try:
-                    distance = score_chunk_by_goal_latent(
-                        wm_bundle, current_image, current_proprio, chunk, goal_latent, chunk_len=effective_len
+                    distance, latent_trace = score_chunk_by_goal_latent(
+                        wm_bundle,
+                        current_image,
+                        current_proprio,
+                        chunk,
+                        goal_latent,
+                        chunk_len=effective_len,
+                        return_latent_trace=True,
+                        wm_rollout_mode=wm_rollout_mode,
                     )
                     score = -distance
                 except Exception:
                     chunk_flat = np.asarray(chunk, dtype=np.float32).reshape(-1)
                     distance = float(np.linalg.norm(chunk_flat))
                     score = -distance
+                    latent_trace = None
             else:
                 chunk_flat = np.asarray(chunk, dtype=np.float32).reshape(-1)
                 distance = float(np.linalg.norm(chunk_flat))
                 score = -distance
+                latent_trace = None
+
+            candidate_traces[int(candidate_idx)] = latent_trace
 
             segment_candidates.append(
                 ChunkCandidate(
@@ -827,6 +1173,7 @@ def rollout_with_chunks(
                     meta={
                         "planner_action_dim": int(planner_action_dim),
                         "effective_chunk_len": int(effective_len),
+                        "latent_trace_len": 0 if latent_trace is None else int(len(latent_trace)),
                     },
                 )
             )
@@ -835,6 +1182,8 @@ def rollout_with_chunks(
         selected_idx = int(best.index)
         selected_distance = best.latent_distance if best.latent_distance is not None else None
         best_actions = _ensure_action_matrix(best.actions, planner_action_dim, effective_len)
+        selected_trace = candidate_traces.get(selected_idx)
+        pred_frames: list[np.ndarray] = []
 
         executed_actions: list[list[float]] = []
         segment_done = False
@@ -847,6 +1196,7 @@ def rollout_with_chunks(
                 carried_steps += 1
                 current_step += 1
                 executed_actions.append(action_env.tolist())
+                segment_real_frames.append(np.asarray(current_image, copy=True))
                 if step_done:
                     segment_done = True
                     env_done = True
@@ -856,11 +1206,13 @@ def rollout_with_chunks(
             target_idx = min(replay_idx + effective_len, len(proprio_seq) - 1)
             if replay_idx < target_idx:
                 actual = target_idx - replay_idx
+                step_start = int(replay_idx)
                 replay_idx = target_idx
                 current_image = images[replay_idx]
                 current_proprio = proprio_seq[replay_idx]
                 carried_steps = int(actual)
                 current_step += actual
+                segment_real_frames.extend(np.asarray(images[i], copy=True) for i in range(step_start + 1, replay_idx + 1))
                 executed_actions.extend(
                     [_take_action_for_env(best_actions[i], int(env_action_dim)).tolist() for i in range(actual)]
                 )
@@ -877,10 +1229,12 @@ def rollout_with_chunks(
                 segment_done = True
                 env_done = True
             else:
+                step_start = int(replay_idx)
                 replay_idx = target_idx
                 current_image = images[replay_idx]
                 current_proprio = proprio_seq[replay_idx]
                 current_step += actual
+                segment_real_frames.extend(np.asarray(images[i], copy=True) for i in range(step_start + 1, replay_idx + 1))
                 executed_actions.extend(
                     [_take_action_for_env(best_actions[i], int(env_action_dim)).tolist() for i in range(actual)]
                 )
@@ -888,10 +1242,21 @@ def rollout_with_chunks(
                     segment_done = True
                     env_done = True
 
+        if wm_bundle is not None and selected_trace is not None:
+            pred_frames = _decode_latent_trace_to_frames(wm_bundle, selected_trace)
+        if comparison_root_path is not None and selected_trace is not None:
+            segment_path = _write_comparison_segment_strip(
+                comparison_root_path, episode_index, segment_idx, segment_real_frames, pred_frames
+            )
+            if segment_path is not None:
+                episode_strip_parts.append(segment_path)
+
         episode_log.actions.extend(executed_actions)
         episode_log.latent_scores.append(0.0 if selected_distance is None else float(selected_distance))
         episode_log.selected_scores.append(float(best.score))
         episode_log.selected_indices.append(selected_idx)
+        episode_log.selected_candidate_indices.append(selected_idx)
+        episode_log.candidate_distances.append(0.0 if selected_distance is None else float(selected_distance))
 
         episode_log.segments.append(
             SegmentLog(
@@ -919,6 +1284,15 @@ def rollout_with_chunks(
                 device=wm_bundle.device if wm_bundle is not None else _resolve_device("cpu"),
                 adapter=adapter,
             )
+
+    if comparison_root_path is not None and episode_strip_parts:
+        episode_log.comparison_strip_path = str(
+            _stitch_comparison_strip(
+                episode_strip_parts,
+                comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png",
+            )
+            or comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png"
+        )
 
     if env is not None:
         try:
