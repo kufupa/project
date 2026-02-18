@@ -52,6 +52,7 @@ def test_parse_args_defaults_match_smolvla_parity(monkeypatch):
     assert args.max_steps == 120
     assert args.camera_name == "corner2"
     assert args.flip_corner2 == "true"
+    assert args.action_telemetry == "true"
 
 
 def test_render_rgb_frame_flips_corner2():
@@ -78,6 +79,24 @@ def test_render_rgb_frame_flips_corner2():
         dtype=np.uint8,
     )
     np.testing.assert_array_equal(frame, expected)
+
+
+def test_safe_success_supports_array_shapes():
+    mod = _load_oracle_eval_module()
+    assert mod._safe_success({"success": [1]}) is True
+    assert mod._safe_success({"is_success": [0, 1]}) is True
+    assert mod._safe_success({"success": (0.0,)}) is False
+    assert mod._safe_success({"is_success": np.array([])}) is False
+    assert mod._safe_success({"is_success": np.array([0.0, 1.0])}) is True
+
+
+def test_clip_action_logs_bounds():
+    mod = _load_oracle_eval_module()
+    action = np.array([2.5, -2.2, 0.4], dtype=np.float32)
+    action_raw, action_clipped, out_of_bounds = mod._clip_action(action)
+    assert action_raw == [2.5, -2.2, 0.4]
+    assert action_clipped == [1.0, -1.0, 0.4]
+    assert out_of_bounds is True
 
 
 def _load_oracle_parity_module():

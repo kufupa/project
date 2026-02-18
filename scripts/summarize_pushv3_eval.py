@@ -236,6 +236,12 @@ def _summary_block(
     }
 
 
+def _episode_sort_key(row: Mapping[str, Any]) -> tuple[float, float, int]:
+    sum_reward = row.get("sum_reward")
+    sum_value = float(sum_reward) if isinstance(sum_reward, (int, float)) else float("-inf")
+    return (-float(row["max_reward"]), -sum_value, int(row["episode_index"]))
+
+
 def main() -> int:
     args = parse_args()
     if args.top_k < 1:
@@ -263,7 +269,7 @@ def main() -> int:
     episode_rows = _extract_episode_rows(task_metrics, video_overrides)
     top_k = sorted(
         episode_rows,
-        key=lambda row: (-float(row["max_reward"]), int(row["episode_index"])),
+        key=_episode_sort_key,
     )[: args.top_k]
 
     summary = _summary_block(
