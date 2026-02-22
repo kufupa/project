@@ -12,6 +12,7 @@ MIN_VIDEO_BYTES="${SMOLVLA_MIN_VIDEO_BYTES:-1024}"
 EVAL_MODE="${SMOLVLA_EVAL_MODE:-parity}"
 EPISODES_PER_TARGET="${SMOLVLA_EPISODES_PER_TARGET:-1}"
 SAVE_FRAMES="${SMOLVLA_SAVE_FRAMES:-false}"
+TARGET_RUN_ROOT="${SMOLVLA_TARGET_RUN_ROOT:-}"
 
 case "${EVAL_MODE}" in
   parity)
@@ -93,13 +94,17 @@ RANK="${TARGET_FIELDS[3]}"
 export SMOLVLA_TARGET_EPISODE_INDEX="${EPISODE_INDEX}"
 export SMOLVLA_FIXED_RESET_SEED="${SEED}"
 
-RUN_DIR="$(
-  PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
-  OUTPUT_ROOT="${OUTPUT_ROOT}" \
-  TASK="${TASK}" \
-  SEED="${SEED}" \
-  EPISODES="${EPISODES_PER_TARGET}" \
-  "${PYTHON_BIN}" - <<'PY'
+if [[ -n "${TARGET_RUN_ROOT}" ]]; then
+  RUN_DIR="${TARGET_RUN_ROOT}/${SEED}"
+  mkdir -p "${RUN_DIR}"
+else
+  RUN_DIR="$(
+    PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+    OUTPUT_ROOT="${OUTPUT_ROOT}" \
+    TASK="${TASK}" \
+    SEED="${SEED}" \
+    EPISODES="${EPISODES_PER_TARGET}" \
+    "${PYTHON_BIN}" - <<'PY'
 import os
 from pathlib import Path
 
@@ -114,7 +119,8 @@ run_dir = ensure_unique_run_dir(
 )
 print(str(run_dir))
 PY
-)"
+  )"
+fi
 
 if command -v xvfb-run >/dev/null 2>&1; then
   xvfb-run -a -s "-screen 0 1280x1024x24" \
