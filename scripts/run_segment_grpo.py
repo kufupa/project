@@ -106,6 +106,16 @@ def _parse_args() -> argparse.Namespace:
         default="iterative",
         help="WM latent rollout for chunk scoring: iterative (one unroll per action) or batched (single unroll).",
     )
+    parser.add_argument(
+        "--strict-wm-scoring",
+        action="store_true",
+        help="Fail rollout when WM scoring raises; otherwise fall back with metadata.",
+    )
+    parser.add_argument(
+        "--strict-decode",
+        action="store_true",
+        help="Fail rollout when decode reconstruction fails; otherwise record failure metadata.",
+    )
     return parser.parse_args()
 
 
@@ -319,6 +329,8 @@ def main() -> int:
             train_steps=int(args.train_steps),
             dry_run=args.dry_run,
             adapter=adapter,
+            strict_wm_scoring=bool(args.strict_wm_scoring),
+            strict_decode=bool(args.strict_decode),
             wm_rollout_mode=str(args.wm_rollout_mode),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
@@ -368,6 +380,8 @@ def main() -> int:
                 "output_json": str(output_json_base),
                 "goal_frame_index": int(args.goal_frame_index),
                 "wm_rollout_mode": str(args.wm_rollout_mode),
+                "strict_wm_scoring": bool(args.strict_wm_scoring),
+                "strict_decode": bool(args.strict_decode),
                 "episodes_info": episode_summaries,
                 "run_dir": str(run_dir) if run_dir is not None else None,
             },
