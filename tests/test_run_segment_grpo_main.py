@@ -29,11 +29,14 @@ def test_parse_args_accepts_strict_controls(monkeypatch: pytest.MonkeyPatch, tmp
             str(tmp_path / "out.json"),
             "--strict-wm-scoring",
             "--strict-decode",
+            "--wm-scoring-latent",
+            "concat",
         ],
     )
     args = _parse_args()
     assert args.strict_wm_scoring is True
     assert args.strict_decode is True
+    assert args.wm_scoring_latent == "concat"
 
 
 def _make_goal_latent_file(path: Path) -> None:
@@ -203,6 +206,8 @@ def test_main_manifest_includes_strict_controls(tmp_path: Path, monkeypatch: pyt
             "--dry-run",
             "--strict-wm-scoring",
             "--strict-decode",
+            "--wm-scoring-latent",
+            "proprio",
         ],
     )
 
@@ -212,10 +217,16 @@ def test_main_manifest_includes_strict_controls(tmp_path: Path, monkeypatch: pyt
     def _fake_resolve_oracle_run(*_args: object, **_kwargs: object) -> None:
         return None
 
-    calls: list[tuple[bool, bool]] = []
+    calls: list[tuple[bool, bool, str]] = []
 
     def _fake_rollout_with_chunks(*_args: object, **kwargs: object):
-        calls.append((bool(kwargs["strict_wm_scoring"]), bool(kwargs["strict_decode"])))
+        calls.append(
+            (
+                bool(kwargs["strict_wm_scoring"]),
+                bool(kwargs["strict_decode"]),
+                str(kwargs["wm_scoring_latent"]),
+            )
+        )
         episode_index = int(kwargs["episode_index"])
         return _FakeEpisode(episode_index), None
 
@@ -234,6 +245,7 @@ def test_main_manifest_includes_strict_controls(tmp_path: Path, monkeypatch: pyt
     manifest = captured[manifest_path]
     assert manifest["strict_wm_scoring"] is True
     assert manifest["strict_decode"] is True
+    assert manifest["wm_scoring_latent"] == "proprio"
     assert manifest["episodes"] == 2
     assert len(manifest["episodes_info"]) == 2  # type: ignore[arg-type]
-    assert all(item == (True, True) for item in calls)
+    assert all(item == (True, True, "proprio") for item in calls)
