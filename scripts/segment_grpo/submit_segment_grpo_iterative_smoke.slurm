@@ -34,4 +34,7 @@ export JEPA_REPO="${JEPA_REPO:-${HOME}/.cache/torch/hub/facebookresearch_jepa-wm
   --num-candidates 2 \
   --max-steps 120 \
   --wm-rollout-mode iterative \
-  --device cuda
+  --device cuda \
+  --wm-sim-camera-parity \
+  --wm-sim-img-size 224 \
+  --wm-goal-hflip \
