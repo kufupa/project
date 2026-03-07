@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 from segment_grpo_loop import (
     DecodeTrace,
     _decode_latent_trace_to_frames,
+    _derive_policy_rgb_for_smolvla,
     _ensure_action_matrix,
     _normalize_env_actions_for_wm,
     _pack_env_actions_for_wm,
@@ -743,8 +744,67 @@ def test_wm_iterative_unroll_once_per_packed_wm_step() -> None:
     assert model.calls == 2
 
 
+def test_derive_policy_rgb_hflip_only_under_jepa_parity() -> None:
+    img = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
+    out_parity = _derive_policy_rgb_for_smolvla(
+        img, jepa_parity_sim=True, policy_hflip_corner2=True
+    )
+    np.testing.assert_array_equal(out_parity, np.flip(img, axis=1))
+    out_no = _derive_policy_rgb_for_smolvla(
+        img, jepa_parity_sim=False, policy_hflip_corner2=True
+    )
+    np.testing.assert_array_equal(out_no, img)
+    out_flag_off = _derive_policy_rgb_for_smolvla(
+        img, jepa_parity_sim=True, policy_hflip_corner2=False
+    )
+    np.testing.assert_array_equal(out_flag_off, img)
+
+
+def test_sample_smolvla_chunk_zero_noise_repeats_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _exec(*_a: object, **_k: object) -> np.ndarray:
+        return np.array([0.5, -0.25, 0.0, 0.1], dtype=np.float32)
+
+    fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action = _exec
+    monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
+    rng = np.random.default_rng(999)
+    chunk = _sample_smolvla_chunk(
+        smolvla_bundle=object(),
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_len=4,
+        env_action_dim=4,
+        task_text="t",
+        rng=rng,
+        noise_std=0.0,
+    )
+    assert chunk.shape == (4, 4)
+    for i in range(1, 4):
+        np.testing.assert_array_equal(chunk[i], chunk[0])
+
+
+def test_sample_smolvla_chunk_positive_noise_varies_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _exec(*_a: object, **_k: object) -> np.ndarray:
+        return np.zeros(4, dtype=np.float32)
+
+    fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action = _exec
+    monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
+    rng = np.random.default_rng(42)
+    chunk = _sample_smolvla_chunk(
+        smolvla_bundle=object(),
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_len=5,
+        env_action_dim=4,
+        task_text="t",
+        rng=rng,
+        noise_std=0.5,
+    )
+    assert not np.allclose(chunk[0], chunk[1])
+
+
 def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("torch")
     fake_helper = SimpleNamespace()
 
     def _exec(*_a: object, **_k: object) -> np.ndarray:
@@ -761,6 +821,7 @@ def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch
         env_action_dim=4,
         task_text="t",
         rng=rng,
+        noise_std=0.1,
     )
     assert chunk.shape == (3, 4)
 

@@ -35,6 +35,39 @@ def test_parse_args_wm_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert args.wm_sim_img_size == 224
 
 
+def test_parse_args_smolvla_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+        ],
+    )
+    args = _parse_args()
+    assert args.smolvla_policy_hflip_corner2 is True
+    assert args.smolvla_noise_std == 0.0
+
+
+def test_parse_args_smolvla_flags_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--no-smolvla-policy-hflip-corner2",
+            "--smolvla-noise-std",
+            "0.1",
+        ],
+    )
+    args = _parse_args()
+    assert args.smolvla_policy_hflip_corner2 is False
+    assert args.smolvla_noise_std == pytest.approx(0.1)
+
+
 def test_parse_args_wm_parity_optional_negation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         sys,
