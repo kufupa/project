@@ -35,6 +35,35 @@ def test_parse_args_wm_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert args.wm_sim_img_size == 224
 
 
+def test_parse_args_comparison_strip_overlay_default_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+        ],
+    )
+    args = _parse_args()
+    assert args.comparison_strip_overlay is False
+
+
+def test_parse_args_comparison_strip_overlay_enable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--comparison-strip-overlay",
+        ],
+    )
+    args = _parse_args()
+    assert args.comparison_strip_overlay is True
+
+
 def test_parse_args_smolvla_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         sys,

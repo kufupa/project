@@ -731,12 +731,73 @@ def _select_comparison_frames(
     return list(real_frames[:limit]), list(pred_frames[:limit])
 
 
+def _comparison_ridx_for_column(
+    pair_index: int,
+    *,
+    factor: int,
+    carried_steps: int,
+) -> int:
+    """Match `_select_comparison_frames` real frame index for column `pair_index`."""
+    f = max(1, int(factor))
+    cs = max(0, int(carried_steps))
+    if f > 1:
+        return min((int(pair_index) + 1) * f, cs)
+    return int(pair_index)
+
+
+def _overlay_decode_panel_metadata(pred_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
+    """Draw small semi-opaque box + text on WM decode panel (bottom of strip column)."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    base = _to_rgb_uint8(pred_rgb)
+    img = Image.fromarray(base).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = ImageFont.load_default()
+    for fp in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+    ):
+        try:
+            font = ImageFont.truetype(fp, 11)
+            break
+        except OSError:
+            continue
+
+    line_spacing = 2
+    tw, th = 0, 0
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        tw = max(tw, bbox[2] - bbox[0])
+        th += bbox[3] - bbox[1] + line_spacing
+    th = max(0, th - line_spacing)
+    pad = 4
+    x0, y0 = 2, 2
+    x1, y1 = x0 + tw + 2 * pad, y0 + th + 2 * pad
+    x1 = min(int(img.size[0]) - 1, x1)
+    y1 = min(int(img.size[1]) - 1, y1)
+    draw.rectangle((x0, y0, x1, y1), fill=(0, 0, 0, 210))
+    ty = y0 + pad
+    for line in lines:
+        draw.text((x0 + pad, ty), line, fill=(255, 255, 255, 255), font=font)
+        bb = draw.textbbox((0, 0), line, font=font)
+        ty += bb[3] - bb[1] + line_spacing
+    out = Image.alpha_composite(img, overlay)
+    return np.asarray(out.convert("RGB"), dtype=np.uint8)
+
+
 def _build_real_vs_pred_strip(
     real_frames: list[np.ndarray],
     pred_frames: list[np.ndarray],
     *,
     carried_steps: int | None = None,
     env_steps_per_wm_step: int | None = None,
+    overlay_decode_meta: bool = False,
+    overlay_episode_index: int | None = None,
+    overlay_segment_index: int | None = None,
+    overlay_env_step_start: int | None = None,
+    overlay_selected_candidate_index: int | None = None,
+    overlay_wm_env_steps_per_wm_step: int = 1,
 ) -> np.ndarray:
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
@@ -749,6 +810,8 @@ def _build_real_vs_pred_strip(
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
     total = len(real_frames)
+    factor = int(env_steps_per_wm_step or 1)
+    cs = 0 if carried_steps is None else int(carried_steps)
     pairs: list[np.ndarray] = []
     for idx in range(total):
         real_rgb = _to_rgb_uint8(real_frames[idx])
@@ -757,6 +820,19 @@ def _build_real_vs_pred_strip(
             from PIL import Image
 
             pred_rgb = np.array(Image.fromarray(pred_rgb).resize((real_rgb.shape[1], real_rgb.shape[0])))
+        if overlay_decode_meta and overlay_env_step_start is not None:
+            ridx = _comparison_ridx_for_column(idx, factor=factor, carried_steps=cs)
+            env_t = int(overlay_env_step_start) + int(ridx)
+            ep = int(overlay_episode_index) if overlay_episode_index is not None else -1
+            seg = int(overlay_segment_index) if overlay_segment_index is not None else -1
+            cand = int(overlay_selected_candidate_index) if overlay_selected_candidate_index is not None else -1
+            lines = [
+                f"ep{ep:04d} seg{seg:04d}",
+                f"real_i{ridx:02d} env_t{env_t:04d}",
+                f"wm_dec {idx + 1}/{total} f{max(1, factor)}",
+                f"cand{cand:03d}",
+            ]
+            pred_rgb = _overlay_decode_panel_metadata(pred_rgb, lines)
         pairs.append(np.concatenate([real_rgb, pred_rgb], axis=0))
     return np.concatenate(pairs, axis=1)
 
@@ -793,6 +869,7 @@ def _write_comparison_segment_strip(
     carried_steps: int | None = None,
     env_steps_per_wm_step: int | None = None,
     wm_env_steps_per_wm_step: int = 1,
+    overlay_decode_meta: bool = False,
 ) -> tuple[Path | None, str | None]:
     if carried_steps is not None and int(carried_steps) <= 0:
         return None, None
@@ -805,6 +882,12 @@ def _write_comparison_segment_strip(
             pred_frames,
             carried_steps=carried_steps,
             env_steps_per_wm_step=env_steps_per_wm_step,
+            overlay_decode_meta=bool(overlay_decode_meta),
+            overlay_episode_index=int(episode_index),
+            overlay_segment_index=int(segment_index),
+            overlay_env_step_start=int(env_step_start),
+            overlay_selected_candidate_index=int(selected_candidate_index),
+            overlay_wm_env_steps_per_wm_step=int(wm_env_steps_per_wm_step),
         )
     except Exception as exc:
         reason = f"Failed to build comparison strip for episode {episode_index} segment {segment_index}: {exc}"
@@ -1772,6 +1855,7 @@ def rollout_with_chunks(
     wm_sim_img_size: int = 224,
     smolvla_policy_hflip_corner2: bool = True,
     smolvla_noise_std: float = 0.0,
+    comparison_strip_overlay: bool = False,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -1929,6 +2013,7 @@ def rollout_with_chunks(
             "wm_sim_img_size": int(wm_sim_img_size),
             "smolvla_policy_hflip_corner2": bool(smolvla_policy_hflip_corner2),
             "smolvla_noise_std": float(smolvla_noise_std),
+            "comparison_strip_overlay": bool(comparison_strip_overlay),
             "wm_goal_for_encode_path": wm_goal_encode_dbg_path,
             "strict_wm_scoring": bool(strict_wm_scoring),
             "strict_decode": bool(strict_decode),
@@ -2212,6 +2297,7 @@ def rollout_with_chunks(
                 carried_steps=carried_steps,
                 env_steps_per_wm_step=wm_stride if wm_stride > 1 else None,
                 wm_env_steps_per_wm_step=wm_stride,
+                overlay_decode_meta=bool(comparison_strip_overlay),
             )
             if segment_path is not None:
                 segment_comparison_path = segment_path
