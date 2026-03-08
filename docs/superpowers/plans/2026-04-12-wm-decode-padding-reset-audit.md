@@ -199,7 +199,7 @@ flowchart TB
 **Files:** `segment_grpo_loop.py`, `run_segment_grpo.py`, tests.
 
 - [ ] Candidate meta already includes `wm_env_steps_per_wm_step`, `effective_chunk_len`, `env_action_dim`, decode status; verify JSON episode logs from a real run.
-- [ ] Artifact paths: per-segment `comparison/episode_XXXX/segment_XXXX/comparison_strip.png`, stitched `episode_XXXX_comparison_strip.png`.
+- [ ] Artifact paths: per-segment PNGs flat under `comparison/episode_XXXX/` with names like `comparison_strip_steps_SSSS_to_EEEE_segSSSS_candCCC.png` (optional `wmfNN_` prefix when WM stride is greater than 1); stitched `episode_XXXX_comparison_strip.png`.
 - [ ] Optional improvement: single startup log line `wm_dim`, `env_dim`, `factor` when bundle loads.
 
 ---
@@ -280,7 +280,7 @@ From [`run_segment_grpo.py`](../../../scripts/run_segment_grpo.py) (approx. L314
 
 - Episode JSON path: `episode_output` from `_resolve_output_path(...)`.
 - `artifact_dir = episode_output.parent / f"{episode_output.stem}_artifacts"`.
-- **`comparison_root = artifact_dir / "comparison"`** — per-segment strips live under `comparison/episode_XXXX/segment_XXXX/comparison_strip.png`; stitched episode strip: `comparison/episode_XXXX_comparison_strip.png` (see `rollout_with_chunks` + `_stitch_comparison_strip`).
+- **`comparison_root = artifact_dir / "comparison"`** — per-segment strips are flat files under `comparison/episode_XXXX/` (descriptive basenames from `_comparison_strip_basename`); stitched episode strip: `comparison/episode_XXXX_comparison_strip.png` (see `rollout_with_chunks` + `_stitch_comparison_strip`).
 
 **Executor checklist:** Open the emitted `EpisodeLog` JSON; inspect `metadata`, per-`segments[].metadata`, and `segments[].candidates[].meta` for `wm_env_steps_per_wm_step`, `decode_status`, `carried_steps` (on `SegmentLog`), and failure strings.
 
