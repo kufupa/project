@@ -36,7 +36,7 @@ overview: Full audit plan (zero-context friendly) for segment-GRPO WM pipeline�
 | `act_suffix` | Tensor passed to `model.unroll(..., act_suffix=...)`, shape `(T_wm, B, wm_dim)` with `B=1` here. |
 | `chunk_len` / `effective_len` | Number of **env** actions in the candidate chunk (CLI `--chunk-len`). |
 | `carried_steps` | How many **env** steps actually executed for the **selected** chunk this segment. |
-| Comparison strip | PNG: per column, **vertical** stack `concat([real, pred], axis=0)` — **sim render top**, **WM decode bottom**; stitched across segments. Optional `--comparison-strip-overlay` (default off): small box + text on **decode panel only** (`ep`, `seg`, `real_i`, `env_t`, `wm_dec k/N`, `f`, `cand`). |
+| Comparison strip | PNG: per column, **vertical** stack `concat([real, pred], axis=0)` — **sim render top**, **WM decode bottom**; stitched across segments. Optional `--comparison-strip-overlay` (default off): small box + text on **decode panel only** — L2 **d** to goal latent + **Δ** vs previous (pre-unroll initial for first column), plus `real_i`, `env_t`, `wm_dec k/N`, `f`, `cand`. |
 
 ### 0.3 Where “truth” is documented in-repo
 
