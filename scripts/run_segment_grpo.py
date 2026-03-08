@@ -166,6 +166,15 @@ def _parse_args() -> argparse.Namespace:
         help="Std dev of Gaussian noise added per chunk timestep to SmolVLA base action (default 0 = deterministic).",
     )
     parser.add_argument(
+        "--smolvla-n-action-steps",
+        type=int,
+        default=1,
+        help=(
+            "SmolVLA policy horizon: number of actions predicted per chunk forward "
+            "(predict_action_chunk). Must be >= 1 (default 1 = legacy single-step repeat)."
+        ),
+    )
+    parser.add_argument(
         "--comparison-strip-overlay",
         default=COMPARISON_STRIP_OVERLAY_DEFAULT,
         action=argparse.BooleanOptionalAction,
@@ -183,7 +192,10 @@ def _parse_args() -> argparse.Namespace:
             "0 disables (default: %(default)s)."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if int(args.smolvla_n_action_steps) < 1:
+        parser.error("--smolvla-n-action-steps must be >= 1")
+    return args
 
 
 def _resolve_output_path(base: Path, episode_idx: int, episodes: int) -> Path:
@@ -292,6 +304,7 @@ def main() -> int:
         f"wm_sim_img_size={args.wm_sim_img_size} "
         f"smolvla_policy_hflip_corner2={args.smolvla_policy_hflip_corner2} "
         f"smolvla_noise_std={args.smolvla_noise_std} "
+        f"smolvla_n_action_steps={args.smolvla_n_action_steps} "
         f"comparison_strip_overlay={args.comparison_strip_overlay} "
         f"comparison_strip_stitch_gutter_pixels={args.comparison_strip_stitch_gutter_pixels}"
     )
@@ -299,7 +312,11 @@ def main() -> int:
     smolvla_bundle = None
     try:
         if args.checkpoint:
-            smolvla_bundle = load_smolvla_bundle(args.checkpoint, device)
+            smolvla_bundle = load_smolvla_bundle(
+                args.checkpoint,
+                device,
+                n_action_steps=int(args.smolvla_n_action_steps),
+            )
         elif args.dry_run:
             print("[segment_grpo] --checkpoint missing: using synthetic action fallback.")
         else:
@@ -415,6 +432,7 @@ def main() -> int:
             wm_sim_img_size=int(args.wm_sim_img_size),
             smolvla_policy_hflip_corner2=bool(args.smolvla_policy_hflip_corner2),
             smolvla_noise_std=float(args.smolvla_noise_std),
+            smolvla_n_action_steps=int(args.smolvla_n_action_steps),
             comparison_strip_overlay=bool(args.comparison_strip_overlay),
             comparison_strip_stitch_gutter_pixels=int(args.comparison_strip_stitch_gutter_pixels),
         )
