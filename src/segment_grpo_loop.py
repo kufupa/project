@@ -1703,7 +1703,9 @@ def _sample_smolvla_chunk(
     noise_std: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     helper = _load_jepa_helper_module()
-    obs = {"image": _to_rgb_uint8(image), "state": np.asarray(proprio, dtype=np.float32).reshape(-1)}
+    # Proprio only: dict obs with both image+state is flattened with sorted keys ("image" first),
+    # so _smolvla_exec_action* would fill state tensors from pixels. RGB comes from render_proxy.
+    obs = np.asarray(proprio, dtype=np.float32).reshape(-1)
 
     class _RenderProxy:
         def __init__(self, frame: np.ndarray):
