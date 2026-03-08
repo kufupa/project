@@ -754,6 +754,45 @@ def _comparison_ridx_for_column(
     return int(pair_index)
 
 
+def _comparison_strip_overlay_lines(
+    *,
+    column_idx: int,
+    total_columns: int,
+    factor: int,
+    carried_steps: int,
+    overlay_env_step_start: int,
+    overlay_selected_candidate_index: int | None,
+    wm_step_index: int,
+    d_full: list[float] | None,
+    delta_full: list[float] | None,
+    overlay_segment_index: int | None = None,
+) -> list[str]:
+    """Text lines for the WM decode overlay box (one comparison-strip column)."""
+    ridx = _comparison_ridx_for_column(column_idx, factor=factor, carried_steps=carried_steps)
+    env_t = int(overlay_env_step_start) + int(ridx)
+    cand = int(overlay_selected_candidate_index) if overlay_selected_candidate_index is not None else -1
+    lines: list[str] = []
+    k = int(wm_step_index)
+    if d_full is not None and delta_full is not None and 0 <= k < len(d_full):
+        d_k = d_full[k]
+        d_str = f"{d_k:.4f}" if np.isfinite(d_k) else "n/a"
+        dd = delta_full[k]
+        dd_str = f"{dd:+.4f}" if np.isfinite(dd) else "n/a"
+        lines.append(f"d {d_str}  Δ {dd_str}")
+    else:
+        lines.append("d n/a  Δ n/a")
+    if overlay_segment_index is not None:
+        lines.append(f"seg {int(overlay_segment_index):04d}")
+    lines.extend(
+        [
+            f"real_i{ridx:02d} env_t{env_t:04d}",
+            f"wm_dec {column_idx + 1}/{total_columns} f{max(1, factor)}",
+            f"cand{cand:03d}",
+        ]
+    )
+    return lines
+
+
 def _l2_goal_distance_np(vec: np.ndarray, goal: np.ndarray) -> float:
     """Euclidean distance to goal in shared prefix, matching WM scoring slice."""
     v = np.asarray(vec, dtype=np.float64).reshape(-1)
@@ -835,6 +874,7 @@ def _build_real_vs_pred_strip(
     overlay_wm_env_steps_per_wm_step: int = 1,
     overlay_goal_latent_np: np.ndarray | None = None,
     overlay_score_trace: ScoreTrace | None = None,
+    overlay_segment_index: int | None = None,
 ) -> np.ndarray:
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
@@ -873,22 +913,19 @@ def _build_real_vs_pred_strip(
 
             pred_rgb = np.array(Image.fromarray(pred_rgb).resize((real_rgb.shape[1], real_rgb.shape[0])))
         if overlay_decode_meta and overlay_env_step_start is not None:
-            ridx = _comparison_ridx_for_column(idx, factor=factor, carried_steps=cs)
-            env_t = int(overlay_env_step_start) + int(ridx)
-            cand = int(overlay_selected_candidate_index) if overlay_selected_candidate_index is not None else -1
-            lines = [
-                f"real_i{ridx:02d} env_t{env_t:04d}",
-                f"wm_dec {idx + 1}/{total} f{max(1, factor)}",
-                f"cand{cand:03d}",
-            ]
             k = int(pred_indices[idx]) if idx < len(pred_indices) else -1
-            if d_full is not None and delta_full is not None and 0 <= k < len(d_full):
-                d_str = f"{d_full[k]:.4f}" if np.isfinite(d_full[k]) else "n/a"
-                dd = delta_full[k]
-                dd_str = f"{dd:+.4f}" if np.isfinite(dd) else "n/a"
-                lines.insert(0, f"d {d_str}  Δ {dd_str}")
-            else:
-                lines.insert(0, "d n/a  Δ n/a")
+            lines = _comparison_strip_overlay_lines(
+                column_idx=idx,
+                total_columns=total,
+                factor=factor,
+                carried_steps=cs,
+                overlay_env_step_start=int(overlay_env_step_start),
+                overlay_selected_candidate_index=overlay_selected_candidate_index,
+                wm_step_index=k,
+                d_full=d_full,
+                delta_full=delta_full,
+                overlay_segment_index=overlay_segment_index,
+            )
             pred_rgb = _overlay_decode_panel_metadata(pred_rgb, lines)
         pairs.append(np.concatenate([real_rgb, pred_rgb], axis=0))
     return np.concatenate(pairs, axis=1)
@@ -947,6 +984,7 @@ def _write_comparison_segment_strip(
             overlay_wm_env_steps_per_wm_step=int(wm_env_steps_per_wm_step),
             overlay_goal_latent_np=overlay_goal_latent_np,
             overlay_score_trace=overlay_score_trace,
+            overlay_segment_index=int(segment_index) if overlay_decode_meta else None,
         )
     except Exception as exc:
         reason = f"Failed to build comparison strip for episode {episode_index} segment {segment_index}: {exc}"
@@ -980,7 +1018,13 @@ def _write_comparison_segment_strip(
         return None, reason
 
 
-def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> tuple[Path | None, str | None]:
+def _stitch_comparison_strip(
+    segments: list[Path],
+    output_path: Path,
+    *,
+    gutter_pixels: int = 0,
+    gutter_rgb: tuple[int, int, int] = (48, 48, 48),
+) -> tuple[Path | None, str | None]:
     if not segments:
         return None, None
 
@@ -1002,7 +1046,34 @@ def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> tuple[P
     if not strips:
         return None, "No comparison strip segments could be loaded."
     try:
-        stitched = np.concatenate(strips, axis=1)
+        gw = max(0, int(gutter_pixels))
+        normalized: list[np.ndarray] = []
+        target_h: int | None = None
+        for arr in strips:
+            if arr.ndim == 2:
+                return None, "Comparison strip segment must be RGB/RGBA (got grayscale)."
+            if arr.ndim != 3:
+                return None, "Comparison strip segment must be a 3-D array (H, W, C)."
+            h, _, c = arr.shape[0], arr.shape[1], arr.shape[2]
+            if target_h is None:
+                target_h = int(h)
+            elif int(h) != target_h:
+                return None, f"Comparison strip height mismatch for stitch: expected {target_h}, got {h}."
+            if c == 4:
+                arr = arr[:, :, :3]
+            elif c != 3:
+                return None, f"Comparison strip segment must have 3 or 4 channels; got {c}."
+            normalized.append(np.asarray(arr, dtype=np.uint8))
+
+        parts: list[np.ndarray] = []
+        for i, arr in enumerate(normalized):
+            parts.append(arr)
+            if gw > 0 and i < len(normalized) - 1:
+                fill = np.array(gutter_rgb, dtype=np.uint8).reshape(1, 1, 3)
+                gutter = np.tile(fill, (target_h, gw, 1))
+                parts.append(gutter)
+
+        stitched = np.concatenate(parts, axis=1)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         imageio.imwrite(output_path, stitched)
         return output_path, None
@@ -1922,6 +1993,7 @@ def rollout_with_chunks(
     smolvla_policy_hflip_corner2: bool = True,
     smolvla_noise_std: float = 0.0,
     comparison_strip_overlay: bool = False,
+    comparison_strip_stitch_gutter_pixels: int = 0,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -2080,6 +2152,7 @@ def rollout_with_chunks(
             "smolvla_policy_hflip_corner2": bool(smolvla_policy_hflip_corner2),
             "smolvla_noise_std": float(smolvla_noise_std),
             "comparison_strip_overlay": bool(comparison_strip_overlay),
+            "comparison_strip_stitch_gutter_pixels": int(comparison_strip_stitch_gutter_pixels),
             "wm_goal_for_encode_path": wm_goal_encode_dbg_path,
             "strict_wm_scoring": bool(strict_wm_scoring),
             "strict_decode": bool(strict_decode),
@@ -2434,6 +2507,7 @@ def rollout_with_chunks(
         stitched_path, stitched_failure_reason = _stitch_comparison_strip(
             episode_strip_parts,
             comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png",
+            gutter_pixels=int(comparison_strip_stitch_gutter_pixels),
         )
         if stitched_path is not None:
             episode_log.comparison_strip_path = str(stitched_path)
