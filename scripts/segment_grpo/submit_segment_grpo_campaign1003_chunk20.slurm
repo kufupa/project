@@ -29,7 +29,7 @@ export JEPA_REPO="${JEPA_REPO:-${HOME}/.cache/torch/hub/facebookresearch_jepa-wm
 
 echo "[seggrpo-c1003-c20] SMOLVLA_CHECKPOINT=${SMOLVLA_CHECKPOINT}"
 echo "[seggrpo-c1003-c20] JEPA_REPO=${JEPA_REPO}"
-echo "[seggrpo-c1003-c20] chunk-len=20 max-steps=120 episode-index=3 reset-seed=1003 overlay=on"
+echo "[seggrpo-c1003-c20] chunk-len=20 smolvla-n-action-steps=20 max-steps=120 episode-index=3 reset-seed=1003 overlay=on"
 
 "${PY}" scripts/run_segment_grpo.py \
   --checkpoint "${SMOLVLA_CHECKPOINT}" \
@@ -40,6 +40,7 @@ echo "[seggrpo-c1003-c20] chunk-len=20 max-steps=120 episode-index=3 reset-seed=
   --reset-seed 1003 \
   --goal-frame-index 25 \
   --chunk-len 20 \
+  --smolvla-n-action-steps 20 \
   --num-candidates 2 \
   --max-steps 120 \
   --carry-mode sim \
