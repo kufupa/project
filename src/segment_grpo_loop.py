@@ -874,6 +874,28 @@ def _all_candidates_wm_goal_l2_rows(
     return lines, json_rows, int(max_k)
 
 
+def _wm_megastep_action_range_footer_line(
+    *,
+    carried_steps: int,
+    wm_stride: int,
+    wm_step_count: int,
+    title: str = "action range",
+    cell_width: int = 6,
+) -> str:
+    """Footer header row showing half-open action ranges per WM megastep."""
+    c = int(carried_steps)
+    step_count = int(wm_step_count)
+    if c <= 0 or step_count <= 0:
+        return title
+    f = max(1, int(wm_stride))
+    ranges: list[str] = []
+    for k in range(step_count):
+        lo = k * f
+        hi = min((k + 1) * f, c)
+        ranges.append(f"{lo}:{hi}".rjust(cell_width))
+    return title + "  " + " ".join(ranges)
+
+
 def _append_wm_megastep_footer(
     strip_rgb: np.ndarray,
     lines: list[str],
@@ -929,7 +951,7 @@ def _append_wm_megastep_footer(
     for line in draw_lines:
         if ty > footer_h - pad:
             break
-        draw.text((4, min(ty, footer_h - 1)), str(line)[:240], fill=(255, 255, 255), font=font)
+        draw.text((4, min(ty, footer_h - 1)), str(line), fill=(255, 255, 255), font=font)
         ty += line_h + line_spacing
     foot_np = np.asarray(footer, dtype=np.uint8)
     return np.concatenate([base, foot_np], axis=0)
@@ -2648,9 +2670,13 @@ def rollout_with_chunks(
                 num_candidates=int(num_candidates),
             )
             if wm_lines:
-                wm_footer_lines = wm_lines
+                wm_footer_lines = [_wm_megastep_action_range_footer_line(
+                    carried_steps=int(carried_steps),
+                    wm_stride=wm_stride,
+                    wm_step_count=wm_step_count,
+                )] + wm_lines
                 candidate_wm_goal_l2_meta = wm_meta
-                wm_footer_min_lines = 1 + int(num_candidates)
+                wm_footer_min_lines = 2 + int(num_candidates)
                 if wm_step_count > 0:
                     segment_metadata["wm_step_count"] = int(wm_step_count)
 
