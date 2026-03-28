@@ -8,7 +8,8 @@
 #SBATCH --error=/vol/bitbucket/aa6622/project/logs/seggrpo_campaign1003_chunk30_max30_k5_%j.err
 #
 # Campaign 1003: one segment (max_steps=30), chunk_len=30, SmolVLA horizon 30, K=5 candidates,
-# goal_frame_index=25. WM f=5 => 6 decode columns; PNG footer = all candidates' int L2(goal) per WM step.
+# goal_frame_index=25 from oracle frames/episode_0003/ (not other episodes). WM f=5 => 6 decode columns;
+# PNG footer = all candidates' int L2(goal) per WM step.
 #
 # Submit:
 #   export SMOLVLA_CHECKPOINT=...
