@@ -1,0 +1,10 @@
+# Meta-World sim stack for MT10 vec env + MT1 smoke (Farama metaworld 3.x + Gymnasium).
+# Install in existing LeRobot venv: pip install -r project/mt10/requirements-sim.txt
+# After install: pip check; python project/mt10/verify_env.py
+#
+# Aligns with HuggingFace LeRobot [metaworld] pins (see lerobot requirements-ubuntu.txt).
+
+metaworld==3.0.0
+gymnasium==1.2.3
+# LeRobot upstream often pins 3.5.0; lab venv verified with 3.6.0 + MT10 vec smoke.
+mujoco==3.6.0
