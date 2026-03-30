@@ -86,6 +86,24 @@ Each target’s `--goal-frame-index 25` is loaded from that row’s `frames/epis
 
 Slurm may execute a **copy** of the batch script from `/var/spool/slurm/...`, so segment GRPO Slurm entrypoints use a fixed `PROJECT_ROOT` and `${PROJECT_ROOT}/scripts/segment_grpo/` for helper shells (do not resolve helper paths from `BASH_SOURCE` on the staged copy).
 
+## segGRPO all-60 frame-50 k=3 (2026-04-16, subprocess orchestrator)
+
+- Entry point: [`scripts/segment_grpo/run_all60_frame50_k3.py`](../../scripts/segment_grpo/run_all60_frame50_k3.py) (campaign orchestrator).
+- Submit: `sbatch scripts/segment_grpo/submit_segment_grpo_all60_frame50_k3.slurm`.
+- Local debug: `bash scripts/segment_grpo/run_all60_frame50_k3_local.sh` (override `EPISODES=2` for a smoke).
+- Design: one subprocess per episode invoking `scripts/run_segment_grpo.py` with `--episodes 1 --episode-index i --reset-seed 1000+i --flat-output`. Memory isolation is real (fresh Python process each time).
+- No edits to existing Python entrypoints: `run_segment_grpo.py`, `segment_grpo_loop.py`, `segment_grpo_reference.py`, and existing tests stay unchanged.
+- Artifacts under `artifacts/phase08_segment_grpo_baseline/run_<UTC>_all60_f50_k3_s1000/` (auto `run_name` unless `--run-name` is passed):
+  - `out_episode_NNNN.json` x 60 (full `EpisodeLog.to_dict()`, including `latent_scores`, `selected_scores`, `candidate_distances`, per-candidate `latent_distance` inside segment payloads).
+  - Comparison-strip PNGs under each `out_episode_NNNN_artifacts/` when `--comparison-strip-overlay` is on.
+  - `episodes.jsonl`: append-only orchestrator summary with latent-distance fields copied from each child JSON for quick post-processing.
+  - `skipped_episodes.jsonl`: rows for any episode whose oracle goal PNG was missing under `frames/episode_NNNN/frame_000049.png` (same layout as `load_oracle_reference_frames`; expected empty for this campaign).
+  - `failed_episodes.jsonl`: rows for any subprocess with non-zero exit or timeout (stderr tail included).
+  - `segment_grpo_manifest.json`: final rollup with `counts` + `outcomes`.
+- Resume: re-run with the same `--run-name`; episodes whose `out_episode_NNNN.json` already exist are skipped (`RESUME-SKIP` in log).
+- Skip-on-missing-goal: orchestrator checks for the oracle goal frame before spawning; no child process starts for missing frames.
+- Latent-distance JSON contract: unchanged in `segment_grpo_loop.py` dataclasses; orchestrator only reads child output.
+
 ## Quick troubleshooting
 
 - If launch still fails, capture:
