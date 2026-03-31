@@ -96,6 +96,8 @@ def test_phase9_main_dry_run_writes_manifest(
         "argv",
         [
             "run_phase9_oracle_vs_wm.py",
+            "--oracle-run-root",
+            str(oracle_root),
             "--artifacts-root",
             str(tmp_path),
             "--output-root",

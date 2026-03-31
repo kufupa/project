@@ -86,6 +86,13 @@ def main() -> int:
     if not episode_rows:
         raise SystemExit(f"No episodes in {manifest_path}")
 
+    manifest_task = str(oracle_manifest.get("task", "") or "").strip()
+    if manifest_task and manifest_task != str(args.task).strip():
+        raise SystemExit(
+            f"Oracle manifest task mismatch: manifest has {manifest_task!r} but CLI --task is {str(args.task)!r} "
+            f"({manifest_path})"
+        )
+
     base_seed = int(oracle_manifest.get("seed", 1000))
 
     if args.dry_run:

@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from segment_grpo_reference import resolve_latest_oracle_pushv3_run  # noqa: E402
+from smolvla_pipeline.run_layout import effective_run_name_prefix_slug, slug_run_directory_prefix  # noqa: E402
 
 
 @dataclass
@@ -65,6 +66,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=ROOT / "artifacts" / "phase08_segment_grpo_baseline",
     )
     p.add_argument("--run-name", default="")
+    p.add_argument(
+        "--run-name-prefix",
+        default="",
+        help="When --run-name is empty, prepend this slug to the auto-generated run_* name "
+        "(overrides RUN_NAME_PREFIX / ORACLE_RUN_PREFIX for the default name only).",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--stop-on-error", action="store_true")
     p.add_argument("--child-script", type=Path, default=ROOT / "scripts" / "run_segment_grpo.py")
@@ -86,6 +93,13 @@ def _resolve_run_dir(args: argparse.Namespace) -> Path:
             f"run_{stamp}_all60_f{int(args.goal_frame_index)}"
             f"_k{int(args.num_candidates)}_s{int(args.seed_base)}"
         )
+        cli_prefix = str(getattr(args, "run_name_prefix", "") or "").strip()
+        if cli_prefix:
+            pslug = slug_run_directory_prefix(cli_prefix)
+        else:
+            pslug = effective_run_name_prefix_slug()
+        if pslug:
+            name = f"{pslug}_{name}"
     run_dir = args.output_root.expanduser().resolve(strict=False) / name
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir

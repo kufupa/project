@@ -41,6 +41,32 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
+def test_default_run_dir_respects_run_name_prefix_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, campaign_module
+):
+    monkeypatch.setenv("RUN_NAME_PREFIX", "mt10")
+    oracle_run = tmp_path / "oracle_run"
+    oracle_run.mkdir()
+    args = campaign_module._parse_args(
+        [
+            "--seed-base",
+            "1000",
+            "--episodes",
+            "1",
+            "--goal-frame-index",
+            "50",
+            "--output-root",
+            str(tmp_path / "out"),
+            "--artifacts-root",
+            str(tmp_path / "artifacts"),
+            "--oracle-run-root",
+            str(oracle_run),
+        ]
+    )
+    run_dir = campaign_module._resolve_run_dir(args)
+    assert run_dir.name.startswith("mt10_")
+
+
 def test_seed_derivation_and_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, campaign_module):
     oracle_run = _make_oracle_run(tmp_path, have_frames_for=[0, 1, 2], goal_frame_idx=50)
     _install_fake_oracle(monkeypatch, campaign_module, oracle_run)

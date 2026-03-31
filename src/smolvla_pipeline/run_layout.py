@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
+import os
 import re
 import secrets
+from datetime import datetime, timezone
+from pathlib import Path
 
 
 def _slug_component(value: str) -> str:
@@ -14,6 +15,28 @@ def _slug_task(task: str) -> str:
     return _slug_component(task)
 
 
+def effective_run_name_prefix_slug() -> str:
+    """Slug from RUN_NAME_PREFIX or ORACLE_RUN_PREFIX when set (empty otherwise)."""
+    raw = (os.environ.get("RUN_NAME_PREFIX") or os.environ.get("ORACLE_RUN_PREFIX") or "").strip()
+    if not raw:
+        return ""
+    return _slug_component(raw)
+
+
+def slug_run_directory_prefix(label: str) -> str:
+    """Sanitize a user-provided run directory prefix (e.g. ``mt10``)."""
+    return _slug_component(label.strip())
+
+
+def _resolved_run_name_prefix_slug(run_name_prefix: str | None) -> str:
+    if run_name_prefix is not None:
+        stripped = run_name_prefix.strip()
+        if not stripped:
+            return ""
+        return _slug_component(stripped)
+    return effective_run_name_prefix_slug()
+
+
 def build_run_dir_name(
     *,
     timestamp_utc: str,
@@ -22,10 +45,15 @@ def build_run_dir_name(
     seed: int,
     variant: str,
     nonce: str,
+    run_name_prefix: str | None = None,
 ) -> str:
     task_slug = _slug_task(task)
     variant_slug = _slug_component(variant)
-    return f"run_{timestamp_utc}_ep{episodes}_v{variant_slug}_t{task_slug}_s{seed}_r{nonce}"
+    base = f"run_{timestamp_utc}_ep{episodes}_v{variant_slug}_t{task_slug}_s{seed}_r{nonce}"
+    pslug = _resolved_run_name_prefix_slug(run_name_prefix)
+    if pslug:
+        return f"{pslug}_{base}"
+    return base
 
 
 def ensure_unique_run_dir(
@@ -35,6 +63,7 @@ def ensure_unique_run_dir(
     task: str,
     seed: int,
     variant: str,
+    run_name_prefix: str | None = None,
 ) -> Path:
     output_root.mkdir(parents=True, exist_ok=True)
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -48,6 +77,7 @@ def ensure_unique_run_dir(
             seed=seed,
             variant=variant,
             nonce=nonce,
+            run_name_prefix=run_name_prefix,
         )
         run_dir = output_root / run_dir_name
         try:
