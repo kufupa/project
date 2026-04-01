@@ -12,6 +12,8 @@ from typing import Sequence
 
 import numpy as np
 
+from metaworld_determinism import gymnasium_reset_strict, metaworld_strict_ctor_requested, seed_metaworld_process
+
 try:
     import torch
     from torch import nn
@@ -28,6 +30,10 @@ def _require_torch(message: str) -> None:
             f"{message} Install PyTorch to use this path. The segment loop uses torch for model encoding/scoring and adapter updates."
         )
 
+
+def _clip_action_for_metaworld_box(action: np.ndarray) -> np.ndarray:
+    """MetaWorld scripted policies use [-1, 1]; oracle eval clips before env.step for reproducibility."""
+    return np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
 
 
 CarryMode = Literal["sim", "replay"]
@@ -2088,10 +2094,7 @@ def _encode_state_to_latent(
 
 
 def _reset_env(env: Any, seed: int) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    try:
-        out = env.reset(seed=seed)
-    except TypeError:
-        out = env.reset()
+    out = gymnasium_reset_strict(env, int(seed))
     if isinstance(out, tuple):
         obs = out[0]
         info = out[1] if len(out) > 1 and isinstance(out[1], dict) else {}
@@ -2102,8 +2105,9 @@ def _reset_env(env: Any, seed: int) -> tuple[np.ndarray, np.ndarray, dict[str, A
     return image, proprio, info
 
 
-def _step_env(env: Any, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any], bool]:
-    out = env.step(np.asarray(action, dtype=np.float32))
+def _step_env(env: Any, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, Any], bool, np.ndarray]:
+    stepped = _clip_action_for_metaworld_box(action)
+    out = env.step(stepped)
     if len(out) == 5:
         obs, _reward, terminated, truncated, info = out
         done = bool(terminated or truncated)
@@ -2113,7 +2117,7 @@ def _step_env(env: Any, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, dic
     image, proprio = _extract_image_and_proprio(obs, env)
     if not isinstance(info, dict):
         info = {}
-    return image, proprio, info, done
+    return image, proprio, info, done, stepped
 
 
 def _take_action_for_env(action: np.ndarray, env_action_dim: int) -> np.ndarray:
@@ -2132,6 +2136,11 @@ def update_grpo_step(
     """
     Optional lightweight adapter update from candidate chunk scores.
     Uses deterministic weighted MSE on -score targets.
+
+    When ``adapter is None``, this re-seeds **global** ``torch`` and legacy
+    ``numpy.random`` for adapter weight init. Do not interleave with MetaWorld
+    stepping if you need strict env-only RNG parity in one process; use
+    ``train_steps=0`` or run env rollouts in a separate worker.
     """
     if train_steps <= 0:
         return adapter
@@ -2259,6 +2268,7 @@ def rollout_with_chunks(
         env_action_dim = 4
         proprio_dim = 16
         if not dry_run:
+            seed_metaworld_process(int(seed))
             try:
                 import metaworld
 
@@ -2276,15 +2286,18 @@ def rollout_with_chunks(
                 else:
                     mt1 = metaworld.MT1(task)
                     env_cls = mt1.train_classes[task]
-                    try:
+                    if metaworld_strict_ctor_requested():
                         env = env_cls(render_mode="rgb_array")
-                    except TypeError:
-                        env = env_cls()
+                    else:
                         try:
-                            if hasattr(env, "render_mode"):
-                                env.render_mode = "rgb_array"
-                        except Exception as exc:
-                            print(f"[segment_grpo] failed to set env render_mode on simulation env: {exc}")
+                            env = env_cls(render_mode="rgb_array")
+                        except TypeError:
+                            env = env_cls()
+                            try:
+                                if hasattr(env, "render_mode"):
+                                    env.render_mode = "rgb_array"
+                            except Exception as exc:
+                                print(f"[segment_grpo] failed to set env render_mode on simulation env: {exc}")
                     tasks = getattr(mt1, "train_tasks", None)
                     if tasks:
                         env.set_task(tasks[int(episode_index) % len(tasks)])
@@ -2549,7 +2562,7 @@ def rollout_with_chunks(
         if carry_mode == "sim" and env is not None:
             for i in range(effective_len):
                 action_env = _take_action_for_env(best_actions[i], int(env_action_dim))
-                _obs_img, current_proprio, _info, step_done = _step_env(env, action_env)
+                _obs_img, current_proprio, _info, step_done, stepped = _step_env(env, action_env)
                 if jepa_parity_sim and _render_jepa_rgb is not None:
                     current_image = _render_jepa_rgb(env)
                 else:
@@ -2561,7 +2574,7 @@ def rollout_with_chunks(
                 )
                 carried_steps += 1
                 current_step += 1
-                executed_actions.append(action_env.tolist())
+                executed_actions.append(stepped.tolist())
                 segment_real_frames.append(np.asarray(current_image, copy=True))
                 if step_done:
                     segment_done = True
