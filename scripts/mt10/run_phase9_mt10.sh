@@ -7,6 +7,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 # shellcheck source=mt10_tasks.sh
 source "${SCRIPT_DIR}/mt10_tasks.sh"
+# shellcheck source=mt10_env_defaults.sh
+source "${SCRIPT_DIR}/mt10_env_defaults.sh"
 if [[ -n "${MT10_ONLY_TASK:-}" ]]; then
   MT10_TASK_IDS=("${MT10_ONLY_TASK}")
 fi
