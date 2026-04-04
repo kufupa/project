@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Campaign orchestrator: run scripts/run_segment_grpo.py once per episode.
 
+MT10 / explicit oracle: when ``--oracle-run-root`` is set (e.g. from
+``run_phase8_mt10.sh`` using ``mt10_phase6_index.json``), goal frames load only
+from that run's ``frames/episode_*/`` tree; ``--task`` + episode index must match
+that run. ``--goal-frame-index`` is a fixed PNG index, not a per-task success
+time.
+
 Phase-specific: edits no existing file, spawns a fresh Python process per
 episode to guarantee memory isolation, handles skip/resume/failure policy.
 """
