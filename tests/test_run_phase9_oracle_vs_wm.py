@@ -46,6 +46,7 @@ def test_phase9_main_dry_run_writes_manifest(
             goal_frame=__import__("numpy").zeros((2, 2, 3), dtype="uint8"),
             start_frame=__import__("numpy").zeros((2, 2, 3), dtype="uint8"),
             goal_frame_path=oracle_root / "frames" / "episode_0000" / "frame_000049.png",
+            goal_flat_obs=None,
         )
 
     def _fake_load_oracle_action_sequence(*_a: object, **_k: object) -> SimpleNamespace:
