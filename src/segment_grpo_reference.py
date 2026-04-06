@@ -236,3 +236,80 @@ def load_oracle_action_sequence(run_dir: Path, episode_index: int) -> OracleActi
         n_steps=int(arr.shape[0]),
         env_action_dim=env_action_dim,
     )
+
+
+def load_prefetch_candidate_actions(
+    path: Path,
+    *,
+    num_candidates: int,
+    target_rows: int,
+    segment_index: int = 0,
+    expected_task: str | None = None,
+    expected_episode_index: int | None = None,
+) -> list[np.ndarray]:
+    """Load per-candidate action chunks from a prior segment_grpo episode JSON.
+
+    Reads ``segments[segment_index].candidates[*].actions`` (index order 0..K-1),
+    validates row counts, returns float32 arrays shaped ``(target_rows, D)``.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"Prefetch JSON not found: {p}")
+    if int(num_candidates) < 1:
+        raise ValueError("num_candidates must be >= 1")
+    if int(target_rows) < 1:
+        raise ValueError("target_rows must be >= 1")
+
+    with p.open("r", encoding="utf-8") as fp:
+        payload = json.load(fp)
+
+    if expected_task is not None:
+        jt = str(payload.get("task", "") or "").strip()
+        if jt and jt != str(expected_task).strip():
+            raise ValueError(f"Prefetch JSON task {jt!r} != expected {expected_task!r} ({p})")
+    if expected_episode_index is not None and payload.get("episode_index") is not None:
+        if int(payload["episode_index"]) != int(expected_episode_index):
+            raise ValueError(
+                f"Prefetch JSON episode_index={payload['episode_index']} != expected "
+                f"{expected_episode_index} ({p})"
+            )
+
+    segments = payload.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError(f"Prefetch JSON missing non-empty segments: {p}")
+    if int(segment_index) < 0 or int(segment_index) >= len(segments):
+        raise IndexError(f"segment_index {segment_index} out of range for {len(segments)} segments ({p})")
+
+    seg = segments[int(segment_index)]
+    cands = seg.get("candidates")
+    if not isinstance(cands, list) or len(cands) != int(num_candidates):
+        raise ValueError(
+            f"Prefetch segment {segment_index} expected {num_candidates} candidates, got "
+            f"{len(cands) if isinstance(cands, list) else type(cands)} ({p})"
+        )
+
+    out: list[np.ndarray] = []
+    env_dim: int | None = None
+    for i, c in enumerate(cands):
+        if not isinstance(c, dict):
+            raise ValueError(f"candidate {i} not an object ({p})")
+        if int(c.get("index", i)) != i:
+            raise ValueError(f"candidate index mismatch at slot {i} ({p})")
+        actions = c.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ValueError(f"candidate {i} missing actions ({p})")
+        arr = np.asarray(actions, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"candidate {i} actions must be 2-D, got {arr.shape} ({p})")
+        if arr.shape[0] < int(target_rows):
+            raise ValueError(
+                f"candidate {i} has {arr.shape[0]} rows < target_rows={target_rows} ({p})"
+            )
+        d = int(arr.shape[1])
+        if env_dim is None:
+            env_dim = d
+        elif d != env_dim:
+            raise ValueError(f"candidate {i} action width {d} != {env_dim} ({p})")
+        out.append(np.asarray(arr[: int(target_rows)], dtype=np.float32).copy())
+
+    return out
