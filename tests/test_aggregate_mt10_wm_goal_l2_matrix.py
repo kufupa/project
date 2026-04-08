@@ -45,7 +45,7 @@ def _write_minimal_campaign(
     run = root / run_name
     run.mkdir(parents=True)
     (run / "segment_grpo_manifest.json").write_text(
-        json.dumps({"task": task, "campaign": "test"}),
+        json.dumps({"task": task, "campaign": "test", "goal_frame_index": 25}),
         encoding="utf-8",
     )
     vals = [first_bin_value] + [400 + i for i in range(1, 10)]
@@ -67,6 +67,7 @@ def test_matrix_two_tasks_end_to_end(tmp_path: Path) -> None:
         phase9_root=p9,
         candidate_mode_phase8="selected",
         candidate_mode_phase9="selected",
+        max_env_steps=50,
         strict=False,
     )
     assert payload["n_tasks"] == 2
@@ -120,6 +121,72 @@ def test_matrix_two_tasks_end_to_end(tmp_path: Path) -> None:
     assert compare_tex_path.is_file()
 
 
+def test_max_env_steps_cap_25_only(tmp_path: Path) -> None:
+    p8 = tmp_path / "p8"
+    p9 = tmp_path / "p9"
+    _write_minimal_campaign(p8, task="push-v3", run_name="mt10_run_b", episode_pattern="out", first_bin_value=10)
+    _write_minimal_campaign(p8, task="reach-v3", run_name="mt10_run_a", episode_pattern="out", first_bin_value=20)
+    _write_minimal_campaign(p9, task="push-v3", run_name="mt10_run_d", episode_pattern="seg", first_bin_value=12)
+    _write_minimal_campaign(p9, task="reach-v3", run_name="mt10_run_c", episode_pattern="seg", first_bin_value=22)
+
+    payload = mt10.build_matrix_payload(
+        phase8_root=p8,
+        phase9_root=p9,
+        candidate_mode_phase8="selected",
+        candidate_mode_phase9="selected",
+        max_env_steps=25,
+        strict=False,
+    )
+    assert payload["bin_labels"] == ["0:5", "5:10", "10:15", "15:20", "20:25"]
+    assert len(payload["compare_csv_rows"][0]) == 3 + 3 * len(payload["bin_labels"])
+
+    out_compare = tmp_path / "m_compare.csv"
+    assert (
+        mt10.main(
+            [
+                "--phase8-root",
+                str(p8),
+                "--phase9-root",
+                str(p9),
+                "--no-strict",
+                "--max-env-steps",
+                "25",
+                "--out-csv-compare",
+                str(out_compare),
+                "--compare-format",
+                "run-delta",
+            ]
+        )
+        == 0
+    )
+    head = out_compare.read_text(encoding="utf-8").splitlines()[0]
+    assert "r20_25" in head
+    assert "r25_30" not in head
+
+
+def test_goal_frame_mismatch_blocks_payload(tmp_path: Path) -> None:
+    p8 = tmp_path / "p8"
+    p9 = tmp_path / "p9"
+    _write_minimal_campaign(p8, task="push-v3", run_name="mt10_run_b", episode_pattern="out", first_bin_value=10)
+    _write_minimal_campaign(p8, task="reach-v3", run_name="mt10_run_a", episode_pattern="out", first_bin_value=20)
+    _write_minimal_campaign(p9, task="push-v3", run_name="mt10_run_d", episode_pattern="seg", first_bin_value=12)
+    _write_minimal_campaign(p9, task="reach-v3", run_name="mt10_run_c", episode_pattern="seg", first_bin_value=22)
+    (p9 / "mt10_run_d" / "segment_grpo_manifest.json").write_text(
+        json.dumps({"task": "push-v3", "campaign": "test", "goal_frame_index": 50}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Goal-frame mismatch"):
+        mt10.build_matrix_payload(
+            phase8_root=p8,
+            phase9_root=p9,
+            candidate_mode_phase8="selected",
+            candidate_mode_phase9="selected",
+            max_env_steps=25,
+            strict=False,
+        )
+
+
 def test_compare_rows_include_all_tasks_average(tmp_path: Path) -> None:
     p8 = tmp_path / "p8"
     p9 = tmp_path / "p9"
@@ -133,6 +200,7 @@ def test_compare_rows_include_all_tasks_average(tmp_path: Path) -> None:
         phase9_root=p9,
         candidate_mode_phase8="selected",
         candidate_mode_phase9="selected",
+        max_env_steps=50,
         strict=False,
     )
     compare_rows = payload["compare_csv_rows"]
@@ -157,6 +225,7 @@ def test_compare_long_rows_are_task_range_rows(tmp_path: Path) -> None:
         phase9_root=p9,
         candidate_mode_phase8="selected",
         candidate_mode_phase9="selected",
+        max_env_steps=50,
         strict=False,
     )
     long_rows = payload["compare_csv_rows_long"]
@@ -225,6 +294,7 @@ def test_compare_summary_rows_are_task_averages(tmp_path: Path) -> None:
         phase9_root=p9,
         candidate_mode_phase8="selected",
         candidate_mode_phase9="selected",
+        max_env_steps=50,
         strict=False,
     )
     summary_rows = payload["compare_csv_rows_summary"]
@@ -246,6 +316,7 @@ def test_strict_requires_ten_tasks(tmp_path: Path) -> None:
             phase9_root=p9,
             candidate_mode_phase8="selected",
             candidate_mode_phase9="selected",
+            max_env_steps=50,
             strict=True,
         )
 
@@ -262,5 +333,6 @@ def test_task_mismatch_strict(tmp_path: Path) -> None:
             phase9_root=p9,
             candidate_mode_phase8="selected",
             candidate_mode_phase9="selected",
+            max_env_steps=50,
             strict=True,
         )
