@@ -162,10 +162,10 @@ def _validate_checkpoint(checkpoint: str) -> str:
 
 
 def _validate_overlay_mode(overlay_mode: str) -> str:
-    if overlay_mode not in {"cumulative_reward", "reward"}:
+    if overlay_mode not in {"cumulative_reward", "reward", "reward_delta"}:
         raise ValueError(
             f"Invalid overlay_mode {overlay_mode!r}. "
-            "Expected one of: 'cumulative_reward', 'reward'."
+            "Expected one of: 'cumulative_reward', 'reward', 'reward_delta'."
         )
     return overlay_mode
 
@@ -256,8 +256,15 @@ def _write_reward_curve_png(path: Path, y_values: Sequence[float], overlay_mode:
         path.write_bytes(_FALLBACK_PNG_BYTES)
         return
 
-    y_label = "cumulative_reward" if overlay_mode == "cumulative_reward" else "reward"
-    title = "Time vs cumulative reward" if overlay_mode == "cumulative_reward" else "Time vs reward"
+    if overlay_mode == "cumulative_reward":
+        y_label = "cumulative_reward"
+        title = "Time vs cumulative reward"
+    elif overlay_mode == "reward":
+        y_label = "reward"
+        title = "Time vs reward"
+    else:
+        y_label = "reward_delta"
+        title = "Time vs reward delta"
     x_values = list(range(len(y_values)))
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(x_values, list(y_values), color="#1f77b4", linewidth=2.0)
@@ -310,6 +317,42 @@ def _overlay_frame(frame: Any, text: str) -> Any:
     return np.asarray(image, dtype=np.uint8)
 
 
+def _overlay_metric_value(
+    *, reward: float, cumulative_reward: float, reward_delta: float, overlay_mode: str
+) -> float:
+    if overlay_mode == "cumulative_reward":
+        return float(cumulative_reward)
+    if overlay_mode == "reward":
+        return float(reward)
+    if overlay_mode == "reward_delta":
+        return float(reward_delta)
+    raise ValueError(f"Unsupported overlay_mode for metric selection: {overlay_mode!r}")
+
+
+def _build_overlay_text(
+    *,
+    step: int,
+    reward: float,
+    cumulative_reward: float,
+    reward_delta: float,
+    success: bool,
+    overlay_mode: str,
+) -> str:
+    metric_value = _overlay_metric_value(
+        reward=reward,
+        cumulative_reward=cumulative_reward,
+        reward_delta=reward_delta,
+        overlay_mode=overlay_mode,
+    )
+    return (
+        f"step={step} reward={reward:.4f} "
+        f"cumulative_reward={cumulative_reward:.4f} "
+        f"reward_delta={reward_delta:.4f} "
+        f"mode={overlay_mode} metric={metric_value:.4f} "
+        f"success={int(success)}"
+    )
+
+
 def _write_episode_video(
     *,
     video_path: Path,
@@ -328,10 +371,18 @@ def _write_episode_video(
 
     video_path.parent.mkdir(parents=True, exist_ok=True)
     cumulative_by_step: list[float] = []
+    reward_delta_by_step: list[float] = []
     running = 0.0
+    prev_reward: float | None = None
     for reward in rewards:
+        reward_value = float(reward)
         running += float(reward)
         cumulative_by_step.append(float(running))
+        if prev_reward is None:
+            reward_delta_by_step.append(0.0)
+        else:
+            reward_delta_by_step.append(float(reward_value - prev_reward))
+        prev_reward = reward_value
 
     with imageio.get_writer(video_path, fps=fps) as writer:
         for idx, frame in enumerate(frames):
@@ -339,18 +390,22 @@ def _write_episode_video(
                 step = 0
                 reward = 0.0
                 cumulative = 0.0
+                reward_delta = 0.0
                 success = False
             else:
                 step_idx = min(idx - 1, len(rewards) - 1)
                 step = step_idx + 1
                 reward = float(rewards[step_idx])
                 cumulative = float(cumulative_by_step[step_idx])
+                reward_delta = float(reward_delta_by_step[step_idx])
                 success = bool(successes[step_idx]) if step_idx < len(successes) else False
-            metric_value = cumulative if overlay_mode == "cumulative_reward" else reward
-            overlay_text = (
-                f"step={step} reward={reward:.4f} "
-                f"cumulative_reward={cumulative:.4f} "
-                f"{overlay_mode}={metric_value:.4f} success={int(success)}"
+            overlay_text = _build_overlay_text(
+                step=step,
+                reward=reward,
+                cumulative_reward=cumulative,
+                reward_delta=reward_delta,
+                success=success,
+                overlay_mode=overlay_mode,
             )
             writer.append_data(_overlay_frame(frame, overlay_text))
 
@@ -406,15 +461,19 @@ def write_episode_artifacts(
 
     action_rows: list[dict[str, Any]] = []
     cumulative_reward = 0.0
+    prev_reward: float | None = None
     for step, (action, reward, success) in enumerate(zip(actions, rewards, successes)):
         reward_value = float(reward)
         cumulative_reward += reward_value
+        reward_delta = 0.0 if prev_reward is None else float(reward_value - prev_reward)
+        prev_reward = reward_value
         action_rows.append(
             {
                 "step": int(step),
                 "action": [float(component) for component in action],
                 "reward": reward_value,
                 "cumulative_reward": float(cumulative_reward),
+                "reward_delta": float(reward_delta),
                 "success": bool(success),
             }
         )
@@ -426,7 +485,9 @@ def write_episode_artifacts(
 
     csv_path = episode_dir / "reward_curve.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as csv_fp:
-        writer = csv.DictWriter(csv_fp, fieldnames=["step", "reward", "cumulative_reward"])
+        writer = csv.DictWriter(
+            csv_fp, fieldnames=["step", "reward", "cumulative_reward", "reward_delta"]
+        )
         writer.writeheader()
         for row in action_rows:
             writer.writerow(
@@ -434,14 +495,17 @@ def write_episode_artifacts(
                     "step": row["step"],
                     "reward": row["reward"],
                     "cumulative_reward": row["cumulative_reward"],
+                    "reward_delta": row["reward_delta"],
                 }
             )
 
     png_path = episode_dir / "reward_curve.png"
     if overlay_mode == "cumulative_reward":
         plot_values = [float(row["cumulative_reward"]) for row in action_rows]
-    else:
+    elif overlay_mode == "reward":
         plot_values = [float(row["reward"]) for row in action_rows]
+    else:
+        plot_values = [float(row["reward_delta"]) for row in action_rows]
 
     _write_reward_curve_png(
         png_path,
