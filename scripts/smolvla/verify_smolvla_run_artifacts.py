@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default="push-v3")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--require-video", default="true")
+    parser.add_argument(
+        "--require-frames",
+        default="false",
+        help="Require frames_dir with frame_*.png per episode (matches save_frames runs).",
+    )
     parser.add_argument("--min-video-bytes", type=int, default=1024)
     return parser.parse_args()
 
@@ -82,7 +87,12 @@ def main() -> int:
         )
 
     require_video = _as_bool(args.require_video)
+    require_frames = _as_bool(args.require_frames)
     min_video_bytes = int(args.min_video_bytes)
+
+    if require_frames:
+        if run_manifest.get("save_frames") is not True:
+            _fail("run_manifest.save_frames must be true when --require-frames true")
     video_paths = overall.get("video_paths", [])
     if not isinstance(video_paths, list):
         _fail("eval_info.overall.video_paths must be a list")
@@ -94,6 +104,7 @@ def main() -> int:
         )
 
     checked_videos = 0
+    checked_frame_dirs = 0
     for row in episodes:
         if not isinstance(row, dict):
             _fail("run_manifest episodes row is not an object")
@@ -132,12 +143,30 @@ def main() -> int:
                 )
             checked_videos += 1
 
+        if require_frames:
+            rel = paths.get("frames_dir")
+            if not isinstance(rel, str) or not rel.strip():
+                _fail("episode paths.frames_dir missing while require_frames=true")
+            fdir = run_dir / rel
+            if not fdir.is_dir():
+                _fail(f"frames_dir not a directory: {fdir}")
+            pngs = sorted(fdir.glob("frame_*.png"))
+            n_expect = int(row.get("n_frames", 0))
+            if n_expect < 1:
+                _fail("episode n_frames must be >= 1 when require_frames=true")
+            if len(pngs) != n_expect:
+                _fail(
+                    f"expected {n_expect} frame PNGs in {fdir}, found {len(pngs)}"
+                )
+            checked_frame_dirs += 1
+
     payload = {
         "status": "ok",
         "run_dir": str(run_dir),
         "task": args.task,
         "episodes": expected_episodes,
         "checked_videos": checked_videos,
+        "checked_frame_dirs": checked_frame_dirs,
         "pc_success": float(overall.get("pc_success", 0.0)),
     }
     print(json.dumps(payload, indent=2))

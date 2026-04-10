@@ -121,6 +121,7 @@ def test_run_smolvla_eval_writes_real_flow_contract(tmp_path: Path, monkeypatch:
 
     run_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     assert run_manifest["runtime_backend"] == "lerobot_metaworld"
+    assert run_manifest["save_frames"] is False
     assert run_manifest["camera_name"] == "corner2"
     assert run_manifest["flip_corner2"] is True
     episode = run_manifest["episodes"][0]
@@ -194,6 +195,62 @@ def test_run_smolvla_eval_passes_explicit_max_steps(
     assert seen_max_steps == [321]
     run_manifest = result["run_manifest"]
     assert run_manifest["max_steps"] == 321
+
+
+def test_run_smolvla_eval_save_frames_writes_pngs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fake_backend = _FakeBackend()
+
+    def _fake_write_frames(*, frames_dir: Path, frames: list) -> None:
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(len(frames)):
+            (frames_dir / f"frame_{idx:06d}.png").write_bytes(b"fakepng")
+
+    def _fake_video_writer(
+        *,
+        video_path: Path,
+        frames: list[np.ndarray],
+        rewards: list[float],
+        successes: list[bool],
+        overlay_mode: str,
+        fps: int,
+    ) -> None:
+        _ = (frames, rewards, successes, overlay_mode, fps)
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"FAKE_MP4_DATA")
+
+    monkeypatch.setattr(evaluator, "_write_episode_video", _fake_video_writer)
+    monkeypatch.setattr(evaluator, "_write_episode_frames_png", _fake_write_frames)
+
+    output_dir = tmp_path / "run_save_frames"
+    run_smolvla_eval(
+        task="push-v3",
+        episodes=1,
+        seed=1000,
+        checkpoint="jadechoghari/smolvla_metaworld",
+        output_dir=output_dir,
+        video=True,
+        fps=30,
+        overlay_mode="cumulative_reward",
+        save_frames=True,
+        backend_factory=lambda **_kwargs: fake_backend,
+    )
+
+    frames_dir = output_dir / "frames" / "episode_0000"
+    assert frames_dir.is_dir()
+    assert (frames_dir / "frame_000000.png").is_file()
+    assert (frames_dir / "frame_000001.png").is_file()
+
+    meta = json.loads(
+        (output_dir / "episodes" / "episode_0000" / "episode_meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert meta["paths"]["frames_dir"] == "frames/episode_0000"
+
+    run_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert run_manifest["save_frames"] is True
 
 
 def test_coerce_exec_action_refuses_silent_resize():

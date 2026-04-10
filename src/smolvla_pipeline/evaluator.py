@@ -210,6 +210,10 @@ def _resolve_flip_corner2() -> bool:
     return _as_bool(os.environ.get("SMOLVLA_FLIP_CORNER2", "true"))
 
 
+def _resolve_save_frames() -> bool:
+    return _as_bool(os.environ.get("SMOLVLA_SAVE_FRAMES", "false"))
+
+
 def _resolve_task_text(task: str) -> str:
     task_clean = str(task).strip()
     try:
@@ -352,6 +356,35 @@ def _write_episode_video(
 
     if not video_path.exists() or video_path.stat().st_size <= 0:
         raise RuntimeError(f"Video write failed for {video_path}")
+
+
+def _write_episode_frames_png(*, frames_dir: Path, frames: Sequence[Any]) -> None:
+    """Write raw RGB frames as PNGs (oracle-style ``frame_000000.png``)."""
+    import numpy as np
+
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "save_frames requires imageio. Install imageio in the evaluator environment."
+        ) from exc
+
+    if not frames:
+        raise RuntimeError("No frames to write for save_frames.")
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for idx, frame in enumerate(frames):
+        frame_np = np.asarray(frame)
+        if frame_np.ndim != 3 or frame_np.shape[-1] not in (3, 4):
+            raise RuntimeError(f"Frame {idx} has invalid shape {frame_np.shape}; expected HxWx3/4.")
+        if frame_np.shape[-1] == 4:
+            frame_np = frame_np[..., :3]
+        if frame_np.dtype != np.uint8:
+            if np.issubdtype(frame_np.dtype, np.floating) and float(np.max(frame_np)) <= 1.5:
+                frame_np = (np.clip(frame_np, 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                frame_np = np.clip(frame_np, 0, 255).astype(np.uint8)
+        path = frames_dir / f"frame_{idx:06d}.png"
+        imageio.imwrite(path, np.ascontiguousarray(frame_np))
 
 
 def write_episode_artifacts(
@@ -780,6 +813,7 @@ def run_smolvla_eval(
     fps: int,
     overlay_mode: str,
     max_steps: int | None = None,
+    save_frames: bool | None = None,
     backend_factory: BackendFactory | None = None,
 ) -> dict[str, Any]:
     if episodes < 1:
@@ -792,6 +826,9 @@ def run_smolvla_eval(
     overlay_mode = _validate_overlay_mode(overlay_mode)
     checkpoint_resolved = _validate_checkpoint(checkpoint)
     resolved_max_steps = _resolve_max_steps() if max_steps is None else _validate_max_steps(max_steps)
+    resolved_save_frames = (
+        bool(save_frames) if save_frames is not None else _resolve_save_frames()
+    )
 
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -831,6 +868,11 @@ def run_smolvla_eval(
                 overlay_mode=overlay_mode,
             )
 
+            frames_dir: Path | None = None
+            if resolved_save_frames:
+                frames_dir = output_dir / "frames" / f"episode_{episode_index:04d}"
+                _write_episode_frames_png(frames_dir=frames_dir, frames=rollout.frames)
+
             video_path = output_dir / "videos" / f"{task}_0" / f"eval_episode_{episode_index:04d}.mp4"
             _write_episode_video(
                 video_path=video_path,
@@ -868,6 +910,11 @@ def run_smolvla_eval(
                         Path(artifact_paths["reward_curve_png"]).relative_to(output_dir)
                     ),
                     "video": str(video_path.relative_to(output_dir)),
+                    **(
+                        {"frames_dir": str(frames_dir.relative_to(output_dir))}
+                        if frames_dir is not None
+                        else {}
+                    ),
                 },
                 "reward_curve_mode": overlay_mode,
             }
@@ -918,6 +965,7 @@ def run_smolvla_eval(
         "camera_name": _resolve_camera_name(),
         "flip_corner2": _resolve_flip_corner2(),
         "task_text": _resolve_task_text(task),
+        "save_frames": bool(resolved_save_frames),
         "episodes": episode_rows,
     }
     (output_dir / "run_manifest.json").write_text(
