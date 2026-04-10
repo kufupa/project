@@ -35,6 +35,8 @@ cd "${PROJECT_ROOT}"
 slurm_export_pythonpath
 slurm_export_hf_torch_cache "phase11_grpo"
 
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+
 GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
 if [[ ! -x "${GRPO_PYTHON}" ]]; then
   echo "error: GRPO_PYTHON not executable: ${GRPO_PYTHON}" >&2
