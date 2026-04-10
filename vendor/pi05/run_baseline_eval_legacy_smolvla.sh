@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SMOLVLA_SCRIPT_DIR="${SMOLVLA_SCRIPT_DIR:-${SCRIPT_DIR}}"
 SMOLVLA_REPO_ROOT="${SMOLVLA_REPO_ROOT:-${REPO_ROOT}}"
 SMOLVLA_WORKSPACE_ROOT="${SMOLVLA_WORKSPACE_ROOT:-$(cd "${SMOLVLA_REPO_ROOT}/.." && pwd)}"
-SMOLVLA_EVAL_RUNNER="${SMOLVLA_REPO_ROOT}/scripts/lerobot_eval_full_videos.py"
+SMOLVLA_EVAL_RUNNER="${SMOLVLA_REPO_ROOT}/scripts/legacy_lerobot_eval_full_videos.py"
 
 if [[ -f "${SCRIPT_DIR}/config.sh" ]]; then
   source "${SCRIPT_DIR}/config.sh"

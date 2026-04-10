@@ -1,111 +1,84 @@
-# push-v3 Data Pipeline (Task 2)
+# push-v3 Oracle Data Pipeline
 
-This directory now includes a minimal, runnable path for:
+The active pipeline uses the Meta-World scripted policy (`metaworld.policies.ENV_POLICY_MAP`), not SmolVLA, for simulator rollouts on `push-v3`.
 
-- running smolvla_metaworld baseline on push-v3
-- generating a compact top-k optimal trajectory report
-- exporting top trajectory videos to an artifact `trajectories` folder
+## Active Scripts (Oracle)
 
-## Scripts
+- `scripts/oracle/pushv3_oracle_data_pipeline.sh` — oracle eval, `optimal_report.json`, top-k video export, updates `run_manifest.json` with pipeline paths
+- `scripts/oracle/run_oracle_baseline_eval.sh` — unique run directory + `xvfb-run` wrapper
+- `scripts/oracle/run_metaworld_oracle_eval.py` — rollouts, per-step `actions.jsonl`, per-frame PNGs, `episode_meta.json`, `run_manifest.json`
 
-- `scripts/pushv3_data_pipeline.sh`
-  - runs `vendor/pi05/run_baseline_eval.sh` with the requested `--task`
-  - parses `eval_info.json` and prints reward/success summary
-  - writes `optimal_report.json`
-  - creates `trajectories/export_manifest.json`
-- `scripts/summarize_pushv3_eval.py`
-  - reads `eval_info.json`
-  - writes compact `optimal_report.json` with top-k episodes by `max_reward`
-  - enforces strict matching on `--task` and fails with a clear error when task is missing
-- `scripts/extract_parquet_episode_video.py`
-  - copied from pi05 shared utility
-  - optional renderer fallback when videos are not already present
+## Legacy Scripts (SmolVLA-era)
 
-## 1) Running baseline + automatic trajectory export
+- `scripts/legacy_pushv3_data_pipeline_smolvla.sh`
+- `vendor/pi05/run_baseline_eval_legacy_smolvla.sh`
+- `scripts/legacy_lerobot_eval_full_videos.py`
+
+## Default artifact root
+
+Runs go under the **project** directory:
+
+- `<project_root>/artifacts/phase06_oracle_baseline/`
+
+Example (this repo): `/vol/bitbucket/aa6622/project/artifacts/phase06_oracle_baseline/`
+
+Override with `--output-root` or `PUSHV3_OUTPUT_ROOT` / `ORACLE_ARTIFACT_ROOT`.
+
+## Run directory naming
+
+Each run is a single child folder:
+
+- `run_{UTC}_ep{episodes}_voracle_t{task}_s{seed}_r{nonce}`
+
+Example: `run_20260410T130404Z_ep45_voracle_tpush_v3_s1000_r508367`
+
+## Per-run layout
+
+Inside each run folder:
+
+| Path | Purpose |
+|------|---------|
+| `eval_info.json` | Aggregated rewards, success, video paths (summarizer input) |
+| `run_manifest.json` | Run config + per-episode artifact index; `pipeline` block added after export |
+| `videos/<task>_0/eval_episode_<i>.mp4` | Full-episode video (if `--video true`) |
+| `episodes/episode_<i>/actions.jsonl` | One JSON line per step: `step`, `action`, `reward`, `terminated`, `truncated`, `success` |
+| `episodes/episode_<i>/episode_meta.json` | Episode summary + relative paths to artifacts |
+| `frames/episode_<i>/frame_<t>.png` | RGB frames (6-digit `t`; includes post-reset frame, then after each step) |
+| `optimal_report.json` | Top-k episodes by `max_reward` |
+| `trajectories/trajectory_<rank>_episode_<i>.mp4` | Copied top-k videos |
+| `trajectories/export_manifest.json` | Export status; includes `run_manifest` path when present |
+
+Disable per-frame PNGs (smaller disk): set `ORACLE_SAVE_FRAMES=false` or pass `--save-frames false` to `run_oracle_baseline_eval.sh` (pipeline would need a forward flag if you want it from the main script only; today the eval is invoked via that runner).
+
+## Run Oracle Pipeline
 
 ```bash
-bash scripts/pushv3_data_pipeline.sh \
+bash scripts/oracle/pushv3_oracle_data_pipeline.sh \
   --episodes 45 \
-  --seed 123 \
+  --seed 1000 \
   --task push-v3 \
-  --checkpoint jadechoghari/smolvla_metaworld \
-  --output-root /path/to/artifacts/phase06_baseline \
+  --output-root /vol/bitbucket/aa6622/project/artifacts/phase06_oracle_baseline \
   --top-k 15 \
   --video true
 ```
 
-Environment aliases (equivalent):
-
-```bash
-export PUSHV3_EPISODES=45
-export PUSHV3_SEED=123
-export PUSHV3_TASK=push-v3
-export PUSHV3_CHECKPOINT=jadechoghari/smolvla_metaworld
-export PUSHV3_OUTPUT_ROOT=/path/to/artifacts/phase06_baseline
-export PUSHV3_TOP_K=15
-bash scripts/pushv3_data_pipeline.sh
-```
-
-Current defaults are still:
-
-- episodes: 15
-- top-k: 5
-
-For best-coverage selection in push-v3, use `--episodes 45 --top-k 15`.
+Defaults: episodes `15`, top-k `5`. Recommended trajectory bank: `--episodes 45 --top-k 15 --seed 1000`.
 
 Dry run:
 
 ```bash
-bash scripts/pushv3_data_pipeline.sh --dry-run
+bash scripts/oracle/pushv3_oracle_data_pipeline.sh --dry-run
 ```
 
-## 2) Generating optimal trajectories (standalone)
+## Optional extractor fallback
 
 ```bash
-python3 scripts/summarize_pushv3_eval.py \
-  --eval-info /path/to/phase06_baseline/run_2026.../eval_info.json \
-  --task push-v3 \
-  --top-k 5 \
-  --output /path/to/optimal_report.json
-```
-
-You can also pass optional explicit video paths:
-
-```bash
-python3 scripts/summarize_pushv3_eval.py \
-  --eval-info /path/to/eval_info.json \
-  --task push-v3 \
-  --top-k 5 \
-  --video-path "0:/abs/path/top0.mp4" \
-  --video-path "1:/abs/path/top1.mp4" \
-  --output /tmp/optimal_report.json
-```
-
-## 3) Exporting top videos
-
-The pipeline exports top-k episodes automatically when it runs baseline:
-
-```bash
-bash scripts/pushv3_data_pipeline.sh --top-k 5
-```
-
-`--task` is forwarded into the baseline command as `--env.task`.
-
-Run output directories are now unique per invocation, so re-running with the same
-inputs creates a new run folder and never overwrites earlier outputs.
-
-If baseline videos are not available, provide a dataset root and the extractor
-fallback can still be used:
-
-```bash
-bash scripts/pushv3_data_pipeline.sh \
+bash scripts/oracle/pushv3_oracle_data_pipeline.sh \
   --top-k 5 \
   --dataset-root /path/to/dataset \
   --source-episodes-root /path/to/episodes_pt_dir
 ```
 
-When available, this writes:
+## Disk note
 
-- `run_.../optimal_report.json`
-- `run_.../trajectories/trajectory_XX_episode_YYYY.mp4` files
-- `run_.../trajectories/export_manifest.json`
+`45` episodes × `400` max steps × PNGs per timestep is large. Use shorter `--episode-length` for experiments, or `ORACLE_SAVE_FRAMES=false` when you only need video + `actions.jsonl`.
