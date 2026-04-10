@@ -14,6 +14,68 @@ The active pipeline uses the Meta-World scripted policy (`metaworld.policies.ENV
 - `vendor/pi05/run_baseline_eval_legacy_smolvla.sh`
 - `scripts/legacy_lerobot_eval_full_videos.py`
 
+## SmolVLA Baseline
+
+Active scripts:
+
+- `scripts/smolvla/pushv3_smolvla_smoke.sh` - single-episode smoke run and writes `smoke_summary.json`
+- `scripts/smolvla/run_metaworld_smolvla_eval.py` - SmolVLA evaluator entrypoint for Meta-World tasks
+- `scripts/smolvla/run_pushv3_smolvla_preflight_1ep.sh` - single-episode GPU preflight run + artifact verification
+- `scripts/smolvla/submit_pushv3_smolvla_preflight_1ep.slurm` - Slurm template for one-episode GPU preflight
+- `scripts/smolvla/launch_pushv3_smolvla_topk15.sh` - prepares/submits top-k campaign runs from an oracle run
+- `scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh` - 15-episode parity benchmark (`seed=123`, `max_steps=120`)
+- `scripts/smolvla/compare_eval_info.py` - baseline vs candidate `eval_info.json` metric diff helper
+- `scripts/smolvla/verify_smolvla_run_artifacts.py` - strict artifact validator for smoke/preflight gates
+
+Artifact root:
+
+- `artifacts/phase07_smolvla_baseline`
+
+Run naming contract:
+
+- `run_{UTC}_ep{episodes}_vsmolvla_t{task}_s{seed}_r{nonce}`
+
+Per-run files:
+
+| Path | Purpose |
+|------|---------|
+| `eval_info.json` | Aggregated metrics including `overall` and `video_paths` |
+| `run_manifest.json` | Run config, checkpoint metadata, and per-episode artifact index |
+| `smoke_summary.json` | Smoke-only status summary emitted by `pushv3_smolvla_smoke.sh` |
+| `videos/<task>_0/eval_episode_<i>.mp4` | Episode videos when `--video true` |
+| `episodes/episode_<i>/actions.jsonl` | Per-step action/reward/success rows |
+| `episodes/episode_<i>/reward_curve.csv` | Step-wise reward and cumulative reward values |
+| `episodes/episode_<i>/reward_curve.png` | Reward curve plot (or fallback placeholder image) |
+
+### SmolVLA preflight before top-k
+
+Run one GPU preflight episode (does not queue the top-k array):
+
+```bash
+bash scripts/smolvla/run_pushv3_smolvla_preflight_1ep.sh
+```
+
+This run must produce:
+
+- `eval_info.json`
+- `run_manifest.json`
+- `episodes/episode_0000/actions.jsonl`
+- `videos/push-v3_0/eval_episode_0000.mp4` (non-trivial size)
+
+Parity/fast gate knobs used by SmolVLA scripts:
+
+- `SMOLVLA_EVAL_MODE=parity|fast` (default `parity`)
+- `SMOLVLA_METAWORLD_CAMERA_NAME` (default `corner2`)
+- `SMOLVLA_FLIP_CORNER2` (default `true`)
+- `SMOLVLA_LOAD_VLM_WEIGHTS` (defaults to `true` in parity mode)
+- `SMOLVLA_PREFLIGHT_MAX_STEPS`, `SMOLVLA_SMOKE_MAX_STEPS`, `SMOLVLA_TARGET_MAX_STEPS`
+
+Optional Slurm submission for the same preflight:
+
+```bash
+sbatch scripts/smolvla/submit_pushv3_smolvla_preflight_1ep.slurm
+```
+
 ## Default artifact root
 
 Runs go under the **project** directory:
