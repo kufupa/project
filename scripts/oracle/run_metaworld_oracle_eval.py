@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,11 +41,22 @@ def _safe_success(info: dict[str, Any]) -> bool:
     return False
 
 
-def _render_rgb_frame(env: Any) -> np.ndarray | None:
-    try:
-        frame = env.render()
-    except Exception:
-        return None
+def _render_rgb_frame(
+    env: Any, *, camera_name: str, flip_corner2: bool
+) -> np.ndarray | None:
+    frame: Any | None = None
+    if camera_name:
+        try:
+            frame = env.render(camera_name=camera_name)
+        except TypeError:
+            frame = None
+        except Exception:
+            frame = None
+    if frame is None:
+        try:
+            frame = env.render()
+        except Exception:
+            return None
 
     if frame is None:
         return None
@@ -58,6 +70,8 @@ def _render_rgb_frame(env: Any) -> np.ndarray | None:
             frame_np = (np.clip(frame_np, 0.0, 1.0) * 255.0).astype(np.uint8)
         else:
             frame_np = np.clip(frame_np, 0, 255).astype(np.uint8)
+    if flip_corner2 and camera_name == "corner2":
+        frame_np = np.ascontiguousarray(np.flip(frame_np, (0, 1)))
     return np.ascontiguousarray(frame_np)
 
 
@@ -73,10 +87,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default="push-v3")
     parser.add_argument("--episodes", type=int, default=15)
     parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument("--max-steps", type=int, default=400)
+    parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--video", default="true")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--camera-name",
+        default=os.environ.get("ORACLE_METAWORLD_CAMERA_NAME", "corner2"),
+        help="Meta-World camera name for rgb rendering (default: corner2).",
+    )
+    parser.add_argument(
+        "--flip-corner2",
+        default=os.environ.get("ORACLE_FLIP_CORNER2", "true"),
+        help="When true and camera-name is corner2, flip frame orientation for parity.",
+    )
     parser.add_argument(
         "--save-frames",
         default="true",
@@ -96,6 +120,10 @@ def main() -> int:
 
     write_video = _as_bool(args.video)
     save_frames = _as_bool(args.save_frames)
+    flip_corner2 = _as_bool(args.flip_corner2)
+    camera_name = str(args.camera_name).strip()
+    if not camera_name:
+        raise SystemExit("error: --camera-name must be non-empty")
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     videos_dir = output_dir / "videos" / f"{args.task}_0"
@@ -115,10 +143,18 @@ def main() -> int:
     ml1 = metaworld.ML1(args.task, seed=int(args.seed))
     env_cls = ml1.train_classes[args.task]
     tasks = list(getattr(ml1, "train_tasks", []) or [])
-    env = env_cls()
+    try:
+        env = env_cls(render_mode="rgb_array", camera_name=camera_name)
+    except Exception:
+        env = env_cls()
     if hasattr(env, "render_mode"):
         try:
             env.render_mode = "rgb_array"
+        except Exception:
+            pass
+    if camera_name == "corner2":
+        try:
+            env.model.cam_pos[2] = [0.75, 0.075, 0.7]
         except Exception:
             pass
 
@@ -149,7 +185,9 @@ def main() -> int:
             frame_seq = 0
 
             if write_video or save_frames:
-                frame = _render_rgb_frame(env)
+                frame = _render_rgb_frame(
+                    env, camera_name=camera_name, flip_corner2=flip_corner2
+                )
                 if frame is not None:
                     frames.append(frame)
                     if save_frames:
@@ -179,7 +217,9 @@ def main() -> int:
                     action_fp.write(json.dumps(line) + "\n")
 
                     if write_video or save_frames:
-                        frame = _render_rgb_frame(env)
+                        frame = _render_rgb_frame(
+                            env, camera_name=camera_name, flip_corner2=flip_corner2
+                        )
                         if frame is not None:
                             frames.append(frame)
                             if save_frames:
@@ -286,6 +326,8 @@ def main() -> int:
         "episodes_requested": int(args.episodes),
         "max_steps": int(args.max_steps),
         "fps": int(args.fps),
+        "camera_name": camera_name,
+        "flip_corner2": bool(flip_corner2),
         "video_enabled": write_video,
         "save_frames": save_frames,
         "output_dir": str(output_dir),

@@ -11,17 +11,19 @@ EXTRACTOR_SCRIPT="${PROJECT_ROOT}/scripts/extract_parquet_episode_video.py"
 BASELINE_ARTIFACT_ROOT="${ORACLE_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts}"
 
 EPISODES="${PUSHV3_EPISODES:-${ORACLE_BASELINE_EPISODES:-15}}"
-SEED="${PUSHV3_SEED:-${ORACLE_BASELINE_SEED:-123}}"
+SEED="${PUSHV3_SEED:-${ORACLE_BASELINE_SEED:-1000}}"
 TASK="${PUSHV3_TASK:-push-v3}"
 OUTPUT_ROOT="${PUSHV3_OUTPUT_ROOT:-${BASELINE_ARTIFACT_ROOT}/phase06_oracle_baseline}"
 TOP_K="${PUSHV3_TOP_K:-5}"
 VIDEO="${PUSHV3_VIDEO:-true}"
 SAVE_FRAMES="${ORACLE_SAVE_FRAMES:-true}"
-EPISODE_LENGTH="${PUSHV3_EPISODE_LENGTH:-400}"
+EPISODE_LENGTH="${PUSHV3_EPISODE_LENGTH:-120}"
 FPS="${PUSHV3_EXPORT_FPS:-30}"
 DRY_RUN="${PUSHV3_DRY_RUN:-false}"
 DATASET_ROOT="${PUSHV3_DATASET_ROOT:-}"
 SOURCE_EPISODES_ROOT="${PUSHV3_SOURCE_EPISODES_ROOT:-}"
+CAMERA_NAME="${ORACLE_METAWORLD_CAMERA_NAME:-corner2}"
+FLIP_CORNER2="${ORACLE_FLIP_CORNER2:-true}"
 
 usage() {
   cat <<'EOF'
@@ -42,6 +44,8 @@ Flags:
   --video true|false       Whether baseline writes videos
   --save-frames true|false Whether to write frames/episode_XXXX PNGs (also ORACLE_SAVE_FRAMES)
   --episode-length N       Max steps per episode
+  --camera-name NAME       Camera for baseline render (default: corner2)
+  --flip-corner2 true|false Flip corner2 camera frames for parity
   --dry-run                Parse and print commands only
   --help                   Show this help
 EOF
@@ -125,6 +129,14 @@ while [[ $# -gt 0 ]]; do
       EPISODE_LENGTH="${2}"
       shift 2
       ;;
+    --camera-name)
+      CAMERA_NAME="${2}"
+      shift 2
+      ;;
+    --flip-corner2)
+      FLIP_CORNER2="${2}"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN="true"
       shift
@@ -148,6 +160,11 @@ assert_non_negative_int "episode_length" "${EPISODE_LENGTH}"
 assert_non_negative_int "fps" "${FPS}"
 assert_bool "video" "${VIDEO}"
 assert_bool "save_frames" "${SAVE_FRAMES}"
+assert_bool "flip_corner2" "${FLIP_CORNER2}"
+if [[ -z "${CAMERA_NAME}" ]]; then
+  log_error "camera-name must be non-empty"
+  exit 2
+fi
 assert_bool "dry_run" "${DRY_RUN}"
 
 if [[ -z "${TASK}" ]]; then
@@ -183,6 +200,8 @@ BASELINE_CMD=(
   --video "${VIDEO}"
   --save-frames "${SAVE_FRAMES}"
   --episode-length "${EPISODE_LENGTH}"
+  --camera-name "${CAMERA_NAME}"
+  --flip-corner2 "${FLIP_CORNER2}"
   --fps "${FPS}"
 )
 
@@ -194,6 +213,8 @@ log_info "  output_root=${OUTPUT_ROOT}"
 log_info "  top_k=${TOP_K}"
 log_info "  video=${VIDEO}"
 log_info "  save_frames=${SAVE_FRAMES}"
+log_info "  camera_name=${CAMERA_NAME}"
+log_info "  flip_corner2=${FLIP_CORNER2}"
 log_info "  dataset_root=${DATASET_ROOT:-<none>}"
 log_info "  dry_run=${DRY_RUN}"
 
