@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-RUN_BASELINE_SCRIPT="${PROJECT_ROOT}/vendor/pi05/run_baseline_eval.sh"
+RUN_BASELINE_SCRIPT="${PROJECT_ROOT}/vendor/pi05/run_baseline_eval_legacy_smolvla.sh"
 SUMMARIZE_SCRIPT="${SCRIPT_DIR}/summarize_pushv3_eval.py"
 EXTRACTOR_SCRIPT="${SCRIPT_DIR}/extract_parquet_episode_video.py"
 
