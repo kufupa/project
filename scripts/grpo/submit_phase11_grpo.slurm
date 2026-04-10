@@ -22,10 +22,24 @@
 
 set -euo pipefail
 
-if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh" ]]; then
+# SLURM_SUBMIT_DIR = dir sbatch invoked from, not always --chdir. Spooled BASH_SOURCE breaks ../slurm.
+_PHASE11_PROJECT_FALLBACK="/vol/bitbucket/aa6622/project"
+_COMMON=""
+if [[ -f "${_PHASE11_PROJECT_FALLBACK}/scripts/slurm/common_env.sh" ]]; then
+  _COMMON="${_PHASE11_PROJECT_FALLBACK}/scripts/slurm/common_env.sh"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh" ]]; then
   _COMMON="${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh"
+elif [[ -n "${PROJECT_ROOT:-}" && -f "${PROJECT_ROOT}/scripts/slurm/common_env.sh" ]]; then
+  _COMMON="${PROJECT_ROOT}/scripts/slurm/common_env.sh"
 else
-  _COMMON="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/../slurm/common_env.sh"
+  _SELF="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  if [[ -f "${_SELF}/../slurm/common_env.sh" ]]; then
+    _COMMON="${_SELF}/../slurm/common_env.sh"
+  fi
+fi
+if [[ -z "${_COMMON}" || ! -f "${_COMMON}" ]]; then
+  echo "error: cannot find scripts/slurm/common_env.sh (set PROJECT_ROOT or sbatch from project/)" >&2
+  exit 2
 fi
 # shellcheck source=../slurm/common_env.sh
 source "${_COMMON}"
