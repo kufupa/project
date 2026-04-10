@@ -6,8 +6,12 @@ import re
 import secrets
 
 
+def _slug_component(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z]+", "_", value).lower().strip("_")
+
+
 def _slug_task(task: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z]+", "_", task).lower().strip("_")
+    return _slug_component(task)
 
 
 def build_run_dir_name(
@@ -19,8 +23,9 @@ def build_run_dir_name(
     variant: str,
     nonce: str,
 ) -> str:
-    slug_task = _slug_task(task)
-    return f"run_{timestamp_utc}_ep{episodes}_v{variant}_t{slug_task}_s{seed}_r{nonce}"
+    task_slug = _slug_task(task)
+    variant_slug = _slug_component(variant)
+    return f"run_{timestamp_utc}_ep{episodes}_v{variant_slug}_t{task_slug}_s{seed}_r{nonce}"
 
 
 def ensure_unique_run_dir(
@@ -36,7 +41,7 @@ def ensure_unique_run_dir(
 
     for _ in range(20):
         nonce = f"{secrets.randbelow(1_000_000):06d}"
-        run_name = build_run_dir_name(
+        run_dir_name = build_run_dir_name(
             timestamp_utc=timestamp_utc,
             episodes=episodes,
             task=task,
@@ -44,11 +49,11 @@ def ensure_unique_run_dir(
             variant=variant,
             nonce=nonce,
         )
-        run_dir = output_root / run_name
+        run_dir = output_root / run_dir_name
         try:
             run_dir.mkdir()
+            return run_dir
         except FileExistsError:
             continue
-        return run_dir
 
-    raise RuntimeError("Failed to create a unique run directory after 20 attempts.")
+    raise RuntimeError("Unable to create unique run directory after retries.")
