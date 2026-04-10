@@ -9,7 +9,7 @@ PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 OUTPUT_ROOT="${SMOLVLA_PARITY_OUTPUT_ROOT:-${SMOLVLA_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts}/phase07_smolvla_baseline/parity}"
 TASK="${SMOLVLA_PARITY_TASK:-push-v3}"
-SEED="${SMOLVLA_PARITY_SEED:-123}"
+SEED="${SMOLVLA_PARITY_SEED:-1000}"
 EPISODES="${SMOLVLA_PARITY_EPISODES:-15}"
 FPS="${SMOLVLA_PARITY_FPS:-30}"
 OVERLAY_MODE="${SMOLVLA_PARITY_OVERLAY_MODE:-cumulative_reward}"
@@ -19,6 +19,7 @@ MIN_VIDEO_BYTES="${SMOLVLA_PARITY_MIN_VIDEO_BYTES:-1024}"
 CAMERA_NAME="${SMOLVLA_METAWORLD_CAMERA_NAME:-corner2}"
 FLIP_CORNER2="${SMOLVLA_FLIP_CORNER2:-true}"
 LOAD_VLM_WEIGHTS="${SMOLVLA_LOAD_VLM_WEIGHTS:-true}"
+SAVE_FRAMES="${SMOLVLA_SAVE_FRAMES:-true}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "error: python executable not found: ${PYTHON_BIN}" >&2
@@ -64,7 +65,8 @@ if command -v xvfb-run >/dev/null 2>&1; then
       --video true \
       --fps "${FPS}" \
       --overlay-mode "${OVERLAY_MODE}" \
-      --max-steps "${MAX_STEPS}"
+      --max-steps "${MAX_STEPS}" \
+      --save-frames "${SAVE_FRAMES}"
 else
   PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
   SMOLVLA_METAWORLD_CAMERA_NAME="${CAMERA_NAME}" \
@@ -79,7 +81,8 @@ else
     --video true \
     --fps "${FPS}" \
     --overlay-mode "${OVERLAY_MODE}" \
-    --max-steps "${MAX_STEPS}"
+    --max-steps "${MAX_STEPS}" \
+    --save-frames "${SAVE_FRAMES}"
 fi
 
 PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
@@ -88,6 +91,7 @@ PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
   --task "${TASK}" \
   --episodes "${EPISODES}" \
   --require-video true \
+  --require-frames "${SAVE_FRAMES}" \
   --min-video-bytes "${MIN_VIDEO_BYTES}"
 
 echo "parity benchmark complete: ${RUN_DIR}"

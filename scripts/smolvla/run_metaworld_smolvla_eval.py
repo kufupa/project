@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
         default="cumulative_reward",
         choices=["cumulative_reward", "reward"],
     )
+    parser.add_argument(
+        "--save-frames",
+        default="false",
+        choices=["true", "false"],
+        help="Write frames/episode_XXXX/frame_*.png (default: false).",
+    )
     return parser.parse_args()
 
 
@@ -42,6 +48,7 @@ def main() -> int:
         fps=args.fps,
         overlay_mode=args.overlay_mode,
         max_steps=args.max_steps,
+        save_frames=args.save_frames == "true",
     )
     return 0
 
