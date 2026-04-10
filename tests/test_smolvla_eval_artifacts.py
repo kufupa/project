@@ -259,3 +259,33 @@ def test_coerce_exec_action_refuses_silent_resize():
 
     action = evaluator._coerce_exec_action([2.0, -2.0, 0.5, -0.25], action_dim=4, np_module=np)
     assert action.tolist() == [1.0, -1.0, 0.5, -0.25]
+
+
+def test_build_overlay_text_uses_single_primary_metric_label():
+    text = evaluator._build_overlay_text(
+        step=5,
+        reward=0.12,
+        cumulative_reward=0.54,
+        reward_delta=-0.03,
+        success=True,
+        overlay_mode="cumulative_reward",
+    )
+    tokens = text.split()
+    assert sum(token.startswith("cumulative_reward=") for token in tokens) == 1
+    assert "metric=0.5400" in text
+
+    text_reward = evaluator._build_overlay_text(
+        step=5,
+        reward=0.12,
+        cumulative_reward=0.54,
+        reward_delta=-0.03,
+        success=True,
+        overlay_mode="reward",
+    )
+    reward_tokens = text_reward.split()
+    assert sum(token.startswith("reward=") for token in reward_tokens) == 1
+    assert "metric=0.1200" in text_reward
+
+
+def test_validate_overlay_mode_accepts_reward_delta():
+    assert evaluator._validate_overlay_mode("reward_delta") == "reward_delta"
