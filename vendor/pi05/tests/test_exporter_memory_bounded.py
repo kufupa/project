@@ -401,13 +401,13 @@ def test_main_cleans_up_and_closes_env_on_guard_failure(monkeypatch):
         def close(self):
             self.closed = True
 
-    class _FakeML1:
+    class _FakeMT1:
         def __init__(self, task: str, seed: int):
             del seed
             self.train_classes = {task: _FakeEnv}
             self.train_tasks = [object()]
 
-    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(ML1=_FakeML1))
+    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(MT1=_FakeMT1))
     monkeypatch.setattr(jepa_export, "_try_load_smolvla_exec", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_try_load_wm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -475,13 +475,13 @@ def test_main_accepts_cli_episodes_per_shard_and_wires_writer(monkeypatch):
         def close(self):
             return None
 
-    class _FakeML1:
+    class _FakeMT1:
         def __init__(self, task: str, seed: int):
             del seed
             self.train_classes = {task: _FakeEnv}
             self.train_tasks = [object()]
 
-    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(ML1=_FakeML1))
+    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(MT1=_FakeMT1))
     monkeypatch.setattr(jepa_export, "_try_load_smolvla_exec", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_try_load_wm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_enforce_export_quality_gates", lambda *_args, **_kwargs: None)
@@ -550,13 +550,13 @@ def test_main_uses_env_default_episodes_per_shard_when_flag_absent(monkeypatch):
         def close(self):
             return None
 
-    class _FakeML1:
+    class _FakeMT1:
         def __init__(self, task: str, seed: int):
             del seed
             self.train_classes = {task: _FakeEnv}
             self.train_tasks = [object()]
 
-    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(ML1=_FakeML1))
+    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(MT1=_FakeMT1))
     monkeypatch.setattr(jepa_export, "_try_load_smolvla_exec", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_try_load_wm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_enforce_export_quality_gates", lambda *_args, **_kwargs: None)
@@ -611,13 +611,13 @@ def test_main_manifest_shard_metadata_uses_promoted_episode_paths(monkeypatch):
         def close(self):
             return None
 
-    class _FakeML1:
+    class _FakeMT1:
         def __init__(self, task: str, seed: int):
             del seed
             self.train_classes = {task: _FakeEnv}
             self.train_tasks = [object()]
 
-    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(ML1=_FakeML1))
+    monkeypatch.setitem(sys.modules, "metaworld", types.SimpleNamespace(MT1=_FakeMT1))
     monkeypatch.setattr(jepa_export, "_try_load_smolvla_exec", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_try_load_wm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(jepa_export, "_enforce_export_quality_gates", lambda *_args, **_kwargs: None)

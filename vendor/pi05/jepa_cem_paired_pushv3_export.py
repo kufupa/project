@@ -1057,15 +1057,15 @@ def main() -> int:
 
     import metaworld  # noqa: PLC0415
 
-    ml1 = metaworld.ML1(args.task, seed=int(args.seed))
-    env_cls = ml1.train_classes[args.task]
+    mt1 = metaworld.MT1(args.task)
+    env_cls = mt1.train_classes[args.task]
     env = env_cls()
     try:
         if hasattr(env, "render_mode"):
             env.render_mode = "rgb_array"
     except Exception:
         pass
-    tasks = getattr(ml1, "train_tasks", None)
+    tasks = getattr(mt1, "train_tasks", None)
     if tasks:
         env.set_task(tasks[0])
 
