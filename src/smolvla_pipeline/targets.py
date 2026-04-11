@@ -52,6 +52,10 @@ def load_topk_targets(oracle_run_dir: Path, top_k: int) -> list[dict]:
                 "task": task,
             }
         )
+        if "max_reward" in episode:
+            targets[-1]["oracle_max_reward"] = float(episode["max_reward"])
+        if "sum_reward" in episode:
+            targets[-1]["oracle_sum_reward"] = float(episode["sum_reward"])
 
     return targets
 

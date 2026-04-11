@@ -40,12 +40,14 @@ def test_load_topk_targets_reads_reset_seed_from_manifest(tmp_path: Path):
             "episode_index": 7,
             "reset_seed": 1007,
             "task": "push-v3",
+            "oracle_max_reward": 2.0,
         },
         {
             "rank": 2,
             "episode_index": 3,
             "reset_seed": 1003,
             "task": "push-v3",
+            "oracle_max_reward": 1.5,
         },
     ]
 

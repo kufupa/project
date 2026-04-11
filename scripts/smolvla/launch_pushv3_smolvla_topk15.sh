@@ -14,6 +14,8 @@ SLURM_SCRIPT="${PROJECT_ROOT}/scripts/smolvla/submit_pushv3_smolvla_topk15.slurm
 ORACLE_RUN_DIR=""
 TOP_K=15
 DRY_RUN=0
+SMOLVLA_ARRAY_SPEC="${SMOLVLA_ARRAY_SPEC:-}"
+SMOLVLA_SBATCH_EXPORT_ALL="${SMOLVLA_SBATCH_EXPORT_ALL:-0}"
 
 usage() {
   cat <<'EOF'
@@ -135,9 +137,55 @@ if [[ "${ARRAY_MAX}" -lt 0 ]]; then
   exit 2
 fi
 
-SBATCH_EXPORTS="ALL,TARGETS_JSON=${TARGETS_JSON},SMOLVLA_CAMPAIGN_DIR=${CAMPAIGN_DIR}"
-SBATCH_ARRAY="0-${ARRAY_MAX}"
-SBATCH_CMD=(sbatch --array "${SBATCH_ARRAY}" --export "${SBATCH_EXPORTS}" "${SLURM_SCRIPT}")
+if [[ "${SMOLVLA_SBATCH_EXPORT_ALL:-0}" == "1" ]]; then
+  SBATCH_EXPORTS="ALL,TARGETS_JSON=${TARGETS_JSON},SMOLVLA_CAMPAIGN_DIR=${CAMPAIGN_DIR}"
+else
+  SBATCH_EXPORTS="NONE,TARGETS_JSON=${TARGETS_JSON},SMOLVLA_CAMPAIGN_DIR=${CAMPAIGN_DIR}"
+fi
+SBATCH_ARRAY="${SMOLVLA_ARRAY_SPEC:-0-${ARRAY_MAX}}"
+if ! [[ "${SBATCH_ARRAY}" =~ ^[0-9]+-[0-9]+$ ]]; then
+  echo "error: invalid SMOLVLA_ARRAY_SPEC='${SBATCH_ARRAY}'" >&2
+  exit 2
+fi
+
+SBATCH_ARRAY_START="${SBATCH_ARRAY%-*}"
+SBATCH_ARRAY_END="${SBATCH_ARRAY#*-}"
+if [[ "${SBATCH_ARRAY_START}" -lt 0 || "${SBATCH_ARRAY_END}" -lt 0 || "${SBATCH_ARRAY_START}" -gt "${SBATCH_ARRAY_END}" ]]; then
+  echo "error: invalid array bounds in SMOLVLA_ARRAY_SPEC='${SBATCH_ARRAY}'" >&2
+  exit 2
+fi
+if [[ "${SBATCH_ARRAY_END}" -gt "${ARRAY_MAX}" ]]; then
+  echo "error: array end '${SBATCH_ARRAY_END}' exceeds available targets '${ARRAY_MAX}'" >&2
+  exit 2
+fi
+
+SBATCH_CMD=(sbatch --array "${SBATCH_ARRAY}" --export "${SBATCH_EXPORTS}")
+if [[ -n "${SMOLVLA_SBATCH_CPUS_PER_TASK:-}" ]]; then
+  SBATCH_CMD+=(--cpus-per-task "${SMOLVLA_SBATCH_CPUS_PER_TASK}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_MEM:-}" ]]; then
+  SBATCH_CMD+=(--mem "${SMOLVLA_SBATCH_MEM}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_TIME:-}" ]]; then
+  SBATCH_CMD+=(--time "${SMOLVLA_SBATCH_TIME}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_QOS:-}" ]]; then
+  SBATCH_CMD+=(--qos "${SMOLVLA_SBATCH_QOS}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_PARTITION:-}" ]]; then
+  SBATCH_CMD+=(--partition "${SMOLVLA_SBATCH_PARTITION}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_GRES:-}" ]]; then
+  SBATCH_CMD+=(--gres "${SMOLVLA_SBATCH_GRES}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_ACCOUNT:-}" ]]; then
+  SBATCH_CMD+=(--account "${SMOLVLA_SBATCH_ACCOUNT}")
+fi
+if [[ -n "${SMOLVLA_SBATCH_EXTRA_ARGS:-}" ]]; then
+  read -r -a _extra_args <<< "${SMOLVLA_SBATCH_EXTRA_ARGS}"
+  SBATCH_CMD+=("${_extra_args[@]}")
+fi
+SBATCH_CMD+=("${SLURM_SCRIPT}")
 SUBMISSION_MODE="dry-run"
 SUBMISSION_OUTPUT=""
 

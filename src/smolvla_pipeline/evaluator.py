@@ -214,6 +214,19 @@ def _resolve_save_frames() -> bool:
     return _as_bool(os.environ.get("SMOLVLA_SAVE_FRAMES", "false"))
 
 
+def _resolve_optional_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer when set; got {raw!r}.") from exc
+
+
 def _resolve_task_text(task: str) -> str:
     task_clean = str(task).strip()
     try:
@@ -731,11 +744,11 @@ class _LeRobotMetaWorldBackend:
         self._task_text = _resolve_task_text(task)
         self._bundle = _load_smolvla_bundle(checkpoint)
         self._agent_dim, self._env_dim = _smolvla_state_dims(self._bundle.policy)
-        self._ml1 = metaworld.ML1(task, seed=int(seed))
-        if task not in self._ml1.train_classes:
-            available = ", ".join(sorted(self._ml1.train_classes.keys()))
-            raise ValueError(f"Task {task!r} is not available in Meta-World ML1. Available: {available}")
-        env_cls = self._ml1.train_classes[task]
+        self._mt1 = metaworld.MT1(task)
+        if task not in self._mt1.train_classes:
+            available = ", ".join(sorted(self._mt1.train_classes.keys()))
+            raise ValueError(f"Task {task!r} is not available in Meta-World MT1. Available: {available}")
+        env_cls = self._mt1.train_classes[task]
         try:
             self._env = env_cls(render_mode="rgb_array", camera_name=self._camera_name)
         except Exception:
@@ -750,8 +763,11 @@ class _LeRobotMetaWorldBackend:
                 self._env.model.cam_pos[2] = [0.75, 0.075, 0.7]
             except Exception:
                 pass
-        self._tasks = list(getattr(self._ml1, "train_tasks", []) or [])
+        self._tasks = list(getattr(self._mt1, "train_tasks", []) or [])
         self._action_dim = int(np.prod(self._env.action_space.shape))
+        self._target_episode_index_override = _resolve_optional_int_env(
+            "SMOLVLA_TARGET_EPISODE_INDEX"
+        )
 
     def _reset(self, reset_seed: int) -> tuple[Any, dict[str, Any]]:
         reset_out = self._env.reset(seed=int(reset_seed))
@@ -811,7 +827,12 @@ class _LeRobotMetaWorldBackend:
 
     def rollout_episode(self, *, episode_index: int, reset_seed: int) -> EpisodeRollout:
         if self._tasks:
-            self._env.set_task(self._tasks[episode_index % len(self._tasks)])
+            task_episode_index = (
+                int(self._target_episode_index_override)
+                if self._target_episode_index_override is not None
+                else int(episode_index)
+            )
+            self._env.set_task(self._tasks[task_episode_index % len(self._tasks)])
         obs, _info = self._reset(reset_seed)
 
         actions: list[list[float]] = []
@@ -913,8 +934,13 @@ def run_smolvla_eval(
     video_paths: list[str] = []
 
     try:
+        fixed_reset_seed_override = _resolve_optional_int_env("SMOLVLA_FIXED_RESET_SEED")
         for episode_index in range(episodes):
-            reset_seed = int(seed + episode_index)
+            reset_seed = (
+                int(fixed_reset_seed_override)
+                if fixed_reset_seed_override is not None
+                else int(seed + episode_index)
+            )
             episode_dir = output_dir / "episodes" / f"episode_{episode_index:04d}"
             rollout = backend.rollout_episode(episode_index=episode_index, reset_seed=reset_seed)
             if not (
