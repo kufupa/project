@@ -8,6 +8,8 @@ The active pipeline uses the Meta-World scripted policy (`metaworld.policies.ENV
 - `scripts/oracle/run_oracle_baseline_eval.sh` — unique run directory + `xvfb-run` wrapper
 - `scripts/oracle/run_metaworld_oracle_eval.py` — rollouts, per-step `actions.jsonl`, per-frame PNGs, `episode_meta.json`, `run_manifest.json`
 
+Oracle policy runs are MT1-only (`metaworld.MT1`) for goal-observable scripted policy compatibility.
+
 ## Legacy Scripts (SmolVLA-era)
 
 - `scripts/legacy_pushv3_data_pipeline_smolvla.sh`
@@ -113,6 +115,23 @@ Inside each run folder:
 Disable per-frame PNGs (smaller disk): set `ORACLE_SAVE_FRAMES=false` or pass `--save-frames false` to `run_oracle_baseline_eval.sh` (pipeline would need a forward flag if you want it from the main script only; today the eval is invoked via that runner).
 
 ## Run Oracle Pipeline
+
+### Reach / Reach-Wall GPU smoke (1 episode per task)
+
+```bash
+bash scripts/oracle/launch_oracle_reach_smoke_1ep_slurm.sh
+```
+
+This queues `reach-v3` and `reach-wall-v3` one-episode jobs (`--gres=gpu:1`) using `submit_oracle_parity_1ep.slurm`. Expect:
+- `videos/reach-v3_0/eval_episode_0.mp4`
+- `videos/reach-wall-v3_0/eval_episode_0.mp4`
+- `run_manifest.json` and `eval_info.json` entries that include `benchmark_mode: "MT1"`.
+
+For local non-Slurm smoke runs:
+
+```bash
+bash scripts/oracle/launch_oracle_reach_smoke_1ep.sh
+```
 
 ```bash
 bash scripts/oracle/pushv3_oracle_data_pipeline.sh \
