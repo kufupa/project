@@ -22,6 +22,7 @@ FPS="${PUSHV3_EXPORT_FPS:-30}"
 DRY_RUN="${PUSHV3_DRY_RUN:-false}"
 DATASET_ROOT="${PUSHV3_DATASET_ROOT:-}"
 SOURCE_EPISODES_ROOT="${PUSHV3_SOURCE_EPISODES_ROOT:-}"
+EXPORT_MODE="${PUSHV3_EXPORT_MODE:-auto}"
 CAMERA_NAME="${ORACLE_METAWORLD_CAMERA_NAME:-corner2}"
 FLIP_CORNER2="${ORACLE_FLIP_CORNER2:-true}"
 
@@ -40,6 +41,7 @@ Flags:
   --top-k N                Number of top episodes to export
   --dataset-root PATH      Optional parquet dataset root for renderer fallback
   --source-episodes-root P Optional episode_*.pt directory for extractor matching
+  --export-mode MODE       Export mode: auto|copy|render (default: auto)
   --fps N                  FPS for rendered fallback video conversion
   --video true|false       Whether baseline writes videos
   --save-frames true|false Whether to write frames/episode_XXXX PNGs (also ORACLE_SAVE_FRAMES)
@@ -83,6 +85,17 @@ assert_bool() {
   esac
 }
 
+assert_export_mode() {
+  local value="${1,,}"
+  case "${value}" in
+    auto|copy|render) ;;
+    *)
+      log_error "Invalid export_mode: ${1}. Expected one of: auto, copy, render."
+      exit 2
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --episodes)
@@ -111,6 +124,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source-episodes-root)
       SOURCE_EPISODES_ROOT="${2}"
+      shift 2
+      ;;
+    --export-mode)
+      EXPORT_MODE="${2}"
       shift 2
       ;;
     --fps)
@@ -161,11 +178,23 @@ assert_non_negative_int "fps" "${FPS}"
 assert_bool "video" "${VIDEO}"
 assert_bool "save_frames" "${SAVE_FRAMES}"
 assert_bool "flip_corner2" "${FLIP_CORNER2}"
+assert_export_mode "${EXPORT_MODE}"
+EXPORT_MODE="${EXPORT_MODE,,}"
 if [[ -z "${CAMERA_NAME}" ]]; then
   log_error "camera-name must be non-empty"
   exit 2
 fi
 assert_bool "dry_run" "${DRY_RUN}"
+if [[ "${EXPORT_MODE}" == "render" ]] && [[ -z "${DATASET_ROOT}" ]]; then
+  case "${SAVE_FRAMES,,}" in
+    true|1|yes|on) ;;
+    *)
+      log_error "--export-mode render requires --save-frames=true or --dataset-root."
+      exit 2
+      ;;
+  esac
+  require_cmd ffmpeg
+fi
 
 if [[ -z "${TASK}" ]]; then
   log_error "TASK must be set to a valid environment task name."
@@ -216,6 +245,7 @@ log_info "  save_frames=${SAVE_FRAMES}"
 log_info "  camera_name=${CAMERA_NAME}"
 log_info "  flip_corner2=${FLIP_CORNER2}"
 log_info "  dataset_root=${DATASET_ROOT:-<none>}"
+log_info "  export_mode=${EXPORT_MODE}"
 log_info "  dry_run=${DRY_RUN}"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
@@ -259,7 +289,7 @@ python3 "${SUMMARIZE_SCRIPT}" \
 trajectories_dir="${eval_output_dir}/trajectories"
 export_manifest="${trajectories_dir}/export_manifest.json"
 log_info "Exporting top-${TOP_K} trajectories to ${trajectories_dir}"
-python3 - "${optimal_report}" "${eval_output_dir}" "${trajectories_dir}" "${DATASET_ROOT}" "${EXTRACTOR_SCRIPT}" "${SOURCE_EPISODES_ROOT}" "${FPS}" <<'PY'
+python3 - "${optimal_report}" "${eval_output_dir}" "${trajectories_dir}" "${DATASET_ROOT}" "${EXTRACTOR_SCRIPT}" "${SOURCE_EPISODES_ROOT}" "${EXPORT_MODE}" "${FPS}" <<'PY'
 import json
 import shutil
 import subprocess
@@ -273,7 +303,10 @@ trajectories_dir = Path(sys.argv[3])
 dataset_root = (sys.argv[4] or "").strip()
 extractor_script = (sys.argv[5] or "").strip()
 source_episodes_root = (sys.argv[6] or "").strip()
-fps = int(sys.argv[7]) if len(sys.argv) > 7 else 30
+export_mode = (sys.argv[7] or "auto").strip().lower()
+fps = int(sys.argv[8]) if len(sys.argv) > 8 else 30
+if export_mode not in {"auto", "copy", "render"}:
+    raise RuntimeError(f"Invalid export_mode: {export_mode}")
 
 
 def _parse_episode_video_index(path: Path):
@@ -299,6 +332,63 @@ def _build_local_video_index(eval_root: Path):
     return direct, ordered
 
 
+def _copy_episode_video(
+    source_video: object,
+    ep_idx: int,
+    output_path: Path,
+    local_video_by_index: dict[int, Path],
+    local_videos: list[Path],
+) -> bool:
+    if isinstance(source_video, str) and source_video.strip():
+        source_path = Path(source_video).expanduser().resolve()
+        if source_path.is_file():
+            shutil.copy2(source_path, output_path)
+            return True
+    if ep_idx in local_video_by_index and local_video_by_index[ep_idx].is_file():
+        shutil.copy2(local_video_by_index[ep_idx], output_path)
+        return True
+    if 0 <= ep_idx < len(local_videos):
+        fallback = local_videos[ep_idx]
+        if fallback.is_file():
+            shutil.copy2(fallback, output_path)
+            return True
+    return False
+
+
+def _render_from_frames(frames_dir: Path, output_path: Path, fps: int) -> bool:
+    if not frames_dir.is_dir():
+        return False
+    frame_paths = sorted(frames_dir.glob("frame_*.png"))
+    if not frame_paths:
+        return False
+    if shutil.which("ffmpeg") is None:
+        return False
+    frame_pattern = frames_dir / "frame_%06d.png"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(fps),
+        "-i",
+        str(frame_pattern),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    return output_path.is_file() and output_path.stat().st_size > 0
+
+
 payload = json.loads(report_path.read_text(encoding="utf-8"))
 episodes = payload.get("episodes", [])
 if not isinstance(episodes, list):
@@ -322,31 +412,26 @@ for episode in episodes:
     source_video = episode.get("video_path")
     output_path = trajectories_dir / f"trajectory_{rank:02d}_episode_{ep_idx:04d}.mp4"
     status = "missing_video"
+    frames_dir = eval_output_dir / "frames" / f"episode_{ep_idx:04d}"
 
-    if isinstance(source_video, str) and source_video.strip():
-        source_path = Path(source_video).expanduser().resolve()
-        if source_path.is_file():
-            shutil.copy2(source_path, output_path)
+    if export_mode in {"auto", "copy"}:
+        if _copy_episode_video(
+            source_video,
+            ep_idx,
+            output_path,
+            local_video_by_index,
+            local_videos,
+        ):
             status = "copied"
             counts["copied"] += 1
-        elif ep_idx in local_video_by_index:
-            shutil.copy2(local_video_by_index[ep_idx], output_path)
-            status = "copied"
-            counts["copied"] += 1
+    if status != "copied" and export_mode in {"auto", "render"}:
+        if _render_from_frames(frames_dir, output_path, fps=fps):
+            status = "rendered"
+            counts["rendered"] += 1
         elif dataset_root and extractor_script:
             status = "render_requested"
-        elif 0 <= ep_idx < len(local_videos):
-            fallback = local_videos[ep_idx]
-            if fallback.is_file():
-                shutil.copy2(fallback, output_path)
-                status = "copied"
-                counts["copied"] += 1
-    elif ep_idx in local_video_by_index:
-        shutil.copy2(local_video_by_index[ep_idx], output_path)
-        status = "copied"
-        counts["copied"] += 1
-    elif dataset_root and extractor_script:
-        status = "render_requested"
+        elif export_mode == "render":
+            status = "missing_render_source"
 
     if status == "render_requested":
         render_cmd = [
@@ -401,6 +486,7 @@ manifest = {
     "run_manifest": run_manifest_rel,
     "output_dir": str(trajectories_dir),
     "top_k": payload.get("top_k"),
+    "export_mode": export_mode,
     "counts": counts,
     "episodes": exported,
 }
@@ -411,7 +497,7 @@ PY
 
 log_info "Trajectory export manifest written: ${export_manifest}"
 
-python3 - "${eval_output_dir}" "${optimal_report}" "${export_manifest}" "${TOP_K}" <<'PY'
+python3 - "${eval_output_dir}" "${optimal_report}" "${export_manifest}" "${TOP_K}" "${EXPORT_MODE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -420,6 +506,7 @@ run_dir = Path(sys.argv[1]).resolve()
 optimal = Path(sys.argv[2]).resolve()
 export_manifest = Path(sys.argv[3]).resolve()
 top_k = int(sys.argv[4])
+export_mode = str(sys.argv[5]).strip().lower()
 
 rm_path = run_dir / "run_manifest.json"
 if not rm_path.is_file():
@@ -436,6 +523,7 @@ def _rel(p: Path) -> str:
 data = json.loads(rm_path.read_text(encoding="utf-8"))
 data["pipeline"] = {
     "top_k": top_k,
+    "export_mode": export_mode,
     "optimal_report": _rel(optimal),
     "trajectories_export_manifest": _rel(export_manifest),
 }

@@ -31,14 +31,38 @@ def _as_bool(raw: str | bool) -> bool:
     raise ValueError(f"Invalid boolean value: {raw!r}")
 
 
+def _coerce_boolish(value: Any) -> bool | None:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return bool(value)
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, np.ndarray)):
+        arr = np.asarray(value)
+        if arr.size == 0:
+            return None
+        if arr.size == 1:
+            return _coerce_boolish(arr.reshape(-1)[0].item())
+        if np.issubdtype(arr.dtype, np.number):
+            return bool(np.any(arr != 0))
+        return bool(np.any(np.asarray(arr, dtype=np.bool_)))
+    return None
+
+
 def _safe_success(info: dict[str, Any]) -> bool:
     for key in ("success", "is_success"):
         value = info.get(key)
-        if isinstance(value, (bool, np.bool_)):
-            return bool(value)
-        if isinstance(value, (int, float, np.integer, np.floating)):
-            return bool(value)
+        safe_value = _coerce_boolish(value)
+        if safe_value is not None:
+            return safe_value
     return False
+
+
+def _clip_action(action: np.ndarray, *, low: float = -1.0, high: float = 1.0) -> tuple[list[float], list[float], bool]:
+    action_clipped = np.clip(action, low, high)
+    action_out_of_bounds = bool(np.any((action < low) | (action > high)))
+    return action.tolist(), action_clipped.tolist(), action_out_of_bounds
 
 
 def _render_rgb_frame(
@@ -106,6 +130,12 @@ def parse_args() -> argparse.Namespace:
         default="true",
         help="Write per-timestep PNGs under frames/episode_XXXX/ (default: true).",
     )
+    parser.add_argument(
+        "--action-telemetry",
+        default="true",
+        choices=("true", "false"),
+        help="Log action_raw/action_clipped/action_out_of_bounds in actions.jsonl (default: true).",
+    )
     return parser.parse_args()
 
 
@@ -139,10 +169,11 @@ def main() -> int:
     start_t = time.time()
     started_at = datetime.now(timezone.utc).isoformat()
     policy = ENV_POLICY_MAP[args.task]()
+    action_telemetry = _as_bool(args.action_telemetry)
 
-    ml1 = metaworld.ML1(args.task, seed=int(args.seed))
-    env_cls = ml1.train_classes[args.task]
-    tasks = list(getattr(ml1, "train_tasks", []) or [])
+    mt1 = metaworld.MT1(args.task)
+    env_cls = mt1.train_classes[args.task]
+    tasks = list(getattr(mt1, "train_tasks", []) or [])
     try:
         env = env_cls(render_mode="rgb_array", camera_name=camera_name)
     except Exception:
@@ -199,8 +230,10 @@ def main() -> int:
                 for step_idx in range(args.max_steps):
                     obs_np = np.asarray(obs, dtype=np.float64)
                     action = policy.get_action(obs_np)
-                    action_list = np.asarray(action, dtype=np.float32).reshape(-1).tolist()
-                    obs, reward, terminated, truncated, info = env.step(action)
+                    action_list = np.asarray(action, dtype=np.float32).reshape(-1)
+                    action_list_f = action_list.tolist()
+                    action_to_execute_f, action_clipped_f, action_out_of_bounds = _clip_action(action_list)
+                    obs, reward, terminated, truncated, info = env.step(action_to_execute_f)
                     info_d = info if isinstance(info, dict) else {}
                     step_success = _safe_success(info_d)
                     episode_success = episode_success or step_success
@@ -208,12 +241,16 @@ def main() -> int:
 
                     line = {
                         "step": step_idx,
-                        "action": action_list,
+                        "action": action_list_f,
                         "reward": float(reward),
                         "terminated": bool(terminated),
                         "truncated": bool(truncated),
                         "success": bool(step_success),
                     }
+                    if action_telemetry:
+                        line["action_raw"] = action_list_f
+                        line["action_clipped"] = action_clipped_f
+                        line["action_out_of_bounds"] = bool(action_out_of_bounds)
                     action_fp.write(json.dumps(line) + "\n")
 
                     if write_video or save_frames:
@@ -294,6 +331,7 @@ def main() -> int:
         "video_paths": video_paths,
     }
     eval_info = {
+        "benchmark_mode": "MT1",
         "per_task": [{"task_group": args.task, "task_id": 0, "metrics": per_task_metrics}],
         "per_group": {
             args.task: {
@@ -318,9 +356,11 @@ def main() -> int:
     eval_info_path.write_text(json.dumps(eval_info, indent=2), encoding="utf-8")
 
     run_manifest = {
+        "benchmark_mode": "MT1",
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "started_at_utc": started_at,
+        "benchmark_source": "metaworld.MT1",
         "task": args.task,
         "seed": int(args.seed),
         "episodes_requested": int(args.episodes),
