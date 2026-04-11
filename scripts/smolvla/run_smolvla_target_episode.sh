@@ -10,6 +10,8 @@ CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 OUTPUT_ROOT="${SMOLVLA_TOPK_OUTPUT_ROOT:-${SMOLVLA_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts}/phase07_smolvla_baseline}"
 MIN_VIDEO_BYTES="${SMOLVLA_MIN_VIDEO_BYTES:-1024}"
 EVAL_MODE="${SMOLVLA_EVAL_MODE:-parity}"
+EPISODES_PER_TARGET="${SMOLVLA_EPISODES_PER_TARGET:-1}"
+SAVE_FRAMES="${SMOLVLA_SAVE_FRAMES:-false}"
 
 case "${EVAL_MODE}" in
   parity)
@@ -87,11 +89,16 @@ SEED="${TARGET_FIELDS[1]}"
 EPISODE_INDEX="${TARGET_FIELDS[2]}"
 RANK="${TARGET_FIELDS[3]}"
 
+# Pin eval episodes to single oracle target identity.
+export SMOLVLA_TARGET_EPISODE_INDEX="${EPISODE_INDEX}"
+export SMOLVLA_FIXED_RESET_SEED="${SEED}"
+
 RUN_DIR="$(
   PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
   OUTPUT_ROOT="${OUTPUT_ROOT}" \
   TASK="${TASK}" \
   SEED="${SEED}" \
+  EPISODES="${EPISODES_PER_TARGET}" \
   "${PYTHON_BIN}" - <<'PY'
 import os
 from pathlib import Path
@@ -100,7 +107,7 @@ from src.smolvla_pipeline.run_layout import ensure_unique_run_dir
 
 run_dir = ensure_unique_run_dir(
     Path(os.environ["OUTPUT_ROOT"]),
-    episodes=1,
+    episodes=int(os.environ["EPISODES"]),
     task=os.environ["TASK"],
     seed=int(os.environ["SEED"]),
     variant="smolvla_target",
@@ -117,12 +124,13 @@ if command -v xvfb-run >/dev/null 2>&1; then
     SMOLVLA_LOAD_VLM_WEIGHTS="${LOAD_VLM_WEIGHTS}" \
     "${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/smolvla/run_metaworld_smolvla_eval.py" \
       --task "${TASK}" \
-      --episodes 1 \
+      --episodes "${EPISODES_PER_TARGET}" \
       --seed "${SEED}" \
       --checkpoint "${CHECKPOINT}" \
       --output-dir "${RUN_DIR}" \
       --video true \
       --overlay-mode cumulative_reward \
+      --save-frames "${SAVE_FRAMES}" \
       --max-steps "${MAX_STEPS}"
 else
   PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
@@ -131,12 +139,13 @@ else
   SMOLVLA_LOAD_VLM_WEIGHTS="${LOAD_VLM_WEIGHTS}" \
   "${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/smolvla/run_metaworld_smolvla_eval.py" \
     --task "${TASK}" \
-    --episodes 1 \
+      --episodes "${EPISODES_PER_TARGET}" \
     --seed "${SEED}" \
     --checkpoint "${CHECKPOINT}" \
     --output-dir "${RUN_DIR}" \
     --video true \
     --overlay-mode cumulative_reward \
+      --save-frames "${SAVE_FRAMES}" \
     --max-steps "${MAX_STEPS}"
 fi
 
@@ -144,7 +153,7 @@ PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
 "${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/smolvla/verify_smolvla_run_artifacts.py" \
   --run-dir "${RUN_DIR}" \
   --task "${TASK}" \
-  --episodes 1 \
+  --episodes "${EPISODES_PER_TARGET}" \
   --require-video true \
   --min-video-bytes "${MIN_VIDEO_BYTES}"
 

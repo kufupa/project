@@ -289,3 +289,60 @@ def test_build_overlay_text_uses_single_primary_metric_label():
 
 def test_validate_overlay_mode_accepts_reward_delta():
     assert evaluator._validate_overlay_mode("reward_delta") == "reward_delta"
+
+
+def test_run_smolvla_eval_respects_fixed_reset_seed_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    seen_reset_seeds: list[int] = []
+
+    class _SeedRecordingBackend:
+        def rollout_episode(self, *, episode_index: int, reset_seed: int) -> EpisodeRollout:
+            _ = episode_index
+            seen_reset_seeds.append(int(reset_seed))
+            frame = np.zeros((8, 8, 3), dtype=np.uint8)
+            return EpisodeRollout(
+                actions=[[0.0, 0.0, 0.0, 0.0]],
+                rewards=[0.0],
+                successes=[False],
+                frames=[frame, frame],
+                terminated=False,
+                truncated=False,
+            )
+
+        def close(self) -> None:
+            return None
+
+    def _fake_video_writer(
+        *,
+        video_path: Path,
+        frames: list[np.ndarray],
+        rewards: list[float],
+        successes: list[bool],
+        overlay_mode: str,
+        fps: int,
+    ) -> None:
+        _ = (frames, rewards, successes, overlay_mode, fps)
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"FAKE_MP4_DATA")
+
+    monkeypatch.setattr(evaluator, "_write_episode_video", _fake_video_writer)
+    monkeypatch.setenv("SMOLVLA_FIXED_RESET_SEED", "4242")
+
+    run_smolvla_eval(
+        task="push-v3",
+        episodes=3,
+        seed=1000,
+        checkpoint="jadechoghari/smolvla_metaworld",
+        output_dir=tmp_path / "run_fixed_seed",
+        video=True,
+        fps=30,
+        overlay_mode="cumulative_reward",
+        backend_factory=lambda **_kwargs: _SeedRecordingBackend(),
+    )
+
+    assert seen_reset_seeds == [4242, 4242, 4242]
+    run_manifest = json.loads(
+        (tmp_path / "run_fixed_seed" / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert [int(ep["reset_seed"]) for ep in run_manifest["episodes"]] == [4242, 4242, 4242]
