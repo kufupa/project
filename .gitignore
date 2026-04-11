@@ -27,3 +27,23 @@ poetry.lock
 
 # Editors and OS
 .DS_Store
+
+# Slurm / interactive run logs dropped in repo root (stdout/stderr captures)
+/*.out
+/*.err
+
+# Project log directory (Slurm copies, ad-hoc logs)
+logs/
+
+# Ad-hoc dotfile scratch (pilots, listing runs, agent temp)
+/.all_runs_*.txt
+/.hf_paths.txt
+/.phase07_*.txt
+/.pilot_*.txt
+/.pilot_*.log
+/.pilot_pid*.txt
+/.pilot_run_*.txt
+/.run_smolvla_target_dbg.log
+/.runs_*.txt
+/.smolvla_proc.txt
+/.tmp_print.txt
