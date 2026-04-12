@@ -51,6 +51,8 @@ if [[ "${TARGET_COUNT}" -eq 0 ]]; then
   echo "error: no oracle targets in ${TARGETS_JSON}" >&2
   exit 2
 fi
+TARGET_RUN_ROOT="${SMOLVLA_TARGET_RUN_ROOT:-${CAMPAIGN_DIR}}"
+mkdir -p "${TARGET_RUN_ROOT}"
 
 SUMMARY_PATH="${CAMPAIGN_DIR}/smolvla_topk_best_summary.json"
 printf '[]' >"${SUMMARY_PATH}"
@@ -58,6 +60,7 @@ printf '[]' >"${SUMMARY_PATH}"
 for TASK_INDEX in $(seq 0 $((TARGET_COUNT - 1))); do
   export SMOLVLA_EPISODES_PER_TARGET="${EPISODES_PER_TARGET}"
   export SMOLVLA_SAVE_FRAMES="${SAVE_FRAMES}"
+  export SMOLVLA_TARGET_RUN_ROOT="${TARGET_RUN_ROOT}"
   export SMOLVLA_CAMPAIGN_DIR="${CAMPAIGN_DIR}"
   bash "${SCRIPT_DIR}/run_smolvla_target_episode.sh" "${TARGETS_JSON}" "${TASK_INDEX}"
 
