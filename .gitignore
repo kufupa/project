@@ -31,6 +31,8 @@ poetry.lock
 # Slurm / interactive run logs dropped in repo root (stdout/stderr captures)
 /*.out
 /*.err
+*.out
+*.err
 
 # Project log directory (Slurm copies, ad-hoc logs)
 logs/
@@ -47,3 +49,7 @@ logs/
 /.runs_*.txt
 /.smolvla_proc.txt
 /.tmp_print.txt
+*.mp4
+*.log
+comparison_strip.png
+comparison_video.mp4
