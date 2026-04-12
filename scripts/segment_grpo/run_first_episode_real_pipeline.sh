@@ -54,4 +54,7 @@ exec "${PYTHON_BIN}" scripts/run_segment_grpo.py \
   --carry-mode sim \
   --wm-rollout-mode iterative \
   --device cuda \
+  --wm-sim-camera-parity \
+  --wm-sim-img-size 224 \
+  --wm-goal-hflip \
   "$@"

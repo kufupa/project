@@ -26,6 +26,11 @@ from segment_grpo_reference import (  # noqa: E402
 )
 from smolvla_pipeline.run_layout import ensure_unique_run_dir  # noqa: E402
 
+# Jepa-wms / WM–oracle pixel contract: keep these True unless you are deliberately A/B testing.
+WM_PARITY_GOAL_HFLIP_DEFAULT = True
+WM_PARITY_SIM_CAMERA_DEFAULT = True
+WM_PARITY_SIM_IMG_SIZE_DEFAULT = 224
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Segment-level GRPO loop for push-v3 style tasks.")
@@ -122,6 +127,24 @@ def _parse_args() -> argparse.Namespace:
         "--strict-decode",
         action="store_true",
         help="Fail rollout when decode reconstruction fails; otherwise record failure metadata.",
+    )
+    parser.add_argument(
+        "--wm-goal-hflip",
+        default=WM_PARITY_GOAL_HFLIP_DEFAULT,
+        action=argparse.BooleanOptionalAction,
+        help="H-flip oracle/stored goal pixels before WM encode (default: on; --no-wm-goal-hflip to disable).",
+    )
+    parser.add_argument(
+        "--wm-sim-camera-parity",
+        default=WM_PARITY_SIM_CAMERA_DEFAULT,
+        action=argparse.BooleanOptionalAction,
+        help="Jepa-wms corner2 + V-flip sim RGB for policy + WM + strips (default: on; --no-wm-sim-camera-parity to disable).",
+    )
+    parser.add_argument(
+        "--wm-sim-img-size",
+        type=int,
+        default=WM_PARITY_SIM_IMG_SIZE_DEFAULT,
+        help=f"Square render size for WM sim camera parity (default {WM_PARITY_SIM_IMG_SIZE_DEFAULT}).",
     )
     return parser.parse_args()
 
@@ -225,6 +248,12 @@ def main() -> int:
     output_json_base, run_dir = _prepare_output_json(args)
     if run_dir is not None:
         print(f"[segment_grpo] run directory: {run_dir}")
+    print(
+        "[segment_grpo] wm flags: "
+        f"wm_goal_hflip={args.wm_goal_hflip} "
+        f"wm_sim_camera_parity={args.wm_sim_camera_parity} "
+        f"wm_sim_img_size={args.wm_sim_img_size}"
+    )
 
     smolvla_bundle = None
     try:
@@ -340,6 +369,9 @@ def main() -> int:
             strict_decode=bool(args.strict_decode),
             wm_rollout_mode=str(args.wm_rollout_mode),
             wm_scoring_latent=str(args.wm_scoring_latent),
+            wm_goal_flip_horizontal=bool(args.wm_goal_hflip),
+            wm_sim_camera_parity=bool(args.wm_sim_camera_parity),
+            wm_sim_img_size=int(args.wm_sim_img_size),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())
