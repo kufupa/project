@@ -18,7 +18,12 @@ from segment_grpo_loop import (
     DecodeTrace,
     _decode_latent_trace_to_frames,
     _ensure_action_matrix,
+    _normalize_env_actions_for_wm,
+    _pack_env_actions_for_wm,
+    _sample_smolvla_chunk,
     _select_comparison_frames,
+    _to_wm_visual,
+    _wm_action_block_factor,
     _write_comparison_segment_strip,
     rollout_with_chunks,
     score_chunk_by_goal_latent,
@@ -79,6 +84,16 @@ def test_ensure_action_matrix_padding_and_truncation_regression() -> None:
     expected = np.array([[0.0, 1.0], [4.0, 5.0]], dtype=np.float32)
     np.testing.assert_allclose(truncated, expected)
 
+
+
+def test_to_wm_visual_feeds_jepa_hub_encode_range() -> None:
+    """EncPredWM.encode divides by 255 once; WM input must stay in ~[0, 255] float."""
+    torch = pytest.importorskip("torch")
+    white = np.full((32, 32, 3), 255, dtype=np.uint8)
+    t = _to_wm_visual(white, torch.device("cpu"))
+    assert t.shape == (1, 1, 3, 256, 256)
+    assert float(t.max()) > 200.0
+    assert float(t.min()) >= 0.0
 
 
 def test_wm_encode_unroll_smoke() -> None:
@@ -150,6 +165,44 @@ def test_score_chunk_by_goal_latent_uses_scoring_latent_mode_visual() -> None:
         wm_scoring_latent="visual",
     )
     assert distance == 0.0
+
+
+def test_batched_proprio_scoring_omits_visual_latents_for_decode_when_no_visual_trace() -> None:
+    """Do not feed proprio rollout slices into image decode as fake visual latents."""
+    torch = pytest.importorskip("torch")
+
+    class _ProprioOnlyDictUnroll:
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            del obs
+            return torch.zeros((1, 1, 3), dtype=torch.float32)
+
+        def unroll(self, z: object, act_suffix: torch.Tensor, debug: bool = False) -> dict[str, object]:
+            del z, debug
+            return {"proprio": torch.tensor([[[1.0, 2.0]]], dtype=torch.float32)}
+
+    bundle = WMBundle(
+        model=_ProprioOnlyDictUnroll(),
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    goal_latent = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    chunk = np.zeros((1, 4), dtype=np.float32)
+
+    _distance, _score_trace, decode_trace = score_chunk_by_goal_latent(
+        wm_bundle=bundle,
+        image=np.zeros((64, 64, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_actions=chunk,
+        goal_latent=goal_latent,
+        chunk_len=1,
+        return_latent_trace=True,
+        wm_rollout_mode="batched",
+        wm_scoring_latent="proprio",
+    )
+    assert decode_trace.visual_latents == []
+    assert len(decode_trace.proprio_latents) == 1
 
 
 def test_score_chunk_by_goal_latent_uses_scoring_latent_mode_proprio() -> None:
@@ -276,12 +329,12 @@ def test_iterative_rollout_keeps_structured_score_decode_traces_and_scores_from_
             step = self.unroll_calls
             self.unroll_calls += 1
             latent = torch.tensor(
-                [[[float(step + 1), float(step + 1), float(step + 1)]], dtype=torch.float32
+                [[[float(step + 1), float(step + 1), float(step + 1)]]], dtype=torch.float32
             )
             visual = torch.tensor(
-                [[[float(step + 1), float(step + 2), float(step + 3)]], dtype=torch.float32
+                [[[float(step + 1), float(step + 2), float(step + 3)]]], dtype=torch.float32
             )
-            proprio = torch.tensor([[[float(step + 1), -float(step + 1)]], dtype=torch.float32)
+            proprio = torch.tensor([[[float(step + 1), -float(step + 1)]]], dtype=torch.float32)
             return {"latent": latent, "visual": visual, "proprio": proprio}
 
     model = _TracingModel()
@@ -561,6 +614,170 @@ def test_rollout_only_decodes_selected_candidate(monkeypatch: pytest.MonkeyPatch
     assert model.decode_calls == 1
     assert episode.metadata["wm_scoring_statuses"] == ["ok"]
     assert episode.metadata["decode_statuses"] == ["ok"]
+
+
+def test_normalize_and_pack_env_actions_for_wm_factor5() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Preproc:
+        action_mean = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+        action_std = torch.ones(4, dtype=torch.float32)
+
+        def normalize_actions(self, a: torch.Tensor) -> torch.Tensor:
+            return (a - self.action_mean) / self.action_std
+
+    actions = np.array(
+        [
+            [10.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    env_d, wm_d = 4, 20
+    f = _wm_action_block_factor(env_d, wm_d)
+    assert f == 5
+    norm = _normalize_env_actions_for_wm(_Preproc(), actions, env_d, torch.device("cpu"))
+    assert norm.shape == (6, 4)
+    assert abs(float(norm[0, 0]) - 9.0) < 1e-5
+    packed = _pack_env_actions_for_wm(norm, f, env_d, wm_d)
+    assert packed.shape == (2, 20)
+    assert abs(float(packed[1, 0]) - 1.0) < 1e-5
+
+
+def test_score_chunk_normalizes_and_packs_before_unroll() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.last_act: torch.Tensor | None = None
+
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            del obs
+            return torch.zeros((1, 1, 2), dtype=torch.float32)
+
+        def unroll(self, z: torch.Tensor, act_suffix: torch.Tensor, debug: bool = False) -> torch.Tensor:
+            del z, debug
+            self.last_act = act_suffix.detach().cpu().clone()
+            t = int(act_suffix.shape[0])
+            return torch.zeros((t, 1, 2), dtype=torch.float32)
+
+    class _Preproc:
+        action_mean = torch.ones(4, dtype=torch.float32)
+        action_std = torch.ones(4, dtype=torch.float32)
+
+        def normalize_actions(self, a: torch.Tensor) -> torch.Tensor:
+            return (a - self.action_mean) / self.action_std
+
+    model = _Recorder()
+    bundle = WMBundle(
+        model=model,
+        preprocessor=_Preproc(),
+        proprio_dim=4,
+        planner_action_dim=20,
+        device=torch.device("cpu"),
+    )
+    chunk = np.ones((5, 4), dtype=np.float32)
+    goal = torch.zeros(2, dtype=torch.float32)
+
+    score_chunk_by_goal_latent(
+        wm_bundle=bundle,
+        image=np.zeros((64, 64, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_actions=chunk,
+        goal_latent=goal,
+        chunk_len=5,
+        wm_rollout_mode="batched",
+    )
+    assert model.last_act is not None
+    assert tuple(model.last_act.shape) == (1, 1, 20)
+    np.testing.assert_allclose(model.last_act.numpy()[0, 0, :4], 0.0, atol=1e-6)
+
+
+def test_wm_iterative_unroll_once_per_packed_wm_step() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _CountPacked:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            del obs
+            return torch.zeros((1, 1, 3), dtype=torch.float32)
+
+        def unroll(self, z: torch.Tensor, act_suffix: torch.Tensor, debug: bool = False) -> torch.Tensor:
+            del z, debug
+            self.calls += 1
+            assert act_suffix.shape == (1, 1, 20)
+            return torch.zeros((1, 1, 3), dtype=torch.float32)
+
+    class _Preproc:
+        action_mean = torch.zeros(4, dtype=torch.float32)
+        action_std = torch.ones(4, dtype=torch.float32)
+
+        def normalize_actions(self, a: torch.Tensor) -> torch.Tensor:
+            return a
+
+    model = _CountPacked()
+    bundle = WMBundle(
+        model=model,
+        preprocessor=_Preproc(),
+        proprio_dim=4,
+        planner_action_dim=20,
+        device=torch.device("cpu"),
+    )
+    chunk_len = 8
+    chunk = np.zeros((chunk_len, 4), dtype=np.float32)
+    score_chunk_by_goal_latent(
+        wm_bundle=bundle,
+        image=np.zeros((64, 64, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_actions=chunk,
+        goal_latent=torch.zeros(3, dtype=torch.float32),
+        chunk_len=chunk_len,
+        wm_rollout_mode="iterative",
+    )
+    assert model.calls == 2
+
+
+def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("torch")
+    fake_helper = SimpleNamespace()
+
+    def _exec(*_a: object, **_k: object) -> np.ndarray:
+        return np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+
+    fake_helper._smolvla_exec_action = _exec
+    monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
+    rng = np.random.default_rng(0)
+    chunk = _sample_smolvla_chunk(
+        smolvla_bundle=object(),
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_len=3,
+        env_action_dim=4,
+        task_text="t",
+        rng=rng,
+    )
+    assert chunk.shape == (3, 4)
+
+
+def test_select_comparison_frames_with_wm_step_factor() -> None:
+    real_frames = [np.full((2, 2, 3), i, dtype=np.uint8) for i in range(9)]
+    pred_frames = [np.full((2, 2, 3), 100 + k, dtype=np.uint8) for k in range(2)]
+    selected_real, selected_pred = _select_comparison_frames(
+        real_frames,
+        pred_frames,
+        carried_steps=8,
+        env_steps_per_wm_step=5,
+    )
+    assert len(selected_real) == len(selected_pred) == 2
+    np.testing.assert_array_equal(selected_real[0], real_frames[5])
+    np.testing.assert_array_equal(selected_real[1], real_frames[8])
+    np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
 
 
 def test_select_comparison_frames_keeps_t0_as_context() -> None:
