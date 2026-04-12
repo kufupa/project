@@ -851,17 +851,18 @@ def _build_real_vs_pred_strip(
     cs = 0 if carried_steps is None else int(carried_steps)
     d_full: list[float] | None = None
     delta_full: list[float] | None = None
+    g_np: np.ndarray | None = None
     if (
         overlay_decode_meta
         and overlay_goal_latent_np is not None
         and overlay_score_trace is not None
         and overlay_score_trace.step_vectors
     ):
-        g = np.asarray(overlay_goal_latent_np, dtype=np.float32).reshape(-1)
+        g_np = np.asarray(overlay_goal_latent_np, dtype=np.float32).reshape(-1)
         d_full, delta_full = _latent_overlay_distance_tables(
             overlay_score_trace.initial_vector,
             overlay_score_trace.step_vectors,
-            g,
+            g_np,
         )
     pairs: list[np.ndarray] = []
     for idx in range(total):
