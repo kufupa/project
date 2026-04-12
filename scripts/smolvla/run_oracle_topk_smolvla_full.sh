@@ -17,7 +17,16 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 LAUNCH_MODE="${SMOLVLA_TOPK_LAUNCH_MODE:-dry-run}"
+ALLOW_NESTED_SBATCH="${SMOLVLA_ALLOW_NESTED_SBATCH:-0}"
 LAUNCH_ARGS=(--oracle-run-dir "${ORACLE_RUN_DIR}" --top-k "${TOP_K}")
+
+if [[ "${LAUNCH_MODE}" == "sbatch" ]]; then
+  if [[ -n "${SLURM_JOB_ID:-}" && "${ALLOW_NESTED_SBATCH}" != "1" ]]; then
+    echo "warning: running inside Slurm job ${SLURM_JOB_ID}; nested sbatch is disabled to avoid QOS submit limits." >&2
+    echo "warning: forcing launch mode to dry-run. Set SMOLVLA_ALLOW_NESTED_SBATCH=1 to override." >&2
+    LAUNCH_MODE="dry-run"
+  fi
+fi
 
 if [[ "${LAUNCH_MODE}" == "dry-run" ]]; then
   LAUNCH_ARGS+=(--dry-run)
@@ -25,6 +34,8 @@ elif [[ "${LAUNCH_MODE}" != "sbatch" ]]; then
   echo "error: unsupported SMOLVLA_TOPK_LAUNCH_MODE=${LAUNCH_MODE}" >&2
   exit 2
 fi
+
+echo "smolvla-topk: launch_mode=${LAUNCH_MODE} slurm_job_id=${SLURM_JOB_ID:-none} allow_nested_sbatch=${ALLOW_NESTED_SBATCH}"
 
 CAMPAIGN_OUT="$(
   bash "${SCRIPT_DIR}/launch_pushv3_smolvla_topk15.sh" "${LAUNCH_ARGS[@]}"
@@ -152,20 +163,4 @@ done
 
 PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
 SUMMARY_PATH="${SUMMARY_PATH}" \
-python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-summary = json.loads(Path(os.environ["SUMMARY_PATH"]).read_text(encoding="utf-8"))
-print("rank, oracle_episode, oracle_sum, smolvla_best_episode, smolvla_sum, delta_sum, smolvla_video")
-for row in summary:
-    delta = float(row["smolvla_sum_reward"]) - float(row["oracle_sum_reward"])
-    print(
-        f'{row["oracle_rank"]}, {row["oracle_episode_index"]}, '
-        f'{row["oracle_sum_reward"]}, {row["smolvla_best_episode_index"]}, '
-        f'{row["smolvla_sum_reward"]}, {delta}, {row["best_video"]}'
-    )
-print(f"summary_path={os.environ['SUMMARY_PATH']}")
-print(f"environments={len(summary)}")
-PY
+"${PYTHON_BIN}" "${SCRIPT_DIR}/print_smolvla_topk_campaign_summary.py"
