@@ -19,6 +19,8 @@ except Exception:  # pragma: no cover
     torch = None
     nn = None
 
+logger = logging.getLogger(__name__)
+
 
 def _require_torch(message: str) -> None:
     if torch is None:
@@ -78,6 +80,7 @@ class DecodeTrace:
     visual_latents: list[np.ndarray]
     proprio_latents: list[np.ndarray] = field(default_factory=list)
     selected_candidate_index: int | None = None
+    env_steps_per_wm_step: int = 1
 
 
 @dataclass
@@ -246,12 +249,35 @@ def _to_rgb_uint8(image: Any) -> np.ndarray:
 def _to_wm_visual(image: Any, device: torch.device) -> torch.Tensor:
     _require_torch("WM visual conversion requires torch.")
     rgb = _to_rgb_uint8(image)
-    tensor = torch.from_numpy(rgb).float() / 255.0
+    if not rgb.flags.writeable:
+        rgb = rgb.copy()
+    # JEPA hub EncPredWM.encode divides by 255 once; feed float RGB in [0, 255], not [0, 1].
+    tensor = torch.from_numpy(rgb).float()
     tensor = tensor.permute(2, 0, 1).unsqueeze(0)  # 1,3,H,W
     tensor = torch.nn.functional.interpolate(
         tensor, size=(256, 256), mode="bilinear", align_corners=False
     )  # 1,3,256,256
     return tensor.unsqueeze(0).to(device)  # 1,1,3,256,256
+
+
+def _prepare_goal_image_for_wm(image: Any, *, flip_horizontal: bool) -> np.ndarray:
+    """Oracle PNGs are V+H vs raw; jepa-wms live RGB is V-only → H-flip goal for WM encode when enabled."""
+    rgb = _to_rgb_uint8(image)
+    if not flip_horizontal:
+        return rgb
+    return np.ascontiguousarray(np.flip(rgb, axis=1))
+
+
+def _write_wm_goal_encode_debug(rgb: np.ndarray, path: Path | str) -> None:
+    """Persist uint8 HWC exactly as passed into WM encode preprocessing (after goal H-flip when on)."""
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:
+        logger.warning("wm_goal_for_encode.png skipped (imageio unavailable): %s", exc)
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    imageio.imwrite(str(out), np.asarray(rgb, dtype=np.uint8))
 
 
 def _to_wm_proprio(proprio: Any, proprio_dim: int, device: torch.device) -> torch.Tensor:
@@ -288,6 +314,89 @@ def _ensure_action_matrix(actions: np.ndarray, action_dim: int, length: int) -> 
         )
         arr = np.concatenate([arr, pad_rows], axis=0)
     return arr
+
+
+def _infer_env_action_dim(wm_bundle: WMBundle, chunk_actions: np.ndarray) -> int:
+    """Infer executed env action width for WM scoring (Metaworld 4D vs packed WM rows)."""
+    mean = getattr(wm_bundle.preprocessor, "action_mean", None)
+    if mean is not None and hasattr(mean, "numel"):
+        try:
+            n = int(mean.numel())
+            if n > 0:
+                return n
+        except Exception:
+            pass
+    wm_dim = _infer_model_action_dim(wm_bundle.model) or int(wm_bundle.planner_action_dim)
+    w = int(chunk_actions.shape[1])
+    if wm_dim > 0 and w == wm_dim:
+        return w
+    if wm_dim > 0 and w < wm_dim and wm_dim % w == 0:
+        return w
+    if wm_dim >= 4 and wm_dim % 4 == 0:
+        return 4
+    return max(1, w)
+
+
+def _wm_action_block_factor(env_action_dim: int, wm_action_dim: int) -> int:
+    if env_action_dim <= 0 or wm_action_dim <= 0:
+        return 1
+    if wm_action_dim % env_action_dim != 0:
+        return 1
+    f = wm_action_dim // env_action_dim
+    return f if f > 0 else 1
+
+
+def _normalize_env_actions_for_wm(
+    preprocessor: Any,
+    actions_2d: np.ndarray,
+    env_dim: int,
+    device: Any,
+) -> np.ndarray:
+    arr = _ensure_action_matrix(np.asarray(actions_2d, dtype=np.float32), env_dim, actions_2d.shape[0])
+    norm_fn = getattr(preprocessor, "normalize_actions", None)
+    if not callable(norm_fn):
+        return arr.astype(np.float32, copy=False)
+    _require_torch("WM action normalization requires torch.")
+    batch = torch.from_numpy(arr).unsqueeze(0).to(device=device, dtype=torch.float32)
+    mean = getattr(preprocessor, "action_mean", None)
+    std = getattr(preprocessor, "action_std", None)
+    if mean is not None:
+        mean_d = torch.as_tensor(mean, dtype=torch.float32, device=device).reshape(1, 1, -1)
+        if std is not None:
+            std_d = torch.as_tensor(std, dtype=torch.float32, device=device).reshape(1, 1, -1)
+        else:
+            std_d = torch.ones_like(mean_d)
+        out = (batch - mean_d) / std_d
+        return out.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    out = norm_fn(batch)
+    if torch.is_tensor(out):
+        return out.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    return np.asarray(out, dtype=np.float32).reshape(arr.shape[0], env_dim)
+
+
+def _pack_env_actions_for_wm(
+    actions_norm_2d: np.ndarray,
+    factor: int,
+    env_dim: int,
+    wm_dim: int,
+) -> np.ndarray:
+    arr = np.asarray(actions_norm_2d, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] != env_dim:
+        raise RuntimeError(f"Expected normalized actions (T, {env_dim}), got {arr.shape}.")
+    if factor <= 1:
+        if arr.shape[1] != wm_dim:
+            raise RuntimeError(f"WM action dim {wm_dim} != env dim {env_dim} with factor 1.")
+        return arr.astype(np.float32, copy=False)
+    if factor * env_dim != wm_dim:
+        raise RuntimeError(f"WM dim {wm_dim} must equal factor*{env_dim}={factor * env_dim}.")
+    t = int(arr.shape[0])
+    n_pad = (factor - (t % factor)) % factor
+    if n_pad:
+        pad = np.repeat(arr[-1:], n_pad, axis=0)
+        arr = np.concatenate([arr, pad], axis=0)
+    n_blk = int(arr.shape[0]) // factor
+    packed = arr.reshape(n_blk, wm_dim)
+    return packed.astype(np.float32, copy=False)
 
 
 def _frame_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -569,10 +678,28 @@ def _select_comparison_frames(
     real_frames: list[np.ndarray],
     pred_frames: list[np.ndarray],
     carried_steps: int | None = None,
+    *,
+    env_steps_per_wm_step: int | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Align predicted frames against real rollout with explicit t0 context policy."""
     if not real_frames or not pred_frames:
         return [], []
+    factor = int(env_steps_per_wm_step or 1)
+    if factor > 1:
+        if carried_steps is not None:
+            cs = int(carried_steps)
+        else:
+            cs = max(0, len(real_frames) - 1)
+        if cs <= 0:
+            return [], []
+        out_real: list[np.ndarray] = []
+        out_pred: list[np.ndarray] = []
+        for k in range(len(pred_frames)):
+            ridx = min((k + 1) * factor, cs)
+            if ridx < len(real_frames):
+                out_real.append(real_frames[ridx])
+                out_pred.append(pred_frames[k])
+        return out_real, out_pred
     # Always pair predicted rollout steps against real state transitions.
     # real_frames includes the segment start frame + one frame per carried step.
     limit = max(0, len(real_frames) - 1)
@@ -592,10 +719,16 @@ def _build_real_vs_pred_strip(
     pred_frames: list[np.ndarray],
     *,
     carried_steps: int | None = None,
+    env_steps_per_wm_step: int | None = None,
 ) -> np.ndarray:
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
-    real_frames, pred_frames = _select_comparison_frames(real_frames, pred_frames, carried_steps=carried_steps)
+    real_frames, pred_frames = _select_comparison_frames(
+        real_frames,
+        pred_frames,
+        carried_steps=carried_steps,
+        env_steps_per_wm_step=env_steps_per_wm_step,
+    )
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
     total = len(real_frames)
@@ -619,6 +752,7 @@ def _write_comparison_segment_strip(
     pred_frames: list[np.ndarray],
     *,
     carried_steps: int | None = None,
+    env_steps_per_wm_step: int | None = None,
 ) -> tuple[Path | None, str | None]:
     if carried_steps is not None and int(carried_steps) <= 0:
         return None, None
@@ -626,7 +760,12 @@ def _write_comparison_segment_strip(
         return None, None
     out_dir = Path(out_dir)
     try:
-        strip = _build_real_vs_pred_strip(real_frames, pred_frames, carried_steps=carried_steps)
+        strip = _build_real_vs_pred_strip(
+            real_frames,
+            pred_frames,
+            carried_steps=carried_steps,
+            env_steps_per_wm_step=env_steps_per_wm_step,
+        )
     except Exception as exc:
         reason = f"Failed to build comparison strip for episode {episode_index} segment {segment_index}: {exc}"
         print(f"[segment_grpo] {reason}")
@@ -810,7 +949,7 @@ def _extract_latent(z_pred: Any) -> torch.Tensor:
             if "latent" in z_pred:  # type: ignore[index]
                 candidate = z_pred["latent"]  # type: ignore[index]
             else:
-                preferred_keys = ("proprio", "visual", "state", "prediction", "pred", "z", "latent")
+                preferred_keys = ("visual", "proprio", "state", "prediction", "pred", "z", "latent")
                 found = False
                 for key in preferred_keys:
                     try:
@@ -1060,8 +1199,8 @@ def score_chunk_by_goal_latent(
     Score a candidate chunk by JEPA-WM latent distance to goal latent.
 
     ``wm_rollout_mode``:
-    - ``iterative``: one ``model.unroll`` call per action in the chunk (state carried forward).
-    - ``batched``: single ``unroll`` over the full action suffix (legacy).
+    - ``iterative``: one ``model.unroll`` per WM timestep (packed env actions when ``wm_dim > env_dim``).
+    - ``batched``: single ``unroll`` over the full WM action suffix (legacy).
 
     Returns euclidean distance (smaller is better).
     When ``return_latent_trace`` is True, also returns score and decode traces.
@@ -1071,17 +1210,25 @@ def score_chunk_by_goal_latent(
     if chunk_actions.ndim != 2:
         raise RuntimeError(f"chunk_actions must be 2-D, got shape {chunk_actions.shape}")
 
+    env_dim = _infer_env_action_dim(wm_bundle, chunk_actions)
     model_action_dim = _infer_model_action_dim(wm_bundle.model)
-    target_action_dim = wm_bundle.planner_action_dim
-    if model_action_dim and model_action_dim != target_action_dim:
-        target_action_dim = model_action_dim
-
-    actions = _ensure_action_matrix(
-        chunk_actions,
-        target_action_dim,
-        int(chunk_len or chunk_actions.shape[0]),
+    wm_dim = int(model_action_dim) if model_action_dim else int(wm_bundle.planner_action_dim)
+    if wm_dim <= 0:
+        wm_dim = int(wm_bundle.planner_action_dim)
+    factor = _wm_action_block_factor(env_dim, wm_dim)
+    length = int(chunk_len or chunk_actions.shape[0])
+    n_take = min(int(chunk_actions.shape[1]), env_dim)
+    chunk_env = _ensure_action_matrix(
+        np.asarray(chunk_actions[:, :n_take], dtype=np.float32),
+        env_dim,
+        length,
     )
-    actions_t = torch.from_numpy(actions).to(wm_bundle.device).to(dtype=torch.float32)
+    actions_norm_np = _normalize_env_actions_for_wm(
+        wm_bundle.preprocessor, chunk_env, env_dim, wm_bundle.device
+    )
+    packed_np = _pack_env_actions_for_wm(actions_norm_np, factor, env_dim, wm_dim)
+    _require_torch("score_chunk_by_goal_latent requires torch.")
+    actions_t = torch.from_numpy(packed_np).to(wm_bundle.device).to(dtype=torch.float32).unsqueeze(1)
     mode = str(wm_rollout_mode or "iterative").strip().lower()
     if mode not in ("iterative", "batched"):
         raise ValueError(f"wm_rollout_mode must be 'iterative' or 'batched', got {wm_rollout_mode!r}")
@@ -1117,7 +1264,7 @@ def score_chunk_by_goal_latent(
         latent_state = _as_tensor_dict_if_available(
             wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
         )
-        seq_actions = actions_t.to(wm_bundle.device).to(dtype=torch.float32).unsqueeze(1)
+        seq_actions = actions_t.to(wm_bundle.device).to(dtype=torch.float32)
         if seq_actions.ndim != 3:
             raise RuntimeError(f"Expected action sequence tensor shape (T, B, A), got {seq_actions.shape}")
 
@@ -1237,9 +1384,14 @@ def score_chunk_by_goal_latent(
             step_vectors=score_trace_steps,
             final_vector=score_trace_steps[-1] if score_trace_steps else np.asarray([], dtype=np.float32),
         )
+        scoring_mode = str(wm_scoring_latent or "visual").strip().lower()
+        visual_for_decode = list(decode_visual_steps) if decode_visual_steps else []
+        if not visual_for_decode and scoring_mode == "visual":
+            visual_for_decode = list(decode_trace_steps)
         decode_trace = DecodeTrace(
-            visual_latents=decode_visual_steps or decode_trace_steps,
+            visual_latents=visual_for_decode,
             proprio_latents=decode_proprio_steps,
+            env_steps_per_wm_step=int(factor),
         )
         return float(distance), score_trace, decode_trace
     return float(distance)
@@ -1250,7 +1402,7 @@ def _sample_smolvla_chunk(
     image: np.ndarray,
     proprio: np.ndarray,
     chunk_len: int,
-    planner_action_dim: int,
+    env_action_dim: int,
     task_text: str,
     rng: np.random.Generator,
 ) -> np.ndarray:
@@ -1272,8 +1424,8 @@ def _sample_smolvla_chunk(
 
     chunk: list[np.ndarray] = []
     for _ in range(chunk_len):
-        noise = rng.normal(0.0, 0.10, size=planner_action_dim).astype(np.float32)
-        action = np.clip(_pad_or_truncate(base, planner_action_dim) + noise, -1.0, 1.0)
+        noise = rng.normal(0.0, 0.10, size=int(env_action_dim)).astype(np.float32)
+        action = np.clip(_pad_or_truncate(base, int(env_action_dim)) + noise, -1.0, 1.0)
         chunk.append(action)
     return np.stack(chunk, axis=0).astype(np.float32)
 
@@ -1379,10 +1531,15 @@ def _load_goal_latent(
     *,
     goal_frame: np.ndarray | None = None,
     wm_scoring_latent: str = "visual",
-) -> torch.Tensor | None:
+    wm_goal_flip_horizontal: bool = True,
+    wm_goal_debug_path: Path | str | None = None,
+) -> tuple[Any | None, str | None]:
     """
     Resolve a goal latent from a source file with fallback to current state latent.
+
+    Returns (latent_or_none, path_str_if_debug_png_written).
     """
+    debug_written: str | None = None
     source = (source or "").strip()
     if source and Path(source).exists():
         p = Path(source)
@@ -1398,12 +1555,18 @@ def _load_goal_latent(
             payload_obj = torch.load(p, map_location="cpu")
 
         if isinstance(payload_obj, dict) and "latent" in payload_obj:
-            return torch.tensor(np.asarray(payload_obj["latent"], dtype=np.float32).reshape(-1), dtype=torch.float32)
+            return (
+                torch.tensor(np.asarray(payload_obj["latent"], dtype=np.float32).reshape(-1), dtype=torch.float32),
+                None,
+            )
 
         if isinstance(payload_obj, dict) and "image" in payload_obj and "proprio" in payload_obj and wm_bundle is not None:
-            img = np.asarray(payload_obj["image"])
+            img = _prepare_goal_image_for_wm(payload_obj["image"], flip_horizontal=wm_goal_flip_horizontal)
             proprio = np.asarray(payload_obj["proprio"], dtype=np.float32)
-            return _encode_state_to_latent(wm_bundle, img, proprio, wm_scoring_latent=wm_scoring_latent)
+            if wm_goal_debug_path is not None:
+                _write_wm_goal_encode_debug(img, wm_goal_debug_path)
+                debug_written = str(Path(wm_goal_debug_path).resolve())
+            return _encode_state_to_latent(wm_bundle, img, proprio, wm_scoring_latent=wm_scoring_latent), debug_written
 
     if wm_bundle is not None and goal_frame is not None:
         proprio = (
@@ -1411,11 +1574,15 @@ def _load_goal_latent(
             if fallback_proprio is not None
             else np.zeros(int(wm_bundle.proprio_dim), dtype=np.float32)
         )
-        return _encode_state_to_latent(wm_bundle, goal_frame, proprio, wm_scoring_latent=wm_scoring_latent)
+        prepared = _prepare_goal_image_for_wm(goal_frame, flip_horizontal=wm_goal_flip_horizontal)
+        if wm_goal_debug_path is not None:
+            _write_wm_goal_encode_debug(prepared, wm_goal_debug_path)
+            debug_written = str(Path(wm_goal_debug_path).resolve())
+        return _encode_state_to_latent(wm_bundle, prepared, proprio, wm_scoring_latent=wm_scoring_latent), debug_written
 
     if wm_bundle is not None and fallback_image is not None and fallback_proprio is not None:
-        return _encode_state_to_latent(wm_bundle, fallback_image, fallback_proprio, wm_scoring_latent=wm_scoring_latent)
-    return None
+        return _encode_state_to_latent(wm_bundle, fallback_image, fallback_proprio, wm_scoring_latent=wm_scoring_latent), None
+    return None, None
 
 
 def _encode_state_to_latent(
@@ -1543,6 +1710,9 @@ def rollout_with_chunks(
     adapter: nn.Module | None = None,
     wm_rollout_mode: str = "iterative",
     wm_scoring_latent: str = "visual",
+    wm_goal_flip_horizontal: bool = True,
+    wm_sim_camera_parity: bool = True,
+    wm_sim_img_size: int = 224,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -1564,6 +1734,8 @@ def rollout_with_chunks(
 
     rng = np.random.default_rng(seed)
     task_text = f"{task}"
+    jepa_parity_sim = False
+    _render_jepa_rgb = None
 
     if carry_mode == "replay":
         images, proprio_seq = _load_replay_root(replay_root, dry_run=dry_run, seed=seed, fallback_len=max_steps + chunk_len)
@@ -1582,22 +1754,33 @@ def rollout_with_chunks(
             try:
                 import metaworld
 
-                mt1 = metaworld.MT1(task)
-                env_cls = mt1.train_classes[task]
                 os.environ.setdefault("MUJOCO_GL", "egl")
-                try:
-                    env = env_cls(render_mode="rgb_array")
-                except TypeError:
-                    env = env_cls()
+                if wm_sim_camera_parity:
+                    from metaworld_jepa_render import build_jepa_metaworld_env, render_jepa_rgb
+
+                    env, train_tasks = build_jepa_metaworld_env(task, img_size=int(wm_sim_img_size), seed=seed)
+                    if train_tasks:
+                        env.set_task(train_tasks[int(episode_index) % len(train_tasks)])
+                    _, current_proprio, _ = _reset_env(env, seed=seed)
+                    _render_jepa_rgb = render_jepa_rgb
+                    current_image = _render_jepa_rgb(env)
+                    jepa_parity_sim = True
+                else:
+                    mt1 = metaworld.MT1(task)
+                    env_cls = mt1.train_classes[task]
                     try:
-                        if hasattr(env, "render_mode"):
-                            env.render_mode = "rgb_array"
-                    except Exception as exc:
-                        print(f"[segment_grpo] failed to set env render_mode on simulation env: {exc}")
-                tasks = getattr(mt1, "train_tasks", None)
-                if tasks:
-                    env.set_task(tasks[0])
-                current_image, current_proprio, _ = _reset_env(env, seed=seed)
+                        env = env_cls(render_mode="rgb_array")
+                    except TypeError:
+                        env = env_cls()
+                        try:
+                            if hasattr(env, "render_mode"):
+                                env.render_mode = "rgb_array"
+                        except Exception as exc:
+                            print(f"[segment_grpo] failed to set env render_mode on simulation env: {exc}")
+                    tasks = getattr(mt1, "train_tasks", None)
+                    if tasks:
+                        env.set_task(tasks[int(episode_index) % len(tasks)])
+                    current_image, current_proprio, _ = _reset_env(env, seed=seed)
                 env_action_dim = int(np.prod(env.action_space.shape))
             except Exception as exc:
                 if not dry_run:
@@ -1620,7 +1803,11 @@ def rollout_with_chunks(
     reset_frame_warning = False
     if start_frame is not None:
         try:
-            start_frame_similarity = _frame_similarity(current_image, start_frame)
+            # Oracle start_frame is V+H vs raw; jepa-parity live RGB is V-only on raw → H-flip oracle for compare.
+            sf = np.asarray(start_frame)
+            if wm_goal_flip_horizontal and jepa_parity_sim:
+                sf = np.flip(sf, axis=1)
+            start_frame_similarity = _frame_similarity(current_image, sf)
             if start_frame_similarity > float(reset_frame_warning_threshold):
                 reset_frame_warning = True
                 print(
@@ -1635,14 +1822,21 @@ def rollout_with_chunks(
             raise RuntimeError("SmolVLA bundle is required when not in dry-run mode.")
         smolvla_bundle = None
 
+    wm_goal_debug_path: Path | None = None
+    if comparison_root is not None and wm_bundle is not None:
+        wm_goal_debug_path = Path(comparison_root) / f"episode_{episode_index:04d}" / "wm_goal_for_encode.png"
+
+    wm_goal_encode_dbg_path: str | None = None
     if wm_bundle is not None:
-        goal_latent = _load_goal_latent(
+        goal_latent, wm_goal_encode_dbg_path = _load_goal_latent(
             goal_latent_source,
             wm_bundle,
             fallback_image=current_image,
             fallback_proprio=current_proprio,
             goal_frame=goal_frame,
             wm_scoring_latent=wm_scoring_latent,
+            wm_goal_flip_horizontal=wm_goal_flip_horizontal,
+            wm_goal_debug_path=wm_goal_debug_path,
         )
     else:
         goal_latent = None
@@ -1671,6 +1865,10 @@ def rollout_with_chunks(
             "carry_mode": carry_mode,
             "train_steps": int(train_steps),
             "wm_rollout_mode": str(wm_rollout_mode),
+            "wm_goal_flip_horizontal": bool(wm_goal_flip_horizontal),
+            "wm_sim_camera_parity": bool(wm_sim_camera_parity),
+            "wm_sim_img_size": int(wm_sim_img_size),
+            "wm_goal_for_encode_path": wm_goal_encode_dbg_path,
             "strict_wm_scoring": bool(strict_wm_scoring),
             "strict_decode": bool(strict_decode),
             "wm_scoring_latent": str(wm_scoring_latent),
@@ -1697,17 +1895,18 @@ def rollout_with_chunks(
                     current_image,
                     current_proprio,
                     effective_len,
-                    planner_action_dim,
+                    int(env_action_dim),
                     task_text,
                     rng,
                 )
             else:
-                chunk = _synthetic_chunk(planner_action_dim, effective_len, candidate_idx, rng)
+                chunk = _synthetic_chunk(int(env_action_dim), effective_len, candidate_idx, rng)
 
             # Score by latent distance when possible; fallback to deterministic synthetic score otherwise.
             latent_trace: list[np.ndarray] | None = None
             scoring_failure_reason: str | None = None
             wm_scoring_status = "fallback"
+            wm_stride_meta = 1
             if wm_bundle is not None and goal_latent is not None:
                 try:
                     distance, score_trace, decode_trace = score_chunk_by_goal_latent(
@@ -1725,6 +1924,7 @@ def rollout_with_chunks(
                     decode_trace.selected_candidate_index = int(candidate_idx)
                     score = -distance
                     wm_scoring_status = "ok"
+                    wm_stride_meta = int(getattr(decode_trace, "env_steps_per_wm_step", 1) or 1)
                 except Exception as exc:
                     if strict_wm_scoring:
                         raise
@@ -1754,17 +1954,19 @@ def rollout_with_chunks(
                     latent_distance=float(distance),
                     meta={
                         "planner_action_dim": int(planner_action_dim),
+                        "env_action_dim": int(env_action_dim),
                         "effective_chunk_len": int(effective_len),
                         "wm_scoring_status": wm_scoring_status,
+                        "wm_env_steps_per_wm_step": int(wm_stride_meta),
                         "decode_status": "skipped",
                         "scoring_failure_reason": str(scoring_failure_reason) if scoring_failure_reason is not None else None,
-                                "latent_trace_len": 0
-                                if decode_trace is None
-                                else int(
-                                    len(decode_trace.visual_latents)
-                                    if decode_trace.visual_latents
-                                    else len(decode_trace.proprio_latents)
-                                ),
+                        "latent_trace_len": 0
+                        if decode_trace is None
+                        else int(
+                            len(decode_trace.visual_latents)
+                            if decode_trace.visual_latents
+                            else len(decode_trace.proprio_latents)
+                        ),
                         **({"failure_reason": str(scoring_failure_reason)} if scoring_failure_reason is not None else {}),
                     },
                 )
@@ -1780,7 +1982,7 @@ def rollout_with_chunks(
         )
         selected_idx = int(best.index)
         selected_distance = best.latent_distance if best.latent_distance is not None else None
-        best_actions = _ensure_action_matrix(best.actions, planner_action_dim, effective_len)
+        best_actions = _ensure_action_matrix(best.actions, int(env_action_dim), effective_len)
         selected_trace = candidate_traces.get(selected_idx)
         selected_meta = segment_candidates[selected_idx].meta if 0 <= selected_idx < len(segment_candidates) else None
         pred_frames: list[np.ndarray] = []
@@ -1792,7 +1994,11 @@ def rollout_with_chunks(
         if carry_mode == "sim" and env is not None:
             for i in range(effective_len):
                 action_env = _take_action_for_env(best_actions[i], int(env_action_dim))
-                current_image, current_proprio, _info, step_done = _step_env(env, action_env)
+                _obs_img, current_proprio, _info, step_done = _step_env(env, action_env)
+                if jepa_parity_sim and _render_jepa_rgb is not None:
+                    current_image = _render_jepa_rgb(env)
+                else:
+                    current_image = _obs_img
                 carried_steps += 1
                 current_step += 1
                 executed_actions.append(action_env.tolist())
@@ -1908,6 +2114,9 @@ def rollout_with_chunks(
 
         segment_comparison_path = None
         if comparison_root_path is not None and pred_frames and carried_steps > 0:
+            wm_stride = 1
+            if selected_trace is not None:
+                wm_stride = int(getattr(selected_trace, "env_steps_per_wm_step", 1) or 1)
             segment_path, segment_strip_failure_reason = _write_comparison_segment_strip(
                 comparison_root_path,
                 episode_index,
@@ -1915,6 +2124,7 @@ def rollout_with_chunks(
                 segment_real_frames,
                 pred_frames,
                 carried_steps=carried_steps,
+                env_steps_per_wm_step=wm_stride if wm_stride > 1 else None,
             )
             if segment_path is not None:
                 segment_comparison_path = segment_path
