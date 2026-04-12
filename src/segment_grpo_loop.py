@@ -70,6 +70,8 @@ class ScoreTrace:
 
     step_vectors: list[np.ndarray]
     final_vector: np.ndarray
+    """Scoring latent at encode (before first WM unroll step), for Δ vs pre-rollout distance."""
+    initial_vector: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     selected_candidate_index: int | None = None
 
 
@@ -697,10 +699,14 @@ def _select_comparison_frames(
     carried_steps: int | None = None,
     *,
     env_steps_per_wm_step: int | None = None,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Align predicted frames against real rollout with explicit t0 context policy."""
+) -> tuple[list[np.ndarray], list[np.ndarray], list[int]]:
+    """Align predicted frames against real rollout with explicit t0 context policy.
+
+    Returns filtered ``(real, pred, pred_indices)`` where ``pred_indices[i]`` indexes the
+    original ``pred_frames`` list for strip column ``i``.
+    """
     if not real_frames or not pred_frames:
-        return [], []
+        return [], [], []
     factor = int(env_steps_per_wm_step or 1)
     if factor > 1:
         if carried_steps is not None:
@@ -708,15 +714,17 @@ def _select_comparison_frames(
         else:
             cs = max(0, len(real_frames) - 1)
         if cs <= 0:
-            return [], []
+            return [], [], []
         out_real: list[np.ndarray] = []
         out_pred: list[np.ndarray] = []
+        pred_indices: list[int] = []
         for k in range(len(pred_frames)):
             ridx = min((k + 1) * factor, cs)
             if ridx < len(real_frames):
                 out_real.append(real_frames[ridx])
                 out_pred.append(pred_frames[k])
-        return out_real, out_pred
+                pred_indices.append(k)
+        return out_real, out_pred, pred_indices
     # Always pair predicted rollout steps against real state transitions.
     # real_frames includes the segment start frame + one frame per carried step.
     limit = max(0, len(real_frames) - 1)
@@ -724,11 +732,12 @@ def _select_comparison_frames(
     if carried_steps is not None:
         step_limit = int(carried_steps)
         if step_limit <= 0:
-            return [], []
+            return [], [], []
         limit = min(limit, step_limit)
     if limit <= 0:
-        return [], []
-    return list(real_frames[:limit]), list(pred_frames[:limit])
+        return [], [], []
+    pred_indices = list(range(limit))
+    return list(real_frames[:limit]), list(pred_frames[:limit]), pred_indices
 
 
 def _comparison_ridx_for_column(
@@ -743,6 +752,34 @@ def _comparison_ridx_for_column(
     if f > 1:
         return min((int(pair_index) + 1) * f, cs)
     return int(pair_index)
+
+
+def _l2_goal_distance_np(vec: np.ndarray, goal: np.ndarray) -> float:
+    """Euclidean distance to goal in shared prefix, matching WM scoring slice."""
+    v = np.asarray(vec, dtype=np.float64).reshape(-1)
+    g = np.asarray(goal, dtype=np.float64).reshape(-1)
+    if v.size == 0 or g.size == 0:
+        return float("nan")
+    n = min(int(v.size), int(g.size))
+    d = float(np.linalg.norm(v[:n] - g[:n]))
+    return d if np.isfinite(d) else float("nan")
+
+
+def _latent_overlay_distance_tables(
+    initial_vector: np.ndarray,
+    step_vectors: list[np.ndarray],
+    goal_np: np.ndarray,
+) -> tuple[list[float], list[float]]:
+    """Per-WM-step L2 to goal and Δ vs previous (first step vs pre-unroll initial)."""
+    d_full: list[float] = []
+    delta_full: list[float] = []
+    d_prev = _l2_goal_distance_np(initial_vector, goal_np)
+    for sv in step_vectors:
+        d_k = _l2_goal_distance_np(sv, goal_np)
+        d_full.append(d_k)
+        delta_full.append(d_k - d_prev)
+        d_prev = d_k
+    return d_full, delta_full
 
 
 def _overlay_decode_panel_metadata(pred_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
@@ -793,15 +830,15 @@ def _build_real_vs_pred_strip(
     carried_steps: int | None = None,
     env_steps_per_wm_step: int | None = None,
     overlay_decode_meta: bool = False,
-    overlay_episode_index: int | None = None,
-    overlay_segment_index: int | None = None,
     overlay_env_step_start: int | None = None,
     overlay_selected_candidate_index: int | None = None,
     overlay_wm_env_steps_per_wm_step: int = 1,
+    overlay_goal_latent_np: np.ndarray | None = None,
+    overlay_score_trace: ScoreTrace | None = None,
 ) -> np.ndarray:
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
-    real_frames, pred_frames = _select_comparison_frames(
+    real_frames, pred_frames, pred_indices = _select_comparison_frames(
         real_frames,
         pred_frames,
         carried_steps=carried_steps,
@@ -812,6 +849,20 @@ def _build_real_vs_pred_strip(
     total = len(real_frames)
     factor = int(env_steps_per_wm_step or 1)
     cs = 0 if carried_steps is None else int(carried_steps)
+    d_full: list[float] | None = None
+    delta_full: list[float] | None = None
+    if (
+        overlay_decode_meta
+        and overlay_goal_latent_np is not None
+        and overlay_score_trace is not None
+        and overlay_score_trace.step_vectors
+    ):
+        g = np.asarray(overlay_goal_latent_np, dtype=np.float32).reshape(-1)
+        d_full, delta_full = _latent_overlay_distance_tables(
+            overlay_score_trace.initial_vector,
+            overlay_score_trace.step_vectors,
+            g,
+        )
     pairs: list[np.ndarray] = []
     for idx in range(total):
         real_rgb = _to_rgb_uint8(real_frames[idx])
@@ -823,15 +874,20 @@ def _build_real_vs_pred_strip(
         if overlay_decode_meta and overlay_env_step_start is not None:
             ridx = _comparison_ridx_for_column(idx, factor=factor, carried_steps=cs)
             env_t = int(overlay_env_step_start) + int(ridx)
-            ep = int(overlay_episode_index) if overlay_episode_index is not None else -1
-            seg = int(overlay_segment_index) if overlay_segment_index is not None else -1
             cand = int(overlay_selected_candidate_index) if overlay_selected_candidate_index is not None else -1
             lines = [
-                f"ep{ep:04d} seg{seg:04d}",
                 f"real_i{ridx:02d} env_t{env_t:04d}",
                 f"wm_dec {idx + 1}/{total} f{max(1, factor)}",
                 f"cand{cand:03d}",
             ]
+            k = int(pred_indices[idx]) if idx < len(pred_indices) else -1
+            if d_full is not None and delta_full is not None and 0 <= k < len(d_full):
+                d_str = f"{d_full[k]:.4f}" if np.isfinite(d_full[k]) else "n/a"
+                dd = delta_full[k]
+                dd_str = f"{dd:+.4f}" if np.isfinite(dd) else "n/a"
+                lines.insert(0, f"d {d_str}  Δ {dd_str}")
+            else:
+                lines.insert(0, "d n/a  Δ n/a")
             pred_rgb = _overlay_decode_panel_metadata(pred_rgb, lines)
         pairs.append(np.concatenate([real_rgb, pred_rgb], axis=0))
     return np.concatenate(pairs, axis=1)
@@ -870,6 +926,8 @@ def _write_comparison_segment_strip(
     env_steps_per_wm_step: int | None = None,
     wm_env_steps_per_wm_step: int = 1,
     overlay_decode_meta: bool = False,
+    overlay_goal_latent_np: np.ndarray | None = None,
+    overlay_score_trace: ScoreTrace | None = None,
 ) -> tuple[Path | None, str | None]:
     if carried_steps is not None and int(carried_steps) <= 0:
         return None, None
@@ -883,11 +941,11 @@ def _write_comparison_segment_strip(
             carried_steps=carried_steps,
             env_steps_per_wm_step=env_steps_per_wm_step,
             overlay_decode_meta=bool(overlay_decode_meta),
-            overlay_episode_index=int(episode_index),
-            overlay_segment_index=int(segment_index),
             overlay_env_step_start=int(env_step_start),
             overlay_selected_candidate_index=int(selected_candidate_index),
             overlay_wm_env_steps_per_wm_step=int(wm_env_steps_per_wm_step),
+            overlay_goal_latent_np=overlay_goal_latent_np,
+            overlay_score_trace=overlay_score_trace,
         )
     except Exception as exc:
         reason = f"Failed to build comparison strip for episode {episode_index} segment {segment_index}: {exc}"
@@ -1390,6 +1448,7 @@ def score_chunk_by_goal_latent(
             return
         target.append(np.asarray(raw_np[-1], dtype=np.float32))
 
+    initial_vector_np = np.zeros(0, dtype=np.float32)
     with torch.no_grad():
         debug_unroll = os.environ.get("DEBUG_WM_UNROLL_OUTPUT", "").strip().lower() in {"1", "true", "yes"}
         visual = _to_wm_visual(image, wm_bundle.device)
@@ -1397,6 +1456,11 @@ def score_chunk_by_goal_latent(
         latent_state = _as_tensor_dict_if_available(
             wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
         )
+        try:
+            iv0 = _latent_vector_from_unroll_step(latent_state, wm_scoring_latent)
+            initial_vector_np = np.asarray(iv0.detach().cpu(), dtype=np.float32).reshape(-1)
+        except Exception:
+            pass
         seq_actions = actions_t.to(wm_bundle.device).to(dtype=torch.float32)
         if seq_actions.ndim != 3:
             raise RuntimeError(f"Expected action sequence tensor shape (T, B, A), got {seq_actions.shape}")
@@ -1516,6 +1580,7 @@ def score_chunk_by_goal_latent(
         score_trace = ScoreTrace(
             step_vectors=score_trace_steps,
             final_vector=score_trace_steps[-1] if score_trace_steps else np.asarray([], dtype=np.float32),
+            initial_vector=initial_vector_np,
         )
         scoring_mode = str(wm_scoring_latent or "visual").strip().lower()
         visual_for_decode = list(decode_visual_steps) if decode_visual_steps else []
@@ -2039,6 +2104,7 @@ def rollout_with_chunks(
 
         segment_candidates: list[ChunkCandidate] = []
         candidate_traces: dict[int, DecodeTrace | None] = {}
+        candidate_score_traces: dict[int, ScoreTrace | None] = {}
         segment_real_frames: list[np.ndarray] = [np.asarray(current_image, copy=True)]
         for candidate_idx in range(num_candidates):
             if smolvla_bundle is not None and not dry_run:
@@ -2060,6 +2126,7 @@ def rollout_with_chunks(
             scoring_failure_reason: str | None = None
             wm_scoring_status = "fallback"
             wm_stride_meta = 1
+            score_trace: ScoreTrace | None = None
             if wm_bundle is not None and goal_latent is not None:
                 try:
                     distance, score_trace, decode_trace = score_chunk_by_goal_latent(
@@ -2087,6 +2154,7 @@ def rollout_with_chunks(
                     )
                     score = -distance
                     decode_trace = None
+                    score_trace = None
             else:
                 wm_scoring_status = "fallback"
                 scoring_failure_reason = (
@@ -2096,8 +2164,10 @@ def rollout_with_chunks(
                 distance = float(np.linalg.norm(chunk_flat))
                 score = -distance
                 decode_trace = None
+                score_trace = None
 
             candidate_traces[int(candidate_idx)] = decode_trace
+            candidate_score_traces[int(candidate_idx)] = score_trace
 
             segment_candidates.append(
                 ChunkCandidate(
@@ -2137,6 +2207,7 @@ def rollout_with_chunks(
         selected_distance = best.latent_distance if best.latent_distance is not None else None
         best_actions = _ensure_action_matrix(best.actions, int(env_action_dim), effective_len)
         selected_trace = candidate_traces.get(selected_idx)
+        selected_score_trace = candidate_score_traces.get(selected_idx)
         selected_meta = segment_candidates[selected_idx].meta if 0 <= selected_idx < len(segment_candidates) else None
         pred_frames: list[np.ndarray] = []
 
@@ -2286,6 +2357,14 @@ def rollout_with_chunks(
 
         segment_comparison_path = None
         if comparison_root_path is not None and pred_frames and carried_steps > 0:
+            overlay_goal_np = None
+            if comparison_strip_overlay and goal_latent is not None:
+                try:
+                    overlay_goal_np = np.asarray(
+                        goal_latent.detach().cpu().numpy().reshape(-1), dtype=np.float32
+                    )
+                except Exception:
+                    overlay_goal_np = None
             segment_path, segment_strip_failure_reason = _write_comparison_segment_strip(
                 comparison_root_path,
                 episode_index,
@@ -2298,6 +2377,8 @@ def rollout_with_chunks(
                 env_steps_per_wm_step=wm_stride if wm_stride > 1 else None,
                 wm_env_steps_per_wm_step=wm_stride,
                 overlay_decode_meta=bool(comparison_strip_overlay),
+                overlay_goal_latent_np=overlay_goal_np,
+                overlay_score_trace=selected_score_trace,
             )
             if segment_path is not None:
                 segment_comparison_path = segment_path
