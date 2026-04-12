@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
+import logging
 from typing import Any, Literal
 
 import importlib.util
@@ -177,6 +178,7 @@ class WMBundle:
 
 
 _HELPER_MODULE: Any | None = None
+_log = logging.getLogger(__name__)
 
 
 def _load_jepa_helper_module() -> Any:
@@ -437,7 +439,6 @@ def _decode_selected_trace(
                 return None, f"{modality} latent trace is unavailable."
             return None, preparation_failure
 
-        decode_input = latent_obj if isinstance(latent_obj, dict) else {modality: latent_obj}
         decoded = None
         decode_unroll = getattr(model_bundle.model, "decode_unroll", None)
         if decode_unroll is None:
@@ -456,21 +457,37 @@ def _decode_selected_trace(
             if decoded is None:
                 return None, f"{modality} decode fallback returned no output."
         else:
-            try:
-                decoded = decode_unroll(decode_input, batch=True)
-            except TypeError:
+            if modality == "proprio" and torch is not None and torch.is_tensor(latent_obj):
+                return None, "proprio decode_unroll: no image_head path for proprio-only in JEPA EncPredWM"
+
+            decode_input = latent_obj if isinstance(latent_obj, dict) else {modality: latent_obj}
+            if torch is not None and torch.is_tensor(latent_obj) and modality == "visual":
                 try:
-                    decoded = decode_unroll(decode_input)
+                    decoded = decode_unroll(latent_obj, batch=True)
+                except TypeError:
+                    decoded = decode_unroll(latent_obj)
                 except Exception as exc:
+                    return None, f"{modality} decode_unroll failed: {exc}"
+                if decoded is None:
+                    return None, f"{modality} decode_unroll returned no output."
+            else:
+                try:
+                    decoded = decode_unroll(decode_input, batch=True)
+                except TypeError:
                     try:
-                        decoded = decode_unroll(latent_obj)
-                    except Exception as fallback_exc:
-                        return (
-                            None,
-                            f"{modality} decode_unroll calls failed: {exc}; fallback tensor input failed: {fallback_exc}",
-                        )
-            except Exception as exc:
-                return None, f"{modality} decode_unroll failed: {exc}"
+                        decoded = decode_unroll(decode_input)
+                    except Exception as exc:
+                        try:
+                            decoded = decode_unroll(latent_obj)
+                        except Exception as fallback_exc:
+                            return (
+                                None,
+                                f"{modality} decode_unroll calls failed: {exc}; fallback tensor input failed: {fallback_exc}",
+                            )
+                except Exception as exc:
+                    return None, f"{modality} decode_unroll failed: {exc}"
+                if decoded is None:
+                    return None, f"{modality} decode_unroll returned no output."
 
         if isinstance(decoded, dict):
             if "recon" in decoded:
@@ -897,6 +914,48 @@ def _extract_latent_with_fallback(z_pred: Any) -> torch.Tensor:
         raise primary_exc
 
 
+def _extract_scoring_latent(z_pred: Any, mode: str = "visual") -> torch.Tensor:
+    _require_torch("WM scoring requires torch.")
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in ("visual", "proprio", "concat"):
+        raise ValueError(f"Unsupported WM scoring mode {mode!r}; expected visual, proprio, or concat.")
+
+    if torch is not None and torch.is_tensor(z_pred):
+        candidate = z_pred
+    elif hasattr(z_pred, "keys"):
+        if normalized_mode == "visual":
+            if "visual" not in z_pred:
+                raise KeyError("visual")
+            candidate = z_pred["visual"]  # type: ignore[index]
+        elif normalized_mode == "proprio":
+            if "proprio" not in z_pred:
+                raise KeyError("proprio")
+            candidate = z_pred["proprio"]  # type: ignore[index]
+        else:
+            if "visual" not in z_pred:
+                raise KeyError("visual")
+            if "proprio" not in z_pred:
+                raise KeyError("proprio")
+            visual = z_pred["visual"]  # type: ignore[index]
+            proprio = z_pred["proprio"]  # type: ignore[index]
+            if not torch.is_tensor(visual):
+                visual = torch.as_tensor(np.asarray(visual), dtype=torch.float32)
+            if not torch.is_tensor(proprio):
+                proprio = torch.as_tensor(np.asarray(proprio), dtype=torch.float32)
+            candidate = torch.cat([visual, proprio], dim=-1)
+            if candidate.ndim < 1:
+                raise RuntimeError("Concatenated scoring latent is empty.")
+            return candidate
+    else:
+        candidate = torch.as_tensor(np.asarray(z_pred), dtype=torch.float32)
+
+    if not torch.is_tensor(candidate):
+        candidate = torch.as_tensor(np.asarray(candidate), dtype=torch.float32)
+    if int(candidate.numel()) <= 0:
+        raise RuntimeError("No tensor-valued latent available for scoring extraction.")
+    return candidate
+
+
 def _next_latent_state_after_unroll(out: Any) -> Any:
     """Reduce multi-step unroll output to latent state suitable for another one-step unroll."""
     tensordict_type = None
@@ -947,10 +1006,10 @@ def _next_latent_state_after_unroll(out: Any) -> Any:
     return out
 
 
-def _latent_vector_from_unroll_step(unroll_out: Any) -> torch.Tensor:
+def _latent_vector_from_unroll_step(unroll_out: Any, scoring_mode: str = "visual") -> torch.Tensor:
     """Single-step latent used for distance scoring and trace (flattened 1-D)."""
     _require_torch("WM scoring requires torch.")
-    lat = _extract_latent_with_fallback(unroll_out)
+    lat = _extract_scoring_latent(unroll_out, mode=scoring_mode)
     if lat.ndim >= 3:
         final = lat[-1]
     elif lat.ndim == 2 and int(lat.shape[0]) > 1:
@@ -995,6 +1054,7 @@ def score_chunk_by_goal_latent(
     chunk_len: int | None = None,
     return_latent_trace: bool = False,
     wm_rollout_mode: str = "iterative",
+    wm_scoring_latent: str = "visual",
 ) -> float | tuple[float, ScoreTrace, DecodeTrace]:
     """
     Score a candidate chunk by JEPA-WM latent distance to goal latent.
@@ -1035,6 +1095,20 @@ def score_chunk_by_goal_latent(
         if raw_np.ndim == 0:
             return
         target.extend([np.asarray(item, dtype=np.float32) for item in raw_np])
+
+    def _append_last_timestep_as_numpy_list(target: list[np.ndarray], raw: Any) -> None:
+        if raw is None:
+            return
+        if torch is not None and torch.is_tensor(raw):
+            raw_t = raw.detach().cpu()
+            if raw_t.ndim == 0 or raw_t.shape[0] == 0:
+                return
+            target.append(np.asarray(raw_t[-1], dtype=np.float32))
+            return
+        raw_np = np.asarray(raw)
+        if raw_np.ndim == 0 or raw_np.shape[0] == 0:
+            return
+        target.append(np.asarray(raw_np[-1], dtype=np.float32))
 
     with torch.no_grad():
         debug_unroll = os.environ.get("DEBUG_WM_UNROLL_OUTPUT", "").strip().lower() in {"1", "true", "yes"}
@@ -1079,19 +1153,22 @@ def score_chunk_by_goal_latent(
                     _append_trace_steps(decode_visual_steps, unroll_output.get("visual"))
                     _append_trace_steps(decode_proprio_steps, unroll_output.get("proprio"))
                 except Exception:
+                    _log.warning("decode visual/proprio trace append failed for batched unroll output.")
                     try:
                         _append_trace_steps(decode_visual_steps, unroll_output["visual"])  # type: ignore[index]
                         _append_trace_steps(decode_proprio_steps, unroll_output["proprio"])  # type: ignore[index]
                     except Exception:
-                        pass
-            rollout_trace = _extract_latent(unroll_output)
+                        _log.warning("decode visual/proprio trace append fallback failed for batched unroll output.")
+            scoring_trace = _extract_scoring_latent(unroll_output, mode=wm_scoring_latent)
+            rollout_trace = _extract_latent(scoring_trace)
             if rollout_trace.ndim < 3:
                 raise RuntimeError(
                     f"Expected rollout latent trace with time dimension, got shape {tuple(rollout_trace.shape)}"
                 )
             for step in rollout_trace:
                 step_latent = step.detach().cpu().numpy().astype(np.float32, copy=False)
-                score_trace_steps.append(step_latent.reshape(-1))
+                score_vec = _latent_vector_from_unroll_step(step, scoring_mode=wm_scoring_latent)
+                score_trace_steps.append(np.asarray(score_vec.detach().cpu(), dtype=np.float32))
                 decode_trace_steps.append(step_latent)
             pred = torch.as_tensor(score_trace_steps[-1], dtype=torch.float32, device=wm_bundle.device)
         else:
@@ -1127,19 +1204,26 @@ def score_chunk_by_goal_latent(
                                     if inner_keys is not None:
                                         print(f"[wm-debug]       nested keys={inner_keys}", flush=True)
                 step_latent = _extract_latent_with_fallback(unroll_out)
-                step_vec = _latent_vector_from_unroll_step(step_latent)
+                step_vec = _latent_vector_from_unroll_step(unroll_out, scoring_mode=wm_scoring_latent)
                 score_trace_steps.append(np.asarray(step_vec.detach().cpu(), dtype=np.float32))
                 decode_trace_steps.append(np.asarray(step_latent.detach().cpu(), dtype=np.float32))
                 if hasattr(unroll_out, "keys"):
                     try:
-                        _append_trace_steps(decode_visual_steps, unroll_out.get("visual"))  # type: ignore[attr-defined]
-                        _append_trace_steps(decode_proprio_steps, unroll_out.get("proprio"))  # type: ignore[attr-defined]
+                        _append_last_timestep_as_numpy_list(decode_visual_steps, unroll_out.get("visual"))  # type: ignore[attr-defined]
+                        _append_last_timestep_as_numpy_list(decode_proprio_steps, unroll_out.get("proprio"))  # type: ignore[attr-defined]
                     except Exception:
                         try:
-                            _append_trace_steps(decode_visual_steps, unroll_out["visual"])  # type: ignore[index]
-                            _append_trace_steps(decode_proprio_steps, unroll_out["proprio"])  # type: ignore[index]
+                            _append_last_timestep_as_numpy_list(
+                                decode_visual_steps, unroll_out["visual"]
+                            )  # type: ignore[index]
+                            _append_last_timestep_as_numpy_list(
+                                decode_proprio_steps, unroll_out["proprio"]
+                            )  # type: ignore[index]
                         except Exception:
-                            pass
+                            _log.warning(
+                                "decode visual/proprio trace append failed for iterative unroll output at step t=%s.",
+                                t,
+                            )
                 z_t = _as_tensor_dict_if_available(_next_latent_state_after_unroll(unroll_out))
             pred = torch.as_tensor(score_trace_steps[-1], dtype=torch.float32, device=wm_bundle.device)
 
@@ -1294,6 +1378,7 @@ def _load_goal_latent(
     fallback_proprio: np.ndarray | None,
     *,
     goal_frame: np.ndarray | None = None,
+    wm_scoring_latent: str = "visual",
 ) -> torch.Tensor | None:
     """
     Resolve a goal latent from a source file with fallback to current state latent.
@@ -1318,7 +1403,7 @@ def _load_goal_latent(
         if isinstance(payload_obj, dict) and "image" in payload_obj and "proprio" in payload_obj and wm_bundle is not None:
             img = np.asarray(payload_obj["image"])
             proprio = np.asarray(payload_obj["proprio"], dtype=np.float32)
-            return _encode_state_to_latent(wm_bundle, img, proprio)
+            return _encode_state_to_latent(wm_bundle, img, proprio, wm_scoring_latent=wm_scoring_latent)
 
     if wm_bundle is not None and goal_frame is not None:
         proprio = (
@@ -1326,19 +1411,21 @@ def _load_goal_latent(
             if fallback_proprio is not None
             else np.zeros(int(wm_bundle.proprio_dim), dtype=np.float32)
         )
-        return _encode_state_to_latent(wm_bundle, goal_frame, proprio)
+        return _encode_state_to_latent(wm_bundle, goal_frame, proprio, wm_scoring_latent=wm_scoring_latent)
 
     if wm_bundle is not None and fallback_image is not None and fallback_proprio is not None:
-        return _encode_state_to_latent(wm_bundle, fallback_image, fallback_proprio)
+        return _encode_state_to_latent(wm_bundle, fallback_image, fallback_proprio, wm_scoring_latent=wm_scoring_latent)
     return None
 
 
-def _encode_state_to_latent(bundle: WMBundle, image: np.ndarray, proprio: np.ndarray) -> torch.Tensor:
+def _encode_state_to_latent(
+    bundle: WMBundle, image: np.ndarray, proprio: np.ndarray, wm_scoring_latent: str = "visual"
+) -> torch.Tensor:
     _require_torch("WM encoding requires torch.")
     with torch.no_grad():
         obs = {"visual": _to_wm_visual(image, bundle.device), "proprio": _to_wm_proprio(proprio, bundle.proprio_dim, bundle.device)}
         z = bundle.model.encode(obs)
-    return torch.as_tensor(_extract_latent(z)).reshape(-1)
+    return _extract_scoring_latent(z, mode=wm_scoring_latent).reshape(-1)
 
 
 def _reset_env(env: Any, seed: int) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -1455,6 +1542,7 @@ def rollout_with_chunks(
     strict_decode: bool = False,
     adapter: nn.Module | None = None,
     wm_rollout_mode: str = "iterative",
+    wm_scoring_latent: str = "visual",
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -1554,11 +1642,12 @@ def rollout_with_chunks(
             fallback_image=current_image,
             fallback_proprio=current_proprio,
             goal_frame=goal_frame,
+            wm_scoring_latent=wm_scoring_latent,
         )
     else:
         goal_latent = None
     if wm_bundle is not None and goal_latent is None and not dry_run:
-        goal_latent = _encode_state_to_latent(wm_bundle, current_image, current_proprio)
+        goal_latent = _encode_state_to_latent(wm_bundle, current_image, current_proprio, wm_scoring_latent=wm_scoring_latent)
 
     planner_action_dim = wm_bundle.planner_action_dim if wm_bundle is not None else int(env_action_dim)
 
@@ -1584,6 +1673,7 @@ def rollout_with_chunks(
             "wm_rollout_mode": str(wm_rollout_mode),
             "strict_wm_scoring": bool(strict_wm_scoring),
             "strict_decode": bool(strict_decode),
+            "wm_scoring_latent": str(wm_scoring_latent),
             "wm_scoring_statuses": [],
             "decode_statuses": [],
             "scoring_failure_reasons": [],
@@ -1629,6 +1719,7 @@ def rollout_with_chunks(
                         chunk_len=effective_len,
                         return_latent_trace=True,
                         wm_rollout_mode=wm_rollout_mode,
+                        wm_scoring_latent=wm_scoring_latent,
                     )
                     score_trace.selected_candidate_index = int(candidate_idx)
                     decode_trace.selected_candidate_index = int(candidate_idx)
