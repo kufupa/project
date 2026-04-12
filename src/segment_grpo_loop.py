@@ -260,6 +260,23 @@ def _to_wm_visual(image: Any, device: torch.device) -> torch.Tensor:
     return tensor.unsqueeze(0).to(device)  # 1,1,3,256,256
 
 
+def _derive_policy_rgb_for_smolvla(
+    wm_or_env_rgb: Any,
+    *,
+    jepa_parity_sim: bool,
+    policy_hflip_corner2: bool,
+) -> np.ndarray:
+    """Map jepa-parity V-only RGB to evaluator-style corner2 pixels (adds H-flip).
+
+    best_video uses ``np.flip(frame, (0, 1))`` on raw corner2; jepa stream is
+    V-flip only, so H-flip on ``wm_image`` matches the policy training view.
+    """
+    rgb = _to_rgb_uint8(wm_or_env_rgb)
+    if jepa_parity_sim and policy_hflip_corner2:
+        return np.ascontiguousarray(np.flip(rgb, axis=1))
+    return rgb
+
+
 def _prepare_goal_image_for_wm(image: Any, *, flip_horizontal: bool) -> np.ndarray:
     """Oracle PNGs are V+H vs raw; jepa-wms live RGB is V-only → H-flip goal for WM encode when enabled."""
     rgb = _to_rgb_uint8(image)
@@ -823,13 +840,15 @@ def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> tuple[P
 
 
 def _extract_image_and_proprio(obs: Any, env: Any) -> tuple[np.ndarray, np.ndarray]:
+    from smolvla_obs_state import flatten_obs_state
+
     module = _load_jepa_helper_module()
     img = module._find_image(obs)
     if img is None and env is not None and hasattr(env, "render"):
         img = env.render()
     if img is None:
         raise RuntimeError("Unable to extract an image from observation; ensure env.render() is available.")
-    proprio = module._flatten_obs_state(obs)
+    proprio = flatten_obs_state(obs)
     return _to_rgb_uint8(img), np.asarray(proprio, dtype=np.float32).reshape(-1)
 
 
@@ -1405,6 +1424,8 @@ def _sample_smolvla_chunk(
     env_action_dim: int,
     task_text: str,
     rng: np.random.Generator,
+    *,
+    noise_std: float = 0.0,
 ) -> np.ndarray:
     helper = _load_jepa_helper_module()
     obs = {"image": _to_rgb_uint8(image), "state": np.asarray(proprio, dtype=np.float32).reshape(-1)}
@@ -1422,10 +1443,15 @@ def _sample_smolvla_chunk(
     except Exception as exc:
         raise RuntimeError(f"SmolVLA inference failed for chunk sampling: {exc}") from exc
 
+    std = float(noise_std)
     chunk: list[np.ndarray] = []
     for _ in range(chunk_len):
-        noise = rng.normal(0.0, 0.10, size=int(env_action_dim)).astype(np.float32)
-        action = np.clip(_pad_or_truncate(base, int(env_action_dim)) + noise, -1.0, 1.0)
+        padded = _pad_or_truncate(base, int(env_action_dim))
+        if std > 0.0:
+            noise = rng.normal(0.0, std, size=int(env_action_dim)).astype(np.float32)
+            action = np.clip(padded + noise, -1.0, 1.0)
+        else:
+            action = np.clip(padded, -1.0, 1.0)
         chunk.append(action)
     return np.stack(chunk, axis=0).astype(np.float32)
 
@@ -1713,6 +1739,8 @@ def rollout_with_chunks(
     wm_goal_flip_horizontal: bool = True,
     wm_sim_camera_parity: bool = True,
     wm_sim_img_size: int = 224,
+    smolvla_policy_hflip_corner2: bool = True,
+    smolvla_noise_std: float = 0.0,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -1868,6 +1896,8 @@ def rollout_with_chunks(
             "wm_goal_flip_horizontal": bool(wm_goal_flip_horizontal),
             "wm_sim_camera_parity": bool(wm_sim_camera_parity),
             "wm_sim_img_size": int(wm_sim_img_size),
+            "smolvla_policy_hflip_corner2": bool(smolvla_policy_hflip_corner2),
+            "smolvla_noise_std": float(smolvla_noise_std),
             "wm_goal_for_encode_path": wm_goal_encode_dbg_path,
             "strict_wm_scoring": bool(strict_wm_scoring),
             "strict_decode": bool(strict_decode),
@@ -1877,6 +1907,12 @@ def rollout_with_chunks(
             "scoring_failure_reasons": [],
             "decode_failure_reasons": [],
         },
+    )
+
+    current_policy_image = _derive_policy_rgb_for_smolvla(
+        current_image,
+        jepa_parity_sim=jepa_parity_sim,
+        policy_hflip_corner2=smolvla_policy_hflip_corner2,
     )
 
     current_step = 0
@@ -1892,12 +1928,13 @@ def rollout_with_chunks(
             if smolvla_bundle is not None and not dry_run:
                 chunk = _sample_smolvla_chunk(
                     smolvla_bundle,
-                    current_image,
+                    current_policy_image,
                     current_proprio,
                     effective_len,
                     int(env_action_dim),
                     task_text,
                     rng,
+                    noise_std=float(smolvla_noise_std),
                 )
             else:
                 chunk = _synthetic_chunk(int(env_action_dim), effective_len, candidate_idx, rng)
@@ -1999,6 +2036,11 @@ def rollout_with_chunks(
                     current_image = _render_jepa_rgb(env)
                 else:
                     current_image = _obs_img
+                current_policy_image = _derive_policy_rgb_for_smolvla(
+                    current_image,
+                    jepa_parity_sim=jepa_parity_sim,
+                    policy_hflip_corner2=smolvla_policy_hflip_corner2,
+                )
                 carried_steps += 1
                 current_step += 1
                 executed_actions.append(action_env.tolist())
@@ -2016,6 +2058,11 @@ def rollout_with_chunks(
                 replay_idx = target_idx
                 current_image = images[replay_idx]
                 current_proprio = proprio_seq[replay_idx]
+                current_policy_image = _derive_policy_rgb_for_smolvla(
+                    current_image,
+                    jepa_parity_sim=jepa_parity_sim,
+                    policy_hflip_corner2=smolvla_policy_hflip_corner2,
+                )
                 carried_steps = int(actual)
                 current_step += actual
                 segment_real_frames.extend(np.asarray(images[i], copy=True) for i in range(step_start + 1, replay_idx + 1))
@@ -2039,6 +2086,11 @@ def rollout_with_chunks(
                 replay_idx = target_idx
                 current_image = images[replay_idx]
                 current_proprio = proprio_seq[replay_idx]
+                current_policy_image = _derive_policy_rgb_for_smolvla(
+                    current_image,
+                    jepa_parity_sim=jepa_parity_sim,
+                    policy_hflip_corner2=smolvla_policy_hflip_corner2,
+                )
                 current_step += actual
                 segment_real_frames.extend(np.asarray(images[i], copy=True) for i in range(step_start + 1, replay_idx + 1))
                 executed_actions.extend(

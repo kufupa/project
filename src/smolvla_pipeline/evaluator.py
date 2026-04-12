@@ -9,6 +9,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Protocol, Sequence
 
+from smolvla_obs_state import flatten_obs_state as _flatten_obs_state
+
 try:
     import matplotlib.pyplot as plt  # type: ignore
 except Exception:  # pragma: no cover - environment dependent import
@@ -657,27 +659,6 @@ def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
         obs_state_key=OBS_STATE,
         obs_env_state_key=OBS_ENV_STATE,
     )
-
-
-def _flatten_obs_state(obs: Any) -> Any:
-    import numpy as np
-
-    if isinstance(obs, np.ndarray):
-        return obs.reshape(-1)
-    if isinstance(obs, dict):
-        chunks: list[Any] = []
-        for key in sorted(obs):
-            value = obs[key]
-            try:
-                arr = np.asarray(value, dtype=np.float32).reshape(-1)
-            except Exception:
-                continue
-            if arr.size > 0:
-                chunks.append(arr)
-        if chunks:
-            return np.concatenate(chunks, axis=0)
-        return np.zeros(0, dtype=np.float32)
-    return np.asarray(obs, dtype=np.float32).reshape(-1)
 
 
 def _smolvla_state_dims(policy: Any) -> tuple[int, int]:
