@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from types import ModuleType
 
 import numpy as np
 import pytest
@@ -14,7 +15,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from segment_grpo_loop import (
+    DecodeTrace,
     _ensure_action_matrix,
+    _decode_latent_trace_to_frames,
+    _select_comparison_frames,
+    _write_comparison_segment_strip,
     rollout_with_chunks,
     score_chunk_by_goal_latent,
     WMBundle,
@@ -149,6 +154,62 @@ def test_wm_iterative_rollout_calls_unroll_per_action() -> None:
     assert model.calls == chunk_len
 
 
+def test_iterative_rollout_keeps_structured_score_decode_traces_and_scores_from_final_latent() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _TracingModel:
+        def __init__(self) -> None:
+            self.unroll_calls = 0
+
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            return torch.tensor([[[0.0, 0.0, 0.0]]], dtype=torch.float32)
+
+        def unroll(self, z: object, act_suffix: torch.Tensor, debug: bool = False) -> dict[str, object]:
+            step = self.unroll_calls
+            self.unroll_calls += 1
+            latent = torch.tensor(
+                [[[float(step + 1), float(step + 1), float(step + 1)]], dtype=torch.float32
+            )
+            visual = torch.tensor(
+                [[[float(step + 1), float(step + 2), float(step + 3)]], dtype=torch.float32
+            )
+            proprio = torch.tensor([[[float(step + 1), -float(step + 1)]], dtype=torch.float32)
+            return {"latent": latent, "visual": visual, "proprio": proprio}
+
+    model = _TracingModel()
+    bundle = WMBundle(
+        model=model,
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    goal_latent = torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+    chunk_len = 3
+    chunk = np.zeros((chunk_len, 4), dtype=np.float32)
+
+    distance, score_trace, decode_trace = score_chunk_by_goal_latent(
+        wm_bundle=bundle,
+        image=np.zeros((64, 64, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_actions=chunk,
+        goal_latent=goal_latent,
+        chunk_len=chunk_len,
+        return_latent_trace=True,
+        wm_rollout_mode="iterative",
+    )
+
+    assert model.unroll_calls == chunk_len
+    assert len(score_trace.step_vectors) == chunk_len
+    np.testing.assert_allclose(score_trace.final_vector, np.array([3.0, 3.0, 3.0], dtype=np.float32))
+    np.testing.assert_allclose(score_trace.step_vectors[-1], score_trace.final_vector)
+    assert np.array_equal(decode_trace.visual_latents[0], np.array([[1.0, 2.0, 3.0]], dtype=np.float32))
+    assert np.array_equal(decode_trace.visual_latents[-1], np.array([[3.0, 4.0, 5.0]], dtype=np.float32))
+    assert np.array_equal(decode_trace.proprio_latents[0], np.array([[1.0, -1.0]], dtype=np.float32))
+    assert np.array_equal(decode_trace.proprio_latents[-1], np.array([[3.0, -3.0]], dtype=np.float32))
+    assert distance == 0.0
+
+
 def test_wm_batched_rollout_single_unroll_call() -> None:
     torch = pytest.importorskip("torch")
 
@@ -188,6 +249,165 @@ def test_wm_batched_rollout_single_unroll_call() -> None:
     assert model.calls == 1
 
 
+def test_decode_selected_trace_prefers_visual_modal_and_accepts_structured_latents() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Decoder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_payload: dict[str, object] | None = None
+
+        def decode_unroll(self, payload: dict[str, object], batch: bool = False) -> np.ndarray:
+            self.calls += 1
+            assert set(payload.keys()) == {"visual"}
+            self.last_payload = payload
+            return np.zeros((1, 2, 3, 2, 2), dtype=np.float32)
+
+    model = _Decoder()
+    bundle = WMBundle(
+        model=model,
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    trace = DecodeTrace(
+        visual_latents=[
+            np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+            np.array([[4.0, 5.0, 6.0]], dtype=np.float32),
+        ],
+        proprio_latents=[
+            np.array([[7.0, 8.0]], dtype=np.float32),
+            np.array([[9.0, 10.0]], dtype=np.float32),
+        ],
+        selected_candidate_index=1,
+    )
+
+    frames, failure = _decode_latent_trace_to_frames(bundle, trace)
+    assert failure is None
+    assert model.calls == 1
+    assert model.last_payload is not None
+    assert set(model.last_payload.keys()) == {"visual"}
+    assert len(frames) == 2
+    assert frames[0].shape == (2, 2, 3)
+
+
+def test_rollout_only_decodes_selected_candidate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _SelectiveDecodeModel:
+        def __init__(self) -> None:
+            self.unroll_calls = 0
+            self.decode_calls = 0
+
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            return torch.tensor([[[0.0, 0.0, 0.0]]], dtype=torch.float32)
+
+        def unroll(self, z: object, act_suffix: torch.Tensor, debug: bool = False) -> torch.Tensor:
+            self.unroll_calls += 1
+            action_value = float(act_suffix.reshape(-1)[0]) if act_suffix.ndim > 0 else 0.0
+            return torch.tensor([[[action_value, 0.0, 0.0]]], dtype=torch.float32)
+
+        def decode_unroll(self, payload: dict[str, object], batch: bool = False) -> np.ndarray:
+            self.decode_calls += 1
+            return np.zeros((1, 2, 3, 2, 2), dtype=np.float32)
+
+    def _fixed_synthetic_chunk(
+        plan_dim: int, chunk_len: int, candidate_idx: int, rng: np.random.Generator
+    ) -> np.ndarray:
+        return np.full((chunk_len, plan_dim), float(candidate_idx), dtype=np.float32)
+
+    monkeypatch.setattr("segment_grpo_loop._synthetic_chunk", _fixed_synthetic_chunk)
+    model = _SelectiveDecodeModel()
+    bundle = WMBundle(
+        model=model,
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    goal_path = tmp_path / "goal.json"
+    goal_path.write_text('{"latent": [0, 0, 0]}', encoding="utf-8")
+
+    episode, _ = rollout_with_chunks(
+        smolvla_bundle=None,
+        wm_bundle=bundle,
+        task="push-v3",
+        episode_index=0,
+        chunk_len=4,
+        num_candidates=2,
+        max_steps=2,
+        carry_mode="replay",
+        replay_root=None,
+        goal_latent_source=str(goal_path),
+        seed=7,
+        dry_run=True,
+        strict_wm_scoring=False,
+        strict_decode=False,
+        wm_rollout_mode="iterative",
+    )
+
+    assert len(episode.segments) == 1
+    segment = episode.segments[0]
+    selected_idx = segment.selected_index
+    assert 0 <= selected_idx < len(segment.candidates)
+    assert episode.selected_indices == [selected_idx]
+    assert segment.candidates[selected_idx].meta.get("decode_status") == "ok"
+    assert sum(1 for candidate in segment.candidates if candidate.meta.get("decode_status") == "ok") == 1
+    assert model.decode_calls == 1
+    assert episode.metadata["wm_scoring_statuses"] == ["ok"]
+    assert episode.metadata["decode_statuses"] == ["ok"]
+
+
+def test_select_comparison_frames_keeps_t0_as_context() -> None:
+    real_frames = [
+        np.full((2, 2, 3), 10, dtype=np.uint8),
+        np.full((2, 2, 3), 20, dtype=np.uint8),
+        np.full((2, 2, 3), 30, dtype=np.uint8),
+    ]
+    pred_frames = [
+        np.full((2, 2, 3), 40, dtype=np.uint8),
+        np.full((2, 2, 3), 50, dtype=np.uint8),
+        np.full((2, 2, 3), 60, dtype=np.uint8),
+    ]
+    selected_real, selected_pred = _select_comparison_frames(real_frames, pred_frames, carried_steps=2)
+    assert len(selected_real) == 2
+    assert len(selected_pred) == 2
+    np.testing.assert_array_equal(selected_real[0], real_frames[0])
+    np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
+
+
+def test_write_comparison_segment_strip_returns_deterministic_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Path] = {}
+
+    def _fake_imwrite(path: Path, _image: np.ndarray) -> None:
+        captured["path"] = path
+
+    dummy_v2 = ModuleType("imageio.v2")
+    dummy_v2.imwrite = _fake_imwrite
+    dummy_pkg = ModuleType("imageio")
+    dummy_pkg.__path__ = []  # type: ignore[attr-defined]
+    dummy_pkg.v2 = dummy_v2
+
+    monkeypatch.setitem(sys.modules, "imageio", dummy_pkg)
+    monkeypatch.setitem(sys.modules, "imageio.v2", dummy_v2)
+
+    real_frames = [np.full((2, 2, 3), 10, dtype=np.uint8), np.full((2, 2, 3), 20, dtype=np.uint8)]
+    pred_frames = [np.full((2, 2, 3), 30, dtype=np.uint8), np.full((2, 2, 3), 40, dtype=np.uint8)]
+    path, failure = _write_comparison_segment_strip(
+        out_dir=tmp_path,
+        episode_index=7,
+        segment_index=3,
+        real_frames=real_frames,
+        pred_frames=pred_frames,
+        carried_steps=1,
+    )
+
+    assert failure is None
+    assert path == tmp_path / "episode_0007" / "segment_0003" / "comparison_strip.png"
+    assert captured["path"] == path
+
+
 def test_iterative_rollout_final_latent_matches_last_step() -> None:
     torch = pytest.importorskip("torch")
 
@@ -214,7 +434,7 @@ def test_iterative_rollout_final_latent_matches_last_step() -> None:
     chunk_len = 3
     chunk = np.zeros((chunk_len, 4), dtype=np.float32)
 
-    distance, trace = score_chunk_by_goal_latent(
+    distance, score_trace, decode_trace = score_chunk_by_goal_latent(
         wm_bundle=bundle,
         image=np.zeros((64, 64, 3), dtype=np.uint8),
         proprio=np.zeros(4, dtype=np.float32),
@@ -224,9 +444,57 @@ def test_iterative_rollout_final_latent_matches_last_step() -> None:
         return_latent_trace=True,
         wm_rollout_mode="iterative",
     )
-    assert len(trace) == chunk_len
+    assert len(score_trace.step_vectors) == chunk_len
     assert model.calls == chunk_len
     assert abs(float(distance) - float(chunk_len)) < 1e-5
+
+
+def test_rollout_with_chunks_records_strict_and_status_lists_with_fallback_decoding(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _ScoringSuccessDecodeFailModel:
+        def encode(self, obs: dict[str, object]) -> torch.Tensor:
+            return torch.tensor([[[1.0, 0.0, 0.0]]], dtype=torch.float32)
+
+        def unroll(self, z: object, act_suffix: torch.Tensor, debug: bool = False) -> torch.Tensor:
+            return torch.tensor([[[1.0, 0.0, 0.0]]], dtype=torch.float32)
+
+    bundle = WMBundle(
+        model=_ScoringSuccessDecodeFailModel(),
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    goal_path = tmp_path / "goal.json"
+    goal_path.write_text('{"latent": [1.0, 0.0, 0.0]}', encoding="utf-8")
+
+    episode, _ = rollout_with_chunks(
+        smolvla_bundle=None,
+        wm_bundle=bundle,
+        task="push-v3",
+        episode_index=0,
+        chunk_len=2,
+        num_candidates=2,
+        max_steps=2,
+        carry_mode="replay",
+        replay_root=None,
+        goal_latent_source=str(goal_path),
+        seed=123,
+        dry_run=True,
+        strict_wm_scoring=False,
+        strict_decode=False,
+        wm_rollout_mode="iterative",
+    )
+
+    assert episode.metadata["strict_wm_scoring"] is False
+    assert episode.metadata["strict_decode"] is False
+    assert len(episode.metadata["wm_scoring_statuses"]) == len(episode.segments) == 1
+    assert len(episode.metadata["decode_statuses"]) == len(episode.segments) == 1
+    assert episode.metadata["wm_scoring_statuses"] == ["ok"]
+    assert episode.metadata["decode_statuses"] == ["failed"]
+    assert episode.segments[0].metadata["wm_scoring_status"] == "ok"
+    assert episode.segments[0].metadata["decode_status"] == "failed"
 
 
 def test_rollout_with_chunks_records_wm_rollout_mode_metadata() -> None:

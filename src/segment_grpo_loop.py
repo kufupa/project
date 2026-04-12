@@ -62,6 +62,24 @@ class ChunkCandidate:
 
 
 @dataclass
+class ScoreTrace:
+    """Per-step score vectors used for chunk scoring."""
+
+    step_vectors: list[np.ndarray]
+    final_vector: np.ndarray
+    selected_candidate_index: int | None = None
+
+
+@dataclass
+class DecodeTrace:
+    """Structured latent trace preserved for JEPA visual decoding."""
+
+    visual_latents: list[np.ndarray]
+    proprio_latents: list[np.ndarray] = field(default_factory=list)
+    selected_candidate_index: int | None = None
+
+
+@dataclass
 class SegmentLog:
     """Per-segment rollout metadata."""
 
@@ -75,6 +93,8 @@ class SegmentLog:
     done: bool = False
     candidates: list[ChunkCandidate] = field(default_factory=list)
     executed_actions: list[list[float]] = field(default_factory=list)
+    comparison_strip_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +108,8 @@ class SegmentLog:
             "done": self.done,
             "candidates": [c.to_dict() for c in self.candidates],
             "executed_actions": [list(map(float, a)) for a in self.executed_actions],
+            "comparison_strip_path": self.comparison_strip_path,
+            "metadata": dict(self.metadata),
         }
 
 
@@ -295,53 +317,271 @@ def _to_channel_last(image_like: Any) -> np.ndarray:
     return _to_rgb_uint8(frame)
 
 
-def _decode_latent_trace_to_frames(model_bundle: WMBundle, latent_trace: list[np.ndarray]) -> list[np.ndarray]:
-    if not latent_trace:
-        return []
-    decode_fn = getattr(model_bundle.model, "decode_unroll", None)
-    if decode_fn is None:
-        decode_fn = getattr(model_bundle.model, "decode", None)
-    if decode_fn is None:
-        return []
-
-    try:
-        lat = np.asarray(latent_trace, dtype=np.float32)
-        lat_t = torch.as_tensor(lat, dtype=torch.float32, device=model_bundle.device)
-        if lat_t.ndim == 2:
-            lat_t = lat_t.unsqueeze(0)
-
-        decoded = None
+def _to_tensor(
+    latents: Any,
+    label: str,
+    device: torch.device,
+) -> tuple[torch.Tensor | None, str | None]:
+    if torch is None:
+        return None, "Torch is not available for latent tensor conversion."
+    if latents is None:
+        return None, f"{label} latent trace is empty."
+    if isinstance(latents, np.ndarray):
+        if latents.size == 0:
+            return None, f"{label} latent trace is empty."
+    elif isinstance(latents, (list, tuple)):
+        if len(latents) == 0:
+            return None, f"{label} latent trace is empty."
+    else:
         try:
-            decoded = decode_fn(lat_t, debug=False)
-        except TypeError:
-            decoded = decode_fn(lat_t)
+            if len(latents) == 0:  # type: ignore[arg-type]
+                return None, f"{label} latent trace is empty."
+        except TypeError as exc:
+            return None, f"Failed to inspect {label} latent trace length: {exc}"
+    try:
+        latent_np = np.asarray(latents, dtype=np.float32)
+    except Exception as exc:
+        return None, f"Failed to convert {label} latents to numpy: {exc}"
+    if latent_np.size == 0:
+        return None, f"{label} latent trace is empty."
+    if latent_np.ndim == 0:
+        return None, f"{label} latent tensor is a scalar; expected a trailing feature dimension for decode."
+    try:
+        lat = torch.as_tensor(latent_np, dtype=torch.float32, device=device)
+    except Exception as exc:
+        return None, f"Failed to convert {label} latents to torch tensor: {exc}"
+    try:
+        normalized = lat
+        while normalized.ndim > 6:
+            squeeze_idx = None
+            for idx in range(1, normalized.ndim - 1):
+                if normalized.shape[idx] == 1:
+                    squeeze_idx = idx
+                    break
+            if squeeze_idx is None:
+                return (
+                    None,
+                    f"{label} latent tensor shape {tuple(normalized.shape)} has unsupported rank >6 for decode-unroll; "
+                    "expected to expand/pad to [T,B,V,H,W,D] after removing singleton extras.",
+                )
+            normalized = normalized.squeeze(squeeze_idx)
+        while normalized.ndim < 6:
+            normalized = normalized.unsqueeze(-2)
+        if normalized.ndim != 6:
+            return (
+                None,
+                f"{label} latent tensor shape {tuple(normalized.shape)} cannot be normalized to [T,B,V,H,W,D].",
+            )
+    except Exception as exc:
+        return None, f"Failed to normalize {label} latent tensor shape: {exc}"
+    return normalized, None
+
+
+def _adapt_trace_for_decode_unroll(
+    latent_trace: DecodeTrace,
+    device: torch.device,
+) -> dict[str, dict[str, torch.Tensor | None | str | None]]:
+    visual_tensor, visual_failure = _to_tensor(latent_trace.visual_latents, "visual", device)
+    proprio_tensor, proprio_failure = _to_tensor(latent_trace.proprio_latents, "proprio", device)
+    return {
+        "visual": {"tensor": visual_tensor, "failure": visual_failure},
+        "proprio": {"tensor": proprio_tensor, "failure": proprio_failure},
+    }
+
+
+def _fallback_scoring_distance(
+    chunk_actions: np.ndarray,
+    reason: str,
+) -> tuple[float, str]:
+    chunk_flat = np.asarray(chunk_actions, dtype=np.float32).reshape(-1)
+    if chunk_flat.size == 0:
+        return 1.0e6, f"{reason}: fallback score used for empty action chunk."
+
+    non_finite_count = int(np.size(chunk_flat) - np.sum(np.isfinite(chunk_flat)))
+    normalized_chunk = np.nan_to_num(chunk_flat, nan=0.0, posinf=0.0, neginf=0.0)
+    base_distance = float(np.linalg.norm(normalized_chunk))
+    if not np.isfinite(base_distance):
+        base_distance = 0.0
+
+    fallback_distance = float(base_distance + 1.0e6)
+    if non_finite_count:
+        return (
+            fallback_distance,
+            f"{reason}: score fallback used. Replaced {non_finite_count} non-finite actions with 0.0, then used norm distance.",
+        )
+    return (
+        fallback_distance,
+        f"{reason}: score fallback used. Used action-norm distance as finite fallback.",
+    )
+
+
+def _decode_selected_trace(
+    model_bundle: WMBundle,
+    latent_trace: DecodeTrace,
+) -> tuple[list[np.ndarray], str | None]:
+    adapted = _adapt_trace_for_decode_unroll(latent_trace, model_bundle.device)
+    visual_entry = adapted["visual"]
+    proprio_entry = adapted["proprio"]
+    visual_latent_t = visual_entry["tensor"]
+    proprio_latent_t = proprio_entry["tensor"]
+    visual_failure = visual_entry["failure"]
+    proprio_failure = proprio_entry["failure"]
+
+    def _decode_modal(
+        modality: str,
+        latent_obj: Any,
+        preparation_failure: str | None,
+    ) -> tuple[list[np.ndarray] | None, str | None]:
+        if latent_obj is None:
+            if preparation_failure is None:
+                return None, f"{modality} latent trace is unavailable."
+            return None, preparation_failure
+
+        decode_input = latent_obj if isinstance(latent_obj, dict) else {modality: latent_obj}
+        decoded = None
+        decode_unroll = getattr(model_bundle.model, "decode_unroll", None)
+        if decode_unroll is None:
+            decode_fn = getattr(model_bundle.model, "decode", None)
+            if decode_fn is None:
+                return None, "Model has no decode_unroll or decode method."
+            try:
+                decoded = decode_fn(latent_obj, debug=False)
+            except TypeError:
+                try:
+                    decoded = decode_fn(latent_obj)
+                except Exception as exc:
+                    return None, f"{modality} decode fallback failed: {exc}"
+            except Exception as exc:
+                return None, f"{modality} decode fallback failed: {exc}"
+            if decoded is None:
+                return None, f"{modality} decode fallback returned no output."
+        else:
+            try:
+                decoded = decode_unroll(decode_input, batch=True)
+            except TypeError:
+                try:
+                    decoded = decode_unroll(decode_input)
+                except Exception as exc:
+                    try:
+                        decoded = decode_unroll(latent_obj)
+                    except Exception as fallback_exc:
+                        return (
+                            None,
+                            f"{modality} decode_unroll calls failed: {exc}; fallback tensor input failed: {fallback_exc}",
+                        )
+            except Exception as exc:
+                return None, f"{modality} decode_unroll failed: {exc}"
 
         if isinstance(decoded, dict):
             if "recon" in decoded:
                 decoded = decoded["recon"]
             elif "decoded" in decoded:
                 decoded = decoded["decoded"]
-            else:
+            elif len(decoded):
                 decoded = next(iter(decoded.values()))
-        decoded_np = np.asarray(decoded)
-        if decoded_np.size == 0:
-            return []
+            else:
+                return None, f"{modality} decode_unroll output was an empty dict."
 
+        try:
+            decoded_np = np.asarray(decoded)
+        except Exception as exc:
+            return None, f"Failed to convert decoded {modality} output to array: {exc}"
+        if decoded_np.size == 0:
+            return None, f"{modality} decode_unroll returned empty output."
         if decoded_np.ndim == 5:
             decoded_np = decoded_np[0]
         if decoded_np.ndim == 4:
-            return [_to_channel_last(frame) for frame in decoded_np]
+            try:
+                return [_to_channel_last(frame) for frame in decoded_np], None
+            except Exception as exc:
+                return None, f"Failed to convert decoded {modality} frames to images: {exc}"
         if decoded_np.ndim == 3:
-            return [_to_channel_last(decoded_np)]
-    except Exception:
-        return []
-    return []
+            try:
+                return [_to_channel_last(decoded_np)], None
+            except Exception as exc:
+                return None, f"Failed to convert decoded {modality} frame to image: {exc}"
+        return None, f"Unexpected decoded frame rank {decoded_np.ndim} for {modality} trace."
+
+    fused_frames = None
+    fused_failure = None
+    if visual_latent_t is not None and proprio_latent_t is not None:
+        fused_frames, fused_failure = _decode_modal(
+            "visual+proprio",
+            {"visual": visual_latent_t, "proprio": proprio_latent_t},
+            None,
+        )
+        if fused_frames is not None:
+            return fused_frames, None
+
+    visual_frames = None
+    if visual_latent_t is not None:
+        visual_frames, visual_failure = _decode_modal("visual", visual_latent_t, visual_failure)
+        if visual_frames is not None:
+            return visual_frames, None
+
+    proprio_frames = None
+    if proprio_latent_t is not None:
+        proprio_frames, proprio_failure = _decode_modal("proprio", proprio_latent_t, proprio_failure)
+        if proprio_frames is not None:
+            return proprio_frames, None
+
+    failure_parts: list[str] = []
+    if fused_failure is not None:
+        failure_parts.append(fused_failure)
+    if visual_failure is not None:
+        failure_parts.append(visual_failure)
+    if proprio_failure is not None:
+        failure_parts.append(proprio_failure)
+    if failure_parts:
+        return [], "; ".join(failure_parts)
+    return [], "Decode failed for both modalities."
 
 
-def _build_real_vs_pred_strip(real_frames: list[np.ndarray], pred_frames: list[np.ndarray]) -> np.ndarray:
+def _decode_latent_trace_to_frames(
+    model_bundle: WMBundle,
+    latent_trace: DecodeTrace | list[np.ndarray],
+) -> tuple[list[np.ndarray], str | None]:
+    if isinstance(latent_trace, DecodeTrace):
+        return _decode_selected_trace(model_bundle, latent_trace)
+    if not latent_trace:
+        return [], "Decode trace is empty."
+    return _decode_selected_trace(model_bundle, DecodeTrace(visual_latents=list(latent_trace)))
+
+
+def _select_comparison_frames(
+    real_frames: list[np.ndarray],
+    pred_frames: list[np.ndarray],
+    carried_steps: int | None = None,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Align predicted frames against real rollout with explicit t0 context policy."""
+    if not real_frames or not pred_frames:
+        return [], []
+    # Always pair predicted rollout steps against real state transitions.
+    # real_frames includes the segment start frame + one frame per carried step.
+    limit = max(0, len(real_frames) - 1)
+    limit = min(limit, len(pred_frames))
+    if carried_steps is not None:
+        step_limit = int(carried_steps)
+        if step_limit <= 0:
+            return [], []
+        limit = min(limit, step_limit)
+    if limit <= 0:
+        return [], []
+    return list(real_frames[:limit]), list(pred_frames[:limit])
+
+
+def _build_real_vs_pred_strip(
+    real_frames: list[np.ndarray],
+    pred_frames: list[np.ndarray],
+    *,
+    carried_steps: int | None = None,
+) -> np.ndarray:
     if not real_frames or not pred_frames:
         raise ValueError("Real and predicted frames are required for strip rendering.")
-    total = min(len(real_frames), len(pred_frames))
+    real_frames, pred_frames = _select_comparison_frames(real_frames, pred_frames, carried_steps=carried_steps)
+    if not real_frames or not pred_frames:
+        raise ValueError("Real and predicted frames are required for strip rendering.")
+    total = len(real_frames)
     pairs: list[np.ndarray] = []
     for idx in range(total):
         real_rgb = _to_rgb_uint8(real_frames[idx])
@@ -360,36 +600,70 @@ def _write_comparison_segment_strip(
     segment_index: int,
     real_frames: list[np.ndarray],
     pred_frames: list[np.ndarray],
-) -> Path | None:
+    *,
+    carried_steps: int | None = None,
+) -> tuple[Path | None, str | None]:
+    if carried_steps is not None and int(carried_steps) <= 0:
+        return None, None
     if not real_frames or not pred_frames:
-        return None
+        return None, None
     out_dir = Path(out_dir)
     try:
-        strip = _build_real_vs_pred_strip(real_frames, pred_frames)
-    except Exception:
-        return None
-    import imageio.v2 as imageio
+        strip = _build_real_vs_pred_strip(real_frames, pred_frames, carried_steps=carried_steps)
+    except Exception as exc:
+        reason = f"Failed to build comparison strip for episode {episode_index} segment {segment_index}: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"episode_{episode_index:04d}_segment_{segment_index:04d}.png"
-    imageio.imwrite(path, strip)
-    return path
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:
+        reason = f"Failed to import imageio for comparison strip for episode {episode_index} segment {segment_index}: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
+
+    out_dir = out_dir / f"episode_{episode_index:04d}" / f"segment_{segment_index:04d}"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "comparison_strip.png"
+        imageio.imwrite(path, strip)
+        return path, None
+    except Exception as exc:
+        reason = f"Failed to write comparison strip to {out_dir / 'comparison_strip.png'}: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
 
 
-def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> Path | None:
+def _stitch_comparison_strip(segments: list[Path], output_path: Path) -> tuple[Path | None, str | None]:
     if not segments:
-        return None
-    import imageio.v2 as imageio
+        return None, None
+
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:
+        reason = f"Failed to import imageio for stitching comparison strip: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
 
     strips: list[np.ndarray] = []
-    for seg in segments:
-        strips.append(imageio.imread(seg))
+    try:
+        for seg in segments:
+            strips.append(imageio.imread(seg))
+    except Exception as exc:
+        reason = f"Failed to read comparison strip segment for stitching: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
     if not strips:
-        return None
-    stitched = np.concatenate(strips, axis=1)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    imageio.imwrite(output_path, stitched)
-    return output_path
+        return None, "No comparison strip segments could be loaded."
+    try:
+        stitched = np.concatenate(strips, axis=1)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.imwrite(output_path, stitched)
+        return output_path, None
+    except Exception as exc:
+        reason = f"Failed to write stitched comparison strip to {output_path}: {exc}"
+        print(f"[segment_grpo] {reason}")
+        return None, reason
 
 
 def _extract_image_and_proprio(obs: Any, env: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -432,8 +706,8 @@ def load_smolvla_bundle(checkpoint: str | Path | None, device: str | torch.devic
         bundle.policy.reset()
         bundle.preprocessor.reset()
         bundle.postprocessor.reset()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[segment_grpo] failed to reset SmolVLA bundle helpers: {exc}")
     return bundle
 
 
@@ -557,8 +831,94 @@ def _extract_latent(z_pred: Any) -> torch.Tensor:
     return candidate_t
 
 
+def _as_tensor_dict_if_available(state: Any) -> Any:
+    """Best-effort conversion of dict-like WM states to tensordict TensorDict."""
+    try:
+        from tensordict import TensorDict
+    except Exception:
+        return state
+    if isinstance(state, TensorDict):
+        return state
+    if not hasattr(state, "keys"):
+        return state
+    try:
+        has_visual = "visual" in state  # type: ignore[index]
+        has_proprio = "proprio" in state  # type: ignore[index]
+    except Exception:
+        return state
+    if not (has_visual and has_proprio):
+        return state
+    try:
+        visual = state["visual"]  # type: ignore[index]
+        proprio = state["proprio"]  # type: ignore[index]
+    except Exception:
+        return state
+    if not (torch is not None and torch.is_tensor(visual) and torch.is_tensor(proprio)):
+        return state
+    try:
+        return TensorDict({"visual": visual, "proprio": proprio}, device=visual.device)
+    except Exception:
+        return state
+
+
+def _extract_latent_with_fallback(z_pred: Any) -> torch.Tensor:
+    """Prefer `_extract_latent` and fall back to permissive tensor extraction for atypical outputs."""
+    try:
+        return _extract_latent(z_pred)
+    except RuntimeError as primary_exc:
+        if hasattr(z_pred, "keys"):
+            try:
+                if "latent" in z_pred:  # type: ignore[index]
+                    candidate = z_pred["latent"]  # type: ignore[index]
+                    candidate_t = candidate if torch.is_tensor(candidate) else torch.as_tensor(np.asarray(candidate), dtype=torch.float32)
+                    if candidate_t.numel() > 0:
+                        return candidate_t
+                preferred_keys = ("visual", "proprio", "state", "prediction", "pred", "z")
+                for key in preferred_keys:
+                    try:
+                        candidate = z_pred[key]  # type: ignore[index]
+                    except Exception:
+                        continue
+                    if torch.is_tensor(candidate) and candidate.numel() > 0:
+                        return candidate
+                try:
+                    values = list(z_pred.values())  # type: ignore[call-arg]
+                except Exception:
+                    values = []
+                for value in values:
+                    if torch.is_tensor(value) and value.numel() > 0:
+                        return value
+            except Exception:
+                pass
+        if isinstance(z_pred, (list, tuple)):
+            for value in z_pred:
+                if torch.is_tensor(value) and value.numel() > 0:
+                    return value
+        raise primary_exc
+
+
 def _next_latent_state_after_unroll(out: Any) -> Any:
     """Reduce multi-step unroll output to latent state suitable for another one-step unroll."""
+    tensordict_type = None
+    try:
+        from tensordict import TensorDict
+        tensordict_type = TensorDict
+    except Exception:
+        tensordict_type = None
+
+    if tensordict_type is not None and isinstance(out, tensordict_type):
+        items = list(out.items())
+        nxt: dict[str, Any] = {}
+        for key, val in items:
+            if torch is not None and torch.is_tensor(val) and val.dim() >= 1:
+                nxt[str(key)] = val[-1:].detach() if int(val.shape[0]) > 1 else val.detach()
+            else:
+                nxt[str(key)] = val
+        try:
+            device = getattr(out, "device", None)
+            return tensordict_type(nxt, device=device)
+        except Exception:
+            return nxt
     if isinstance(out, dict):
         nxt: dict[str, Any] = {}
         for key, val in out.items():
@@ -567,6 +927,19 @@ def _next_latent_state_after_unroll(out: Any) -> Any:
             else:
                 nxt[key] = val
         return nxt
+    if hasattr(out, "keys"):
+        nxt: dict[str, Any] = {}
+        for key in list(out.keys()):
+            try:
+                val = out[key]  # type: ignore[index]
+            except Exception:
+                continue
+            if torch is not None and torch.is_tensor(val) and val.dim() >= 1:
+                nxt[str(key)] = val[-1:].detach() if int(val.shape[0]) > 1 else val.detach()
+            else:
+                nxt[str(key)] = val
+        if nxt:
+            return nxt
     if torch is not None and torch.is_tensor(out):
         if out.dim() >= 1 and int(out.shape[0]) > 1:
             return out[-1:].detach()
@@ -577,7 +950,7 @@ def _next_latent_state_after_unroll(out: Any) -> Any:
 def _latent_vector_from_unroll_step(unroll_out: Any) -> torch.Tensor:
     """Single-step latent used for distance scoring and trace (flattened 1-D)."""
     _require_torch("WM scoring requires torch.")
-    lat = _extract_latent(unroll_out)
+    lat = _extract_latent_with_fallback(unroll_out)
     if lat.ndim >= 3:
         final = lat[-1]
     elif lat.ndim == 2 and int(lat.shape[0]) > 1:
@@ -622,7 +995,7 @@ def score_chunk_by_goal_latent(
     chunk_len: int | None = None,
     return_latent_trace: bool = False,
     wm_rollout_mode: str = "iterative",
-) -> float | tuple[float, list[np.ndarray]]:
+) -> float | tuple[float, ScoreTrace, DecodeTrace]:
     """
     Score a candidate chunk by JEPA-WM latent distance to goal latent.
 
@@ -630,7 +1003,8 @@ def score_chunk_by_goal_latent(
     - ``iterative``: one ``model.unroll`` call per action in the chunk (state carried forward).
     - ``batched``: single ``unroll`` over the full action suffix (legacy).
 
-    Returns euclidean distance (smaller is better), and optionally latent trace.
+    Returns euclidean distance (smaller is better).
+    When ``return_latent_trace`` is True, also returns score and decode traces.
     """
     if not isinstance(chunk_actions, np.ndarray):
         chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
@@ -651,34 +1025,123 @@ def score_chunk_by_goal_latent(
     mode = str(wm_rollout_mode or "iterative").strip().lower()
     if mode not in ("iterative", "batched"):
         raise ValueError(f"wm_rollout_mode must be 'iterative' or 'batched', got {wm_rollout_mode!r}")
+    def _append_trace_steps(target: list[np.ndarray], raw: Any) -> None:
+        if raw is None:
+            return
+        if torch is not None and torch.is_tensor(raw):
+            raw_np = raw.detach().cpu().numpy()
+        else:
+            raw_np = np.asarray(raw)
+        if raw_np.ndim == 0:
+            return
+        target.extend([np.asarray(item, dtype=np.float32) for item in raw_np])
 
     with torch.no_grad():
+        debug_unroll = os.environ.get("DEBUG_WM_UNROLL_OUTPUT", "").strip().lower() in {"1", "true", "yes"}
         visual = _to_wm_visual(image, wm_bundle.device)
         proprio_t = _to_wm_proprio(proprio, wm_bundle.proprio_dim, wm_bundle.device)
-        latent_state = wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
+        latent_state = _as_tensor_dict_if_available(
+            wm_bundle.model.encode({"visual": visual, "proprio": proprio_t})
+        )
         seq_actions = actions_t.to(wm_bundle.device).to(dtype=torch.float32).unsqueeze(1)
         if seq_actions.ndim != 3:
             raise RuntimeError(f"Expected action sequence tensor shape (T, B, A), got {seq_actions.shape}")
 
-        latent_trace: list[torch.Tensor] = []
+        score_trace_steps: list[np.ndarray] = []
+        decode_trace_steps: list[np.ndarray] = []
+        decode_visual_steps: list[np.ndarray] = []
+        decode_proprio_steps: list[np.ndarray] = []
         if mode == "batched":
             unroll_output = wm_bundle.model.unroll(latent_state, act_suffix=seq_actions, debug=False)
+            if debug_unroll:
+                out_shape = None
+                try:
+                    out_shape = tuple(int(x) for x in unroll_output.shape)
+                except Exception:
+                    pass
+                print(f"[wm-debug] batched unroll_output type={type(unroll_output)} shape={out_shape}", flush=True)
+                if hasattr(unroll_output, "keys"):
+                    try:
+                        keys = list(unroll_output.keys())  # type: ignore[call-arg]
+                    except Exception:
+                        keys = None
+                    if keys is not None:
+                        print(f"[wm-debug]   keys={keys}", flush=True)
+                        for key in keys:
+                            try:
+                                value = unroll_output[key]  # type: ignore[index]
+                            except Exception:
+                                continue
+                            if torch is not None and torch.is_tensor(value):
+                                print(f"[wm-debug]     key={key} shape={tuple(int(x) for x in value.shape)}", flush=True)
+            if hasattr(unroll_output, "keys"):
+                try:
+                    _append_trace_steps(decode_visual_steps, unroll_output.get("visual"))
+                    _append_trace_steps(decode_proprio_steps, unroll_output.get("proprio"))
+                except Exception:
+                    try:
+                        _append_trace_steps(decode_visual_steps, unroll_output["visual"])  # type: ignore[index]
+                        _append_trace_steps(decode_proprio_steps, unroll_output["proprio"])  # type: ignore[index]
+                    except Exception:
+                        pass
             rollout_trace = _extract_latent(unroll_output)
             if rollout_trace.ndim < 3:
                 raise RuntimeError(
                     f"Expected rollout latent trace with time dimension, got shape {tuple(rollout_trace.shape)}"
                 )
-            latent_trace.extend(rollout_trace)
-            pred = rollout_trace[-1].reshape(-1)
+            for step in rollout_trace:
+                step_latent = step.detach().cpu().numpy().astype(np.float32, copy=False)
+                score_trace_steps.append(step_latent.reshape(-1))
+                decode_trace_steps.append(step_latent)
+            pred = torch.as_tensor(score_trace_steps[-1], dtype=torch.float32, device=wm_bundle.device)
         else:
-            z_t: Any = latent_state
+            z_t: Any = _next_latent_state_after_unroll(latent_state)
             for t in range(int(seq_actions.shape[0])):
                 one = seq_actions[t : t + 1]
                 unroll_out = wm_bundle.model.unroll(z_t, act_suffix=one, debug=False)
-                step_vec = _latent_vector_from_unroll_step(unroll_out)
-                latent_trace.append(step_vec)
-                z_t = _next_latent_state_after_unroll(unroll_out)
-            pred = latent_trace[-1].reshape(-1)
+                if debug_unroll:
+                    print(f"[wm-debug] iterative t={t} output type={type(unroll_out)}", flush=True)
+                    if torch is not None and torch.is_tensor(unroll_out):
+                        print(f"[wm-debug]   output tensor shape={tuple(int(x) for x in unroll_out.shape)}", flush=True)
+                    if hasattr(unroll_out, "keys"):
+                        try:
+                            keys = list(unroll_out.keys())  # type: ignore[call-arg]
+                        except Exception:
+                            keys = None
+                        if keys is not None:
+                            print(f"[wm-debug]   output keys={keys}", flush=True)
+                            for key in keys:
+                                try:
+                                    value = unroll_out[key]  # type: ignore[index]
+                                except Exception:
+                                    continue
+                                if torch is not None and torch.is_tensor(value):
+                                    print(f"[wm-debug]     key={key} shape={tuple(int(x) for x in value.shape)}", flush=True)
+                                else:
+                                    print(f"[wm-debug]     key={key} type={type(value)}", flush=True)
+                                if isinstance(value, dict):
+                                    try:
+                                        inner_keys = list(value.keys())  # type: ignore[call-arg]
+                                    except Exception:
+                                        inner_keys = None
+                                    if inner_keys is not None:
+                                        print(f"[wm-debug]       nested keys={inner_keys}", flush=True)
+                step_latent = _extract_latent_with_fallback(unroll_out)
+                step_vec = _latent_vector_from_unroll_step(step_latent)
+                score_trace_steps.append(np.asarray(step_vec.detach().cpu(), dtype=np.float32))
+                decode_trace_steps.append(np.asarray(step_latent.detach().cpu(), dtype=np.float32))
+                if hasattr(unroll_out, "keys"):
+                    try:
+                        _append_trace_steps(decode_visual_steps, unroll_out.get("visual"))  # type: ignore[attr-defined]
+                        _append_trace_steps(decode_proprio_steps, unroll_out.get("proprio"))  # type: ignore[attr-defined]
+                    except Exception:
+                        try:
+                            _append_trace_steps(decode_visual_steps, unroll_out["visual"])  # type: ignore[index]
+                            _append_trace_steps(decode_proprio_steps, unroll_out["proprio"])  # type: ignore[index]
+                        except Exception:
+                            pass
+                z_t = _as_tensor_dict_if_available(_next_latent_state_after_unroll(unroll_out))
+            pred = torch.as_tensor(score_trace_steps[-1], dtype=torch.float32, device=wm_bundle.device)
 
         goal = goal_latent.reshape(-1).to(wm_bundle.device)
         if pred.numel() == 0 or goal.numel() == 0:
@@ -686,8 +1149,15 @@ def score_chunk_by_goal_latent(
         n = min(pred.numel(), goal.numel())
         distance = torch.linalg.vector_norm(pred[:n] - goal[:n], ord=2).item()
     if return_latent_trace:
-        decoded_trace = [torch.as_tensor(v).reshape(-1).detach().cpu().numpy() for v in latent_trace]
-        return float(distance), decoded_trace
+        score_trace = ScoreTrace(
+            step_vectors=score_trace_steps,
+            final_vector=score_trace_steps[-1] if score_trace_steps else np.asarray([], dtype=np.float32),
+        )
+        decode_trace = DecodeTrace(
+            visual_latents=decode_visual_steps or decode_trace_steps,
+            proprio_latents=decode_proprio_steps,
+        )
+        return float(distance), score_trace, decode_trace
     return float(distance)
 
 
@@ -981,6 +1451,8 @@ def rollout_with_chunks(
     seed: int = 0,
     train_steps: int = 0,
     dry_run: bool = False,
+    strict_wm_scoring: bool = False,
+    strict_decode: bool = False,
     adapter: nn.Module | None = None,
     wm_rollout_mode: str = "iterative",
 ) -> tuple[EpisodeLog, nn.Module | None]:
@@ -1032,8 +1504,8 @@ def rollout_with_chunks(
                     try:
                         if hasattr(env, "render_mode"):
                             env.render_mode = "rgb_array"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(f"[segment_grpo] failed to set env render_mode on simulation env: {exc}")
                 tasks = getattr(mt1, "train_tasks", None)
                 if tasks:
                     env.set_task(tasks[0])
@@ -1110,6 +1582,12 @@ def rollout_with_chunks(
             "carry_mode": carry_mode,
             "train_steps": int(train_steps),
             "wm_rollout_mode": str(wm_rollout_mode),
+            "strict_wm_scoring": bool(strict_wm_scoring),
+            "strict_decode": bool(strict_decode),
+            "wm_scoring_statuses": [],
+            "decode_statuses": [],
+            "scoring_failure_reasons": [],
+            "decode_failure_reasons": [],
         },
     )
 
@@ -1120,7 +1598,7 @@ def rollout_with_chunks(
         effective_len = min(chunk_len, max_steps - current_step)
 
         segment_candidates: list[ChunkCandidate] = []
-        candidate_traces: dict[int, list[np.ndarray] | None] = {}
+        candidate_traces: dict[int, DecodeTrace | None] = {}
         segment_real_frames: list[np.ndarray] = [np.asarray(current_image, copy=True)]
         for candidate_idx in range(num_candidates):
             if smolvla_bundle is not None and not dry_run:
@@ -1138,9 +1616,11 @@ def rollout_with_chunks(
 
             # Score by latent distance when possible; fallback to deterministic synthetic score otherwise.
             latent_trace: list[np.ndarray] | None = None
+            scoring_failure_reason: str | None = None
+            wm_scoring_status = "fallback"
             if wm_bundle is not None and goal_latent is not None:
                 try:
-                    distance, latent_trace = score_chunk_by_goal_latent(
+                    distance, score_trace, decode_trace = score_chunk_by_goal_latent(
                         wm_bundle,
                         current_image,
                         current_proprio,
@@ -1150,19 +1630,30 @@ def rollout_with_chunks(
                         return_latent_trace=True,
                         wm_rollout_mode=wm_rollout_mode,
                     )
+                    score_trace.selected_candidate_index = int(candidate_idx)
+                    decode_trace.selected_candidate_index = int(candidate_idx)
                     score = -distance
-                except Exception:
-                    chunk_flat = np.asarray(chunk, dtype=np.float32).reshape(-1)
-                    distance = float(np.linalg.norm(chunk_flat))
+                    wm_scoring_status = "ok"
+                except Exception as exc:
+                    if strict_wm_scoring:
+                        raise
+                    distance, scoring_failure_reason = _fallback_scoring_distance(
+                        chunk,
+                        f"score_chunk_by_goal_latent failed ({type(exc).__name__}: {exc})",
+                    )
                     score = -distance
-                    latent_trace = None
+                    decode_trace = None
             else:
+                wm_scoring_status = "fallback"
+                scoring_failure_reason = (
+                    "WM scoring skipped because bundle/goal latent was unavailable; synthetic fallback score used."
+                )
                 chunk_flat = np.asarray(chunk, dtype=np.float32).reshape(-1)
                 distance = float(np.linalg.norm(chunk_flat))
                 score = -distance
-                latent_trace = None
+                decode_trace = None
 
-            candidate_traces[int(candidate_idx)] = latent_trace
+            candidate_traces[int(candidate_idx)] = decode_trace
 
             segment_candidates.append(
                 ChunkCandidate(
@@ -1173,16 +1664,34 @@ def rollout_with_chunks(
                     meta={
                         "planner_action_dim": int(planner_action_dim),
                         "effective_chunk_len": int(effective_len),
-                        "latent_trace_len": 0 if latent_trace is None else int(len(latent_trace)),
+                        "wm_scoring_status": wm_scoring_status,
+                        "decode_status": "skipped",
+                        "scoring_failure_reason": str(scoring_failure_reason) if scoring_failure_reason is not None else None,
+                                "latent_trace_len": 0
+                                if decode_trace is None
+                                else int(
+                                    len(decode_trace.visual_latents)
+                                    if decode_trace.visual_latents
+                                    else len(decode_trace.proprio_latents)
+                                ),
+                        **({"failure_reason": str(scoring_failure_reason)} if scoring_failure_reason is not None else {}),
                     },
                 )
             )
 
-        best = max(segment_candidates, key=lambda c: (float(c.score), -int(c.index)))
+        nonfinite_penalty = -1.0e12
+        best = max(
+            segment_candidates,
+            key=lambda c: (
+                float(c.score) if np.isfinite(c.score) else nonfinite_penalty,
+                -int(c.index),
+            ),
+        )
         selected_idx = int(best.index)
         selected_distance = best.latent_distance if best.latent_distance is not None else None
         best_actions = _ensure_action_matrix(best.actions, planner_action_dim, effective_len)
         selected_trace = candidate_traces.get(selected_idx)
+        selected_meta = segment_candidates[selected_idx].meta if 0 <= selected_idx < len(segment_candidates) else None
         pred_frames: list[np.ndarray] = []
 
         executed_actions: list[list[float]] = []
@@ -1243,13 +1752,85 @@ def rollout_with_chunks(
                     env_done = True
 
         if wm_bundle is not None and selected_trace is not None:
-            pred_frames = _decode_latent_trace_to_frames(wm_bundle, selected_trace)
-        if comparison_root_path is not None and selected_trace is not None:
-            segment_path = _write_comparison_segment_strip(
-                comparison_root_path, episode_index, segment_idx, segment_real_frames, pred_frames
+            pred_frames, decode_failure_reason = _decode_latent_trace_to_frames(wm_bundle, selected_trace)
+            if decode_failure_reason is not None and 0 <= selected_idx < len(segment_candidates):
+                if strict_decode:
+                    raise RuntimeError(
+                        f"Decode failed for selected candidate {selected_idx}: {decode_failure_reason}"
+                    )
+                segment_candidates[int(selected_idx)].meta["decode_status"] = "failed"
+                segment_candidates[int(selected_idx)].meta["decode_failure_reason"] = decode_failure_reason
+                segment_candidates[int(selected_idx)].meta["failure_reason"] = decode_failure_reason
+                candidate_traces[int(selected_idx)] = None
+                pred_frames = []
+            elif decode_failure_reason is None:
+                segment_candidates[int(selected_idx)].meta["decode_status"] = "ok"
+        elif wm_bundle is not None and selected_trace is None and selected_meta is not None:
+            decode_failure_reason = "No latent trace available for selected candidate."
+            if strict_decode:
+                raise RuntimeError(
+                    f"Decode failed for selected candidate {selected_idx}: {decode_failure_reason}"
+                )
+            selected_failure_reason = selected_meta.get("failure_reason")
+            selected_meta["decode_status"] = "failed"
+            selected_meta["decode_failure_reason"] = "No latent trace available for selected candidate."
+            if isinstance(selected_failure_reason, str):
+                selected_meta["failure_reason"] = selected_failure_reason
+            else:
+                selected_meta["failure_reason"] = "No latent trace available for selected candidate."
+
+        selected_trace_len = 0
+        if pred_frames:
+            selected_trace_len = len(pred_frames)
+        elif selected_trace is not None:
+            selected_trace_len = (
+                len(selected_trace.visual_latents) if selected_trace.visual_latents else len(selected_trace.proprio_latents)
+            )
+        if selected_meta is not None:
+            selected_meta["latent_trace_len"] = int(selected_trace_len)
+
+        if selected_meta is not None and "decode_status" not in selected_meta:
+            selected_meta["decode_status"] = "skipped"
+        if selected_meta is not None and "selected" not in selected_meta:
+            selected_meta["selected"] = True
+
+        selected_meta = segment_candidates[selected_idx].meta if 0 <= selected_idx < len(segment_candidates) else None
+        selected_wm_scoring_status = "fallback"
+        selected_decode_status = "skipped"
+        if selected_meta is not None:
+            selected_wm_scoring_status = str(selected_meta.get("wm_scoring_status", "fallback"))
+            selected_decode_status = str(selected_meta.get("decode_status", "skipped"))
+            if selected_meta.get("scoring_failure_reason"):
+                episode_log.metadata["scoring_failure_reasons"].append(str(selected_meta.get("scoring_failure_reason")))
+            if selected_meta.get("decode_failure_reason"):
+                episode_log.metadata["decode_failure_reasons"].append(str(selected_meta.get("decode_failure_reason")))
+            episode_log.metadata["wm_scoring_statuses"].append(selected_wm_scoring_status)
+            episode_log.metadata["decode_statuses"].append(selected_decode_status)
+
+        segment_metadata: dict[str, Any] = {
+            "wm_scoring_status": selected_wm_scoring_status,
+            "decode_status": selected_decode_status,
+            "scoring_failure_reason": selected_meta.get("scoring_failure_reason") if selected_meta is not None else None,
+            "decode_failure_reason": selected_meta.get("decode_failure_reason") if selected_meta is not None else None,
+            "selected": True,
+        }
+
+        segment_comparison_path = None
+        if comparison_root_path is not None and pred_frames and carried_steps > 0:
+            segment_path, segment_strip_failure_reason = _write_comparison_segment_strip(
+                comparison_root_path,
+                episode_index,
+                segment_idx,
+                segment_real_frames,
+                pred_frames,
+                carried_steps=carried_steps,
             )
             if segment_path is not None:
+                segment_comparison_path = segment_path
                 episode_strip_parts.append(segment_path)
+            elif segment_strip_failure_reason is not None and selected_meta is not None:
+                selected_meta["comparison_strip_status"] = "failed"
+                selected_meta["comparison_strip_failure_reason"] = segment_strip_failure_reason
 
         episode_log.actions.extend(executed_actions)
         episode_log.latent_scores.append(0.0 if selected_distance is None else float(selected_distance))
@@ -1270,6 +1851,8 @@ def rollout_with_chunks(
                 done=segment_done or env_done,
                 candidates=segment_candidates,
                 executed_actions=executed_actions,
+                comparison_strip_path=str(segment_comparison_path) if segment_comparison_path is not None else None,
+                metadata=segment_metadata,
             )
         )
 
@@ -1286,19 +1869,20 @@ def rollout_with_chunks(
             )
 
     if comparison_root_path is not None and episode_strip_parts:
-        episode_log.comparison_strip_path = str(
-            _stitch_comparison_strip(
-                episode_strip_parts,
-                comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png",
-            )
-            or comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png"
+        stitched_path, stitched_failure_reason = _stitch_comparison_strip(
+            episode_strip_parts,
+            comparison_root_path / f"episode_{episode_index:04d}_comparison_strip.png",
         )
+        if stitched_path is not None:
+            episode_log.comparison_strip_path = str(stitched_path)
+        elif stitched_failure_reason is not None:
+            print(f"[segment_grpo] failed to stitch episode comparison strip: {stitched_failure_reason}")
 
     if env is not None:
         try:
             env.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[segment_grpo] failed to close simulation env: {exc}")
     return episode_log, adapter
 
 
