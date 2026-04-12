@@ -19,6 +19,42 @@ from run_segment_grpo import _parse_args  # noqa: E402
 from segment_grpo_loop import WMBundle, rollout_with_chunks  # noqa: E402
 
 
+def test_parse_args_wm_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+        ],
+    )
+    args = _parse_args()
+    assert args.wm_goal_hflip is True
+    assert args.wm_sim_camera_parity is True
+    assert args.wm_sim_img_size == 224
+
+
+def test_parse_args_wm_parity_optional_negation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--no-wm-goal-hflip",
+            "--no-wm-sim-camera-parity",
+            "--wm-sim-img-size",
+            "256",
+        ],
+    )
+    args = _parse_args()
+    assert args.wm_goal_hflip is False
+    assert args.wm_sim_camera_parity is False
+    assert args.wm_sim_img_size == 256
+
+
 def test_parse_args_accepts_strict_controls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         sys,
