@@ -16,12 +16,15 @@ if str(SRC_ROOT) not in sys.path:
 
 from segment_grpo_loop import (
     DecodeTrace,
+    ScoreTrace,
     _build_real_vs_pred_strip,
     _comparison_ridx_for_column,
     _comparison_strip_basename,
     _decode_latent_trace_to_frames,
     _derive_policy_rgb_for_smolvla,
     _ensure_action_matrix,
+    _latent_overlay_distance_tables,
+    _l2_goal_distance_np,
     _normalize_env_actions_for_wm,
     _pack_env_actions_for_wm,
     _sample_smolvla_chunk,
@@ -833,13 +836,14 @@ def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch
 def test_select_comparison_frames_with_wm_step_factor() -> None:
     real_frames = [np.full((2, 2, 3), i, dtype=np.uint8) for i in range(9)]
     pred_frames = [np.full((2, 2, 3), 100 + k, dtype=np.uint8) for k in range(2)]
-    selected_real, selected_pred = _select_comparison_frames(
+    selected_real, selected_pred, pred_indices = _select_comparison_frames(
         real_frames,
         pred_frames,
         carried_steps=8,
         env_steps_per_wm_step=5,
     )
-    assert len(selected_real) == len(selected_pred) == 2
+    assert len(selected_real) == len(selected_pred) == len(pred_indices) == 2
+    assert pred_indices == [0, 1]
     np.testing.assert_array_equal(selected_real[0], real_frames[5])
     np.testing.assert_array_equal(selected_real[1], real_frames[8])
     np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
@@ -856,9 +860,12 @@ def test_select_comparison_frames_keeps_t0_as_context() -> None:
         np.full((2, 2, 3), 50, dtype=np.uint8),
         np.full((2, 2, 3), 60, dtype=np.uint8),
     ]
-    selected_real, selected_pred = _select_comparison_frames(real_frames, pred_frames, carried_steps=2)
+    selected_real, selected_pred, pred_indices = _select_comparison_frames(
+        real_frames, pred_frames, carried_steps=2
+    )
     assert len(selected_real) == 2
     assert len(selected_pred) == 2
+    assert pred_indices == [0, 1]
     np.testing.assert_array_equal(selected_real[0], real_frames[0])
     np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
 
@@ -867,6 +874,25 @@ def test_comparison_ridx_for_column_factor5() -> None:
     assert _comparison_ridx_for_column(0, factor=5, carried_steps=8) == 5
     assert _comparison_ridx_for_column(1, factor=5, carried_steps=8) == 8
     assert _comparison_ridx_for_column(0, factor=1, carried_steps=8) == 0
+
+
+def test_l2_goal_distance_np_prefix_matches_torch_slice() -> None:
+    v = np.array([3.0, 4.0], dtype=np.float32)
+    g = np.array([0.0, 0.0, 99.0], dtype=np.float32)
+    assert abs(_l2_goal_distance_np(v, g) - 5.0) < 1e-6
+
+
+def test_latent_overlay_distance_tables_delta_vs_initial() -> None:
+    init = np.array([0.0, 0.0], dtype=np.float32)
+    s0 = np.array([1.0, 0.0], dtype=np.float32)
+    s1 = np.array([1.0, 1.0], dtype=np.float32)
+    goal = np.array([0.0, 0.0], dtype=np.float32)
+    d_full, delta_full = _latent_overlay_distance_tables(init, [s0, s1], goal)
+    assert len(d_full) == 2 and len(delta_full) == 2
+    assert abs(d_full[0] - 1.0) < 1e-6
+    d_init = _l2_goal_distance_np(init, goal)
+    assert abs(delta_full[0] - (d_full[0] - d_init)) < 1e-6
+    assert abs(delta_full[1] - (d_full[1] - d_full[0])) < 1e-6
 
 
 def test_overlay_decode_panel_metadata_darkens_corner() -> None:
@@ -880,6 +906,12 @@ def test_overlay_decode_panel_metadata_darkens_corner() -> None:
 def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
     real_frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(3)]
     pred_frames = [np.full((8, 8, 3), 200, dtype=np.uint8) for _ in range(3)]
+    goal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    trace = ScoreTrace(
+        step_vectors=[np.array([1.0, 0.0, 0.0], dtype=np.float32) for _ in range(3)],
+        final_vector=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        initial_vector=np.zeros(3, dtype=np.float32),
+    )
     base = _build_real_vs_pred_strip(
         real_frames,
         pred_frames,
@@ -893,11 +925,11 @@ def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
         carried_steps=3,
         env_steps_per_wm_step=1,
         overlay_decode_meta=True,
-        overlay_episode_index=3,
-        overlay_segment_index=1,
         overlay_env_step_start=10,
         overlay_selected_candidate_index=0,
         overlay_wm_env_steps_per_wm_step=1,
+        overlay_goal_latent_np=goal,
+        overlay_score_trace=trace,
     )
     assert base.shape == with_overlay.shape
     assert not np.array_equal(base, with_overlay)
