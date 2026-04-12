@@ -26,7 +26,13 @@ def test_submit_phase11_chain_uses_chdir() -> None:
 
 def test_slurm_and_chain_scripts_bash_syntax() -> None:
     grpo = _REPO_ROOT / "scripts" / "grpo"
-    for name in ("submit_phase11_grpo.slurm", "submit_phase11_chain.sh", "submit_api_gate_smoke.slurm"):
+    for name in (
+        "submit_phase11_grpo.slurm",
+        "submit_phase11_chain.sh",
+        "submit_api_gate_smoke.slurm",
+        "submit_phase11_eval_sweep_seed1020.slurm",
+        "submit_phase11_eval_sweep_seed1000_ge50.slurm",
+    ):
         path = grpo / name
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
     common = _REPO_ROOT / "scripts" / "slurm" / "common_env.sh"

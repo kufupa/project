@@ -9,7 +9,7 @@
 #   _COMMON="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../slurm/common_env.sh"
 #   # shellcheck source=../slurm/common_env.sh
 #   source "${_COMMON}"
-#   slurm_resolve_project_root "scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh"
+#   slurm_resolve_project_root "scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh"
 #   cd "${PROJECT_ROOT}"
 #   slurm_export_pythonpath
 #   slurm_export_hf_torch_cache "my-job-tag"
@@ -26,7 +26,7 @@ _SLURM_DEFAULT_PROJECT_ROOT="$(cd "${_SLURM_COMMON_DIR}/../.." && pwd)"
 # Args:
 #   $1 — marker file path relative to project root (must exist under SLURM_SUBMIT_DIR when valid).
 slurm_resolve_project_root() {
-  local marker="${1:-scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh}"
+  local marker="${1:-scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh}"
   if [[ -n "${PROJECT_ROOT:-}" && -f "${PROJECT_ROOT}/${marker}" ]]; then
     export PROJECT_ROOT="$(cd "${PROJECT_ROOT}" && pwd)"
     return 0
