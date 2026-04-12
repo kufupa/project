@@ -599,7 +599,8 @@ def _render_to_wm_visual(env: Any, obs: Any, device: torch.device) -> torch.Tens
         arr = _collect_step_image(obs, env)
     except Exception:
         return None
-    t = torch.from_numpy(arr).float() / 255.0
+    # EncPredWM.encode divides by 255; pass float RGB in [0, 255].
+    t = torch.from_numpy(arr).float()
     t = t.permute(2, 0, 1).unsqueeze(0)  # 1,3,H,W
     t = torch.nn.functional.interpolate(t, size=(256, 256), mode="bilinear", align_corners=False)
     return t.unsqueeze(0).to(device)  # 1,1,3,256,256
