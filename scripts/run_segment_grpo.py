@@ -107,6 +107,13 @@ def _parse_args() -> argparse.Namespace:
         help="WM latent rollout for chunk scoring: iterative (one unroll per action) or batched (single unroll).",
     )
     parser.add_argument(
+        "--wm-scoring-latent",
+        type=str,
+        choices=["visual", "proprio", "concat"],
+        default="visual",
+        help="WM latent modality used for distance scoring: visual, proprio, or concat.",
+    )
+    parser.add_argument(
         "--strict-wm-scoring",
         action="store_true",
         help="Fail rollout when WM scoring raises; otherwise fall back with metadata.",
@@ -332,6 +339,7 @@ def main() -> int:
             strict_wm_scoring=bool(args.strict_wm_scoring),
             strict_decode=bool(args.strict_decode),
             wm_rollout_mode=str(args.wm_rollout_mode),
+            wm_scoring_latent=str(args.wm_scoring_latent),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())
@@ -380,6 +388,7 @@ def main() -> int:
                 "output_json": str(output_json_base),
                 "goal_frame_index": int(args.goal_frame_index),
                 "wm_rollout_mode": str(args.wm_rollout_mode),
+                "wm_scoring_latent": str(args.wm_scoring_latent),
                 "strict_wm_scoring": bool(args.strict_wm_scoring),
                 "strict_decode": bool(args.strict_decode),
                 "episodes_info": episode_summaries,
