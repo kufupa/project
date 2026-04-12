@@ -36,7 +36,7 @@ overview: Full audit plan (zero-context friendly) for segment-GRPO WM pipeline�
 | `act_suffix` | Tensor passed to `model.unroll(..., act_suffix=...)`, shape `(T_wm, B, wm_dim)` with `B=1` here. |
 | `chunk_len` / `effective_len` | Number of **env** actions in the candidate chunk (CLI `--chunk-len`). |
 | `carried_steps` | How many **env** steps actually executed for the **selected** chunk this segment. |
-| Comparison strip | PNG: real frame vs decoded pred side-by-side per column; stitched across segments. |
+| Comparison strip | PNG: per column, **vertical** stack `concat([real, pred], axis=0)` — **sim render top**, **WM decode bottom**; stitched across segments. Optional `--comparison-strip-overlay` (default off): small box + text on **decode panel only** (`ep`, `seg`, `real_i`, `env_t`, `wm_dec k/N`, `f`, `cand`). |
 
 ### 0.3 Where “truth” is documented in-repo
 
@@ -72,7 +72,7 @@ overview: Full audit plan (zero-context friendly) for segment-GRPO WM pipeline�
 
 | Path | Role |
 |------|------|
-| `scripts/run_segment_grpo.py` | CLI: episodes, `--chunk-len`, `--wm-rollout-mode`, `--wm-scoring-latent`, `--carry-mode`, `--jepa-repo`, `--jepa-ckpt`, oracle paths, `comparison_root` under artifact dir, calls `rollout_with_chunks`. |
+| `scripts/run_segment_grpo.py` | CLI: episodes, `--chunk-len`, `--wm-rollout-mode`, `--wm-scoring-latent`, `--carry-mode`, `--jepa-repo`, `--jepa-ckpt`, `--comparison-strip-overlay` / `--no-comparison-strip-overlay`, oracle paths, `comparison_root` under artifact dir, calls `rollout_with_chunks`. |
 | `src/segment_grpo_loop.py` | **All** WM scoring, packing, unroll, decode, strip builders, sim/replay loop, `WMBundle`, dataclasses (`DecodeTrace`, `EpisodeLog`, `SegmentLog`). |
 | `src/segment_grpo_reference.py` | Oracle run discovery, `load_oracle_reference_frames` (1-based goal index → `frame_XXXXXX.png`). |
 | `vendor/pi05/jepa_cem_paired_pushv3_export.py` | `torch.hub` WM load (`_try_load_wm`), `_infer_action_dims`, SmolVLA load/exec (`_smolvla_exec_action`), image/proprio helpers used by `segment_grpo_loop` via dynamic import. |

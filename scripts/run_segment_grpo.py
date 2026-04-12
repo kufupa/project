@@ -32,6 +32,7 @@ WM_PARITY_SIM_CAMERA_DEFAULT = True
 WM_PARITY_SIM_IMG_SIZE_DEFAULT = 224
 SMOLVLA_POLICY_HFLIP_DEFAULT = True
 SMOLVLA_NOISE_STD_DEFAULT = 0.0
+COMPARISON_STRIP_OVERLAY_DEFAULT = False
 
 
 def _parse_args() -> argparse.Namespace:
@@ -163,6 +164,15 @@ def _parse_args() -> argparse.Namespace:
         default=SMOLVLA_NOISE_STD_DEFAULT,
         help="Std dev of Gaussian noise added per chunk timestep to SmolVLA base action (default 0 = deterministic).",
     )
+    parser.add_argument(
+        "--comparison-strip-overlay",
+        default=COMPARISON_STRIP_OVERLAY_DEFAULT,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Draw WM decode metadata box on bottom panel of each comparison-strip column "
+            f"(default: {COMPARISON_STRIP_OVERLAY_DEFAULT})."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -271,7 +281,8 @@ def main() -> int:
         f"wm_sim_camera_parity={args.wm_sim_camera_parity} "
         f"wm_sim_img_size={args.wm_sim_img_size} "
         f"smolvla_policy_hflip_corner2={args.smolvla_policy_hflip_corner2} "
-        f"smolvla_noise_std={args.smolvla_noise_std}"
+        f"smolvla_noise_std={args.smolvla_noise_std} "
+        f"comparison_strip_overlay={args.comparison_strip_overlay}"
     )
 
     smolvla_bundle = None
@@ -393,6 +404,7 @@ def main() -> int:
             wm_sim_img_size=int(args.wm_sim_img_size),
             smolvla_policy_hflip_corner2=bool(args.smolvla_policy_hflip_corner2),
             smolvla_noise_std=float(args.smolvla_noise_std),
+            comparison_strip_overlay=bool(args.comparison_strip_overlay),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())

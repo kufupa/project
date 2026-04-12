@@ -16,6 +16,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from segment_grpo_loop import (
     DecodeTrace,
+    _build_real_vs_pred_strip,
+    _comparison_ridx_for_column,
     _comparison_strip_basename,
     _decode_latent_trace_to_frames,
     _derive_policy_rgb_for_smolvla,
@@ -23,6 +25,7 @@ from segment_grpo_loop import (
     _normalize_env_actions_for_wm,
     _pack_env_actions_for_wm,
     _sample_smolvla_chunk,
+    _overlay_decode_panel_metadata,
     _select_comparison_frames,
     _to_wm_visual,
     _wm_action_block_factor,
@@ -858,6 +861,46 @@ def test_select_comparison_frames_keeps_t0_as_context() -> None:
     assert len(selected_pred) == 2
     np.testing.assert_array_equal(selected_real[0], real_frames[0])
     np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
+
+
+def test_comparison_ridx_for_column_factor5() -> None:
+    assert _comparison_ridx_for_column(0, factor=5, carried_steps=8) == 5
+    assert _comparison_ridx_for_column(1, factor=5, carried_steps=8) == 8
+    assert _comparison_ridx_for_column(0, factor=1, carried_steps=8) == 0
+
+
+def test_overlay_decode_panel_metadata_darkens_corner() -> None:
+    pred = np.full((40, 60, 3), 200, dtype=np.uint8)
+    out = _overlay_decode_panel_metadata(pred, ["line1", "line2"])
+    assert out.shape == pred.shape
+    # overlay box top-left should be darker than uniform input
+    assert float(np.mean(out[:18, :25])) < float(np.mean(pred[:18, :25]))
+
+
+def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
+    real_frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(3)]
+    pred_frames = [np.full((8, 8, 3), 200, dtype=np.uint8) for _ in range(3)]
+    base = _build_real_vs_pred_strip(
+        real_frames,
+        pred_frames,
+        carried_steps=3,
+        env_steps_per_wm_step=1,
+        overlay_decode_meta=False,
+    )
+    with_overlay = _build_real_vs_pred_strip(
+        real_frames,
+        pred_frames,
+        carried_steps=3,
+        env_steps_per_wm_step=1,
+        overlay_decode_meta=True,
+        overlay_episode_index=3,
+        overlay_segment_index=1,
+        overlay_env_step_start=10,
+        overlay_selected_candidate_index=0,
+        overlay_wm_env_steps_per_wm_step=1,
+    )
+    assert base.shape == with_overlay.shape
+    assert not np.array_equal(base, with_overlay)
 
 
 def test_comparison_strip_basename_step_range_and_wmf_prefix() -> None:
