@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from segment_grpo_loop import (
     DecodeTrace,
+    _comparison_strip_basename,
     _decode_latent_trace_to_frames,
     _derive_policy_rgb_for_smolvla,
     _ensure_action_matrix,
@@ -859,6 +860,29 @@ def test_select_comparison_frames_keeps_t0_as_context() -> None:
     np.testing.assert_array_equal(selected_pred[0], pred_frames[0])
 
 
+def test_comparison_strip_basename_step_range_and_wmf_prefix() -> None:
+    assert (
+        _comparison_strip_basename(
+            segment_index=4,
+            env_step_start=12,
+            carried_steps=6,
+            selected_candidate_index=1,
+            wm_env_steps_per_wm_step=1,
+        )
+        == "comparison_strip_steps_0012_to_0018_seg0004_cand001.png"
+    )
+    assert (
+        _comparison_strip_basename(
+            segment_index=3,
+            env_step_start=3,
+            carried_steps=2,
+            selected_candidate_index=12,
+            wm_env_steps_per_wm_step=5,
+        )
+        == "wmf05_comparison_strip_steps_0003_to_0005_seg0003_cand012.png"
+    )
+
+
 def test_write_comparison_segment_strip_returns_deterministic_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, Path] = {}
 
@@ -882,11 +906,20 @@ def test_write_comparison_segment_strip_returns_deterministic_path(monkeypatch: 
         segment_index=3,
         real_frames=real_frames,
         pred_frames=pred_frames,
-        carried_steps=1,
+        env_step_start=3,
+        selected_candidate_index=12,
+        carried_steps=2,
     )
 
     assert failure is None
-    assert path == tmp_path / "episode_0007" / "segment_0003" / "comparison_strip.png"
+    expected_name = _comparison_strip_basename(
+        segment_index=3,
+        env_step_start=3,
+        carried_steps=2,
+        selected_candidate_index=12,
+        wm_env_steps_per_wm_step=1,
+    )
+    assert path == tmp_path / "episode_0007" / expected_name
     assert captured["path"] == path
 
 

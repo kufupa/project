@@ -761,6 +761,26 @@ def _build_real_vs_pred_strip(
     return np.concatenate(pairs, axis=1)
 
 
+def _comparison_strip_basename(
+    *,
+    segment_index: int,
+    env_step_start: int,
+    carried_steps: int,
+    selected_candidate_index: int,
+    wm_env_steps_per_wm_step: int = 1,
+) -> str:
+    start = int(env_step_start)
+    carry = max(0, int(carried_steps))
+    end = start + carry
+    wm = int(wm_env_steps_per_wm_step) if wm_env_steps_per_wm_step is not None else 1
+    wm = max(1, wm)
+    wm_part = f"wmf{wm:02d}_" if wm > 1 else ""
+    return (
+        f"{wm_part}comparison_strip_steps_{start:04d}_to_{end:04d}_"
+        f"seg{segment_index:04d}_cand{selected_candidate_index:03d}.png"
+    )
+
+
 def _write_comparison_segment_strip(
     out_dir: Path,
     episode_index: int,
@@ -768,8 +788,11 @@ def _write_comparison_segment_strip(
     real_frames: list[np.ndarray],
     pred_frames: list[np.ndarray],
     *,
+    env_step_start: int,
+    selected_candidate_index: int,
     carried_steps: int | None = None,
     env_steps_per_wm_step: int | None = None,
+    wm_env_steps_per_wm_step: int = 1,
 ) -> tuple[Path | None, str | None]:
     if carried_steps is not None and int(carried_steps) <= 0:
         return None, None
@@ -795,14 +818,22 @@ def _write_comparison_segment_strip(
         print(f"[segment_grpo] {reason}")
         return None, reason
 
-    out_dir = out_dir / f"episode_{episode_index:04d}" / f"segment_{segment_index:04d}"
+    carry = 0 if carried_steps is None else int(carried_steps)
+    basename = _comparison_strip_basename(
+        segment_index=int(segment_index),
+        env_step_start=int(env_step_start),
+        carried_steps=carry,
+        selected_candidate_index=int(selected_candidate_index),
+        wm_env_steps_per_wm_step=int(wm_env_steps_per_wm_step),
+    )
+    episode_dir = Path(out_dir) / f"episode_{episode_index:04d}"
+    path = episode_dir / basename
     try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / "comparison_strip.png"
+        episode_dir.mkdir(parents=True, exist_ok=True)
         imageio.imwrite(path, strip)
         return path, None
     except Exception as exc:
-        reason = f"Failed to write comparison strip to {out_dir / 'comparison_strip.png'}: {exc}"
+        reason = f"Failed to write comparison strip to {path}: {exc}"
         print(f"[segment_grpo] {reason}")
         return None, reason
 
@@ -2164,19 +2195,23 @@ def rollout_with_chunks(
             "selected": True,
         }
 
+        wm_stride = 1
+        if selected_trace is not None:
+            wm_stride = int(getattr(selected_trace, "env_steps_per_wm_step", 1) or 1)
+
         segment_comparison_path = None
         if comparison_root_path is not None and pred_frames and carried_steps > 0:
-            wm_stride = 1
-            if selected_trace is not None:
-                wm_stride = int(getattr(selected_trace, "env_steps_per_wm_step", 1) or 1)
             segment_path, segment_strip_failure_reason = _write_comparison_segment_strip(
                 comparison_root_path,
                 episode_index,
                 segment_idx,
                 segment_real_frames,
                 pred_frames,
+                env_step_start=int(segment_start),
+                selected_candidate_index=int(selected_idx),
                 carried_steps=carried_steps,
                 env_steps_per_wm_step=wm_stride if wm_stride > 1 else None,
+                wm_env_steps_per_wm_step=wm_stride,
             )
             if segment_path is not None:
                 segment_comparison_path = segment_path
@@ -2184,6 +2219,12 @@ def rollout_with_chunks(
             elif segment_strip_failure_reason is not None and selected_meta is not None:
                 selected_meta["comparison_strip_status"] = "failed"
                 selected_meta["comparison_strip_failure_reason"] = segment_strip_failure_reason
+
+        segment_metadata["comparison_env_step_start"] = int(segment_start)
+        segment_metadata["comparison_env_step_end"] = int(segment_start + carried_steps)
+        segment_metadata["comparison_wm_env_steps_per_wm_step"] = int(wm_stride)
+        if segment_comparison_path is not None:
+            segment_metadata["comparison_strip_filename"] = segment_comparison_path.name
 
         episode_log.actions.extend(executed_actions)
         episode_log.latent_scores.append(0.0 if selected_distance is None else float(selected_distance))
