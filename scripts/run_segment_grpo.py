@@ -30,6 +30,8 @@ from smolvla_pipeline.run_layout import ensure_unique_run_dir  # noqa: E402
 WM_PARITY_GOAL_HFLIP_DEFAULT = True
 WM_PARITY_SIM_CAMERA_DEFAULT = True
 WM_PARITY_SIM_IMG_SIZE_DEFAULT = 224
+SMOLVLA_POLICY_HFLIP_DEFAULT = True
+SMOLVLA_NOISE_STD_DEFAULT = 0.0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -146,6 +148,21 @@ def _parse_args() -> argparse.Namespace:
         default=WM_PARITY_SIM_IMG_SIZE_DEFAULT,
         help=f"Square render size for WM sim camera parity (default {WM_PARITY_SIM_IMG_SIZE_DEFAULT}).",
     )
+    parser.add_argument(
+        "--smolvla-policy-hflip-corner2",
+        default=SMOLVLA_POLICY_HFLIP_DEFAULT,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "When WM sim camera parity is on, H-flip jepa V-only RGB before SmolVLA so pixels match "
+            "best_video corner2 (V+H) contract (default: on; --no-smolvla-policy-hflip-corner2 to disable)."
+        ),
+    )
+    parser.add_argument(
+        "--smolvla-noise-std",
+        type=float,
+        default=SMOLVLA_NOISE_STD_DEFAULT,
+        help="Std dev of Gaussian noise added per chunk timestep to SmolVLA base action (default 0 = deterministic).",
+    )
     return parser.parse_args()
 
 
@@ -252,7 +269,9 @@ def main() -> int:
         "[segment_grpo] wm flags: "
         f"wm_goal_hflip={args.wm_goal_hflip} "
         f"wm_sim_camera_parity={args.wm_sim_camera_parity} "
-        f"wm_sim_img_size={args.wm_sim_img_size}"
+        f"wm_sim_img_size={args.wm_sim_img_size} "
+        f"smolvla_policy_hflip_corner2={args.smolvla_policy_hflip_corner2} "
+        f"smolvla_noise_std={args.smolvla_noise_std}"
     )
 
     smolvla_bundle = None
@@ -372,6 +391,8 @@ def main() -> int:
             wm_goal_flip_horizontal=bool(args.wm_goal_hflip),
             wm_sim_camera_parity=bool(args.wm_sim_camera_parity),
             wm_sim_img_size=int(args.wm_sim_img_size),
+            smolvla_policy_hflip_corner2=bool(args.smolvla_policy_hflip_corner2),
+            smolvla_noise_std=float(args.smolvla_noise_std),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())

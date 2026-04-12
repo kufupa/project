@@ -230,15 +230,20 @@ def _to_rgb_list(arr: Any) -> list[list[list[float]]]:
 
 
 def _flatten_obs_state(obs: Any) -> list[float]:
-    if isinstance(obs, dict):
-        for k in ("observation.state", "state", "agent_pos", "observation"):
-            if k in obs:
-                v = obs[k]
-                return np.asarray(v, dtype=np.float32).reshape(-1).tolist()
-        for v in obs.values():
-            if hasattr(v, "shape"):
-                return np.asarray(v, dtype=np.float32).reshape(-1).tolist()
-    return np.asarray(obs, dtype=np.float32).reshape(-1).tolist()
+    try:
+        from smolvla_obs_state import flatten_obs_state as _flatten_shared
+
+        return _flatten_shared(obs).reshape(-1).tolist()
+    except Exception:
+        if isinstance(obs, dict):
+            for k in ("observation.state", "state", "agent_pos", "observation"):
+                if k in obs:
+                    v = obs[k]
+                    return np.asarray(v, dtype=np.float32).reshape(-1).tolist()
+            for v in obs.values():
+                if hasattr(v, "shape"):
+                    return np.asarray(v, dtype=np.float32).reshape(-1).tolist()
+        return np.asarray(obs, dtype=np.float32).reshape(-1).tolist()
 
 
 def _find_image(obs: Any) -> Any:

@@ -78,6 +78,12 @@ Optional Slurm submission for the same preflight:
 sbatch scripts/smolvla/submit_pushv3_smolvla_preflight_1ep.slurm
 ```
 
+### Slurm top-k submit notes
+
+Top-k SmolVLA launch notes are documented in:
+
+[`docs/slurm/sbatch-notes.md`](docs/slurm/sbatch-notes.md)
+
 ## Default artifact root
 
 Runs go under the **project** directory:
