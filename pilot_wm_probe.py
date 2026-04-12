@@ -22,8 +22,8 @@ def main() -> int:
 
     chunk = np.zeros((8, wm.planner_action_dim), dtype=np.float32)
     try:
-        distance, trace = score_chunk_by_goal_latent(wm, img, np.zeros(4, dtype=np.float32), chunk, goal, chunk_len=8, return_latent_trace=True)
-        print('score_ok', float(distance), 'trace', len(trace), flush=True)
+        distance, score_trace, decode_trace = score_chunk_by_goal_latent(wm, img, np.zeros(4, dtype=np.float32), chunk, goal, chunk_len=8, return_latent_trace=True)
+        print('score_ok', float(distance), 'trace', len(score_trace.step_vectors), flush=True)
         return 0
     except Exception as exc:
         print(f'score_fail {type(exc).__name__}: {exc}', flush=True)
