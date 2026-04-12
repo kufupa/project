@@ -25,7 +25,7 @@ Active scripts:
 - `scripts/smolvla/run_pushv3_smolvla_preflight_1ep.sh` - single-episode GPU preflight run + artifact verification
 - `scripts/smolvla/submit_pushv3_smolvla_preflight_1ep.slurm` - Slurm template for one-episode GPU preflight
 - `scripts/smolvla/launch_pushv3_smolvla_topk15.sh` - prepares/submits top-k campaign runs from an oracle run
-- `scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh` - 15-episode parity benchmark (`seed=123`, `max_steps=120`)
+- `scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh` - legacy per-task parity benchmark (`seed=123`, `max_steps=120`); MT50 Phase07 uses `scripts/mt50/run_phase07_smolvla_baseline.sh` (campaign, single load)
 - `scripts/smolvla/compare_eval_info.py` - baseline vs candidate `eval_info.json` metric diff helper
 - `scripts/smolvla/verify_smolvla_run_artifacts.py` - strict artifact validator for smoke/preflight gates
 
