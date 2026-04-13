@@ -542,3 +542,110 @@ def test_lerobot_backend_reset_delegates_to_gymnasium_reset_strict(
     assert calls == [(id(env), 11)]
     assert obs == {"obs": 1}
     assert info == {"ok": True}
+
+
+def test_lerobot_backend_mt1_uses_seed42(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakePolicy:
+        def reset(self) -> None:
+            return None
+
+    class FakeBundle:
+        policy = FakePolicy()
+
+    class FakeEnv:
+        action_space = type("ActionSpace", (), {"shape": (4,)})()
+
+    class FakeMT1:
+        def __init__(self, task: str, seed: int | None = None):
+            calls.append(("mt1_ctor", task, seed))
+            self.train_classes = {task: lambda **_kwargs: FakeEnv()}
+            self.train_tasks = ["task0", "task1"]
+
+    monkeypatch.setitem(__import__("sys").modules, "metaworld", type("MW", (), {"MT1": FakeMT1})())
+    monkeypatch.setattr(evaluator, "_load_smolvla_bundle", lambda _ckpt: FakeBundle())
+    monkeypatch.setattr(evaluator, "_smolvla_state_dims", lambda _policy: (4, 4))
+    monkeypatch.setattr(evaluator, "_resolve_camera_name", lambda: "corner")
+
+    evaluator._LeRobotMetaWorldBackend(
+        task="push-v3",
+        checkpoint="dummy",
+        seed=123,
+        max_steps=1,
+    )
+
+    assert calls[0] == ("mt1_ctor", "push-v3", 42)
+
+
+def test_lerobot_backend_pins_first_train_task_for_all_episodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakePolicy:
+        def reset(self) -> None:
+            return None
+
+    class FakeEnv:
+        def set_task(self, task: object) -> None:
+            calls.append(("set_task", task))
+
+    backend = evaluator._LeRobotMetaWorldBackend.__new__(evaluator._LeRobotMetaWorldBackend)
+    backend._env = FakeEnv()
+    backend._tasks = ["task0", "task1", "task2"]
+    backend._target_episode_index_override = None
+    backend._max_steps = 0
+    backend._np = np
+    backend._bundle = type("Bundle", (), {"policy": FakePolicy()})()
+
+    monkeypatch.setattr(evaluator, "seed_metaworld_process", lambda _s: None)
+    monkeypatch.setattr(
+        evaluator._LeRobotMetaWorldBackend,
+        "_reset",
+        lambda self, _seed: ({"obs": True}, {"ok": True}),
+    )
+    monkeypatch.setattr(evaluator._LeRobotMetaWorldBackend, "_render_frame", lambda self: None)
+
+    backend.rollout_episode(episode_index=0, reset_seed=11)
+    backend.rollout_episode(episode_index=7, reset_seed=12)
+
+    assert calls == [("set_task", "task0"), ("set_task", "task0")]
+
+
+def test_lerobot_backend_stops_rollout_on_success_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePolicy:
+        def reset(self) -> None:
+            return None
+
+    backend = evaluator._LeRobotMetaWorldBackend.__new__(evaluator._LeRobotMetaWorldBackend)
+    backend._env = object()
+    backend._tasks = []
+    backend._target_episode_index_override = None
+    backend._max_steps = 5
+    backend._np = np
+    backend._bundle = type("Bundle", (), {"policy": FakePolicy()})()
+    backend._collect_frames = False
+
+    step_count = {"n": 0}
+
+    monkeypatch.setattr(evaluator, "seed_metaworld_process", lambda _s: None)
+    monkeypatch.setattr(
+        evaluator._LeRobotMetaWorldBackend,
+        "_reset",
+        lambda self, _seed: ({"obs": 0}, {"ok": True}),
+    )
+    monkeypatch.setattr(
+        evaluator._LeRobotMetaWorldBackend,
+        "_select_action",
+        lambda self, _obs: np.zeros(4, dtype=np.float32),
+    )
+
+    def fake_step(self: object, _action: object):
+        step_count["n"] += 1
+        return {"obs": step_count["n"]}, 0.0, False, False, {"success": 1}
+
+    monkeypatch.setattr(evaluator._LeRobotMetaWorldBackend, "_step", fake_step)
+
+    rollout = backend.rollout_episode(episode_index=0, reset_seed=1)
+
+    assert step_count["n"] == 1
+    assert rollout.successes == [True]
