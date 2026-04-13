@@ -24,7 +24,7 @@ class TopEpisode:
 class OracleReferenceFrames:
     run_dir: Path
     episode_index: int
-    goal_frame_index: int
+    goal_frame_idx_zero_based: int
     task: str
     goal_frame_path: Path
     start_frame_path: Path
@@ -134,7 +134,7 @@ def load_oracle_reference_frames(
     return OracleReferenceFrames(
         run_dir=run_path,
         episode_index=int(episode_index),
-        goal_frame_index=goal_idx,
+        goal_frame_idx_zero_based=goal_idx,
         task=task,
         start_frame_path=start_path,
         goal_frame_path=goal_path,

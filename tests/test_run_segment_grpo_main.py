@@ -15,7 +15,7 @@ SCRIPT_ROOT = ROOT / "scripts"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from run_segment_grpo import _parse_args  # noqa: E402
+from run_segment_grpo import COMPARISON_STRIP_STITCH_GUTTER_PX_DEFAULT, _parse_args  # noqa: E402
 from segment_grpo_loop import WMBundle, rollout_with_chunks  # noqa: E402
 
 
@@ -62,6 +62,36 @@ def test_parse_args_comparison_strip_overlay_enable(monkeypatch: pytest.MonkeyPa
     )
     args = _parse_args()
     assert args.comparison_strip_overlay is True
+
+
+def test_parse_args_comparison_strip_stitch_gutter_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+        ],
+    )
+    args = _parse_args()
+    assert args.comparison_strip_stitch_gutter_pixels == COMPARISON_STRIP_STITCH_GUTTER_PX_DEFAULT
+
+
+def test_parse_args_comparison_strip_stitch_gutter_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--comparison-strip-stitch-gutter-pixels",
+            "0",
+        ],
+    )
+    args = _parse_args()
+    assert args.comparison_strip_stitch_gutter_pixels == 0
 
 
 def test_parse_args_smolvla_parity_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

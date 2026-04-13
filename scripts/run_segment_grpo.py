@@ -33,6 +33,7 @@ WM_PARITY_SIM_IMG_SIZE_DEFAULT = 224
 SMOLVLA_POLICY_HFLIP_DEFAULT = True
 SMOLVLA_NOISE_STD_DEFAULT = 0.0
 COMPARISON_STRIP_OVERLAY_DEFAULT = False
+COMPARISON_STRIP_STITCH_GUTTER_PX_DEFAULT = 6
 
 
 def _parse_args() -> argparse.Namespace:
@@ -173,6 +174,15 @@ def _parse_args() -> argparse.Namespace:
             f"(default: {COMPARISON_STRIP_OVERLAY_DEFAULT})."
         ),
     )
+    parser.add_argument(
+        "--comparison-strip-stitch-gutter-pixels",
+        type=int,
+        default=COMPARISON_STRIP_STITCH_GUTTER_PX_DEFAULT,
+        help=(
+            "Width of the RGB separator bar between segment strips in the stitched episode comparison PNG; "
+            "0 disables (default: %(default)s)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -282,7 +292,8 @@ def main() -> int:
         f"wm_sim_img_size={args.wm_sim_img_size} "
         f"smolvla_policy_hflip_corner2={args.smolvla_policy_hflip_corner2} "
         f"smolvla_noise_std={args.smolvla_noise_std} "
-        f"comparison_strip_overlay={args.comparison_strip_overlay}"
+        f"comparison_strip_overlay={args.comparison_strip_overlay} "
+        f"comparison_strip_stitch_gutter_pixels={args.comparison_strip_stitch_gutter_pixels}"
     )
 
     smolvla_bundle = None
@@ -405,6 +416,7 @@ def main() -> int:
             smolvla_policy_hflip_corner2=bool(args.smolvla_policy_hflip_corner2),
             smolvla_noise_std=float(args.smolvla_noise_std),
             comparison_strip_overlay=bool(args.comparison_strip_overlay),
+            comparison_strip_stitch_gutter_pixels=int(args.comparison_strip_stitch_gutter_pixels),
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())
