@@ -19,6 +19,7 @@ from segment_grpo_loop import (
     ScoreTrace,
     _build_real_vs_pred_strip,
     _comparison_ridx_for_column,
+    _comparison_strip_overlay_lines,
     _comparison_strip_basename,
     _decode_latent_trace_to_frames,
     _derive_policy_rgb_for_smolvla,
@@ -32,6 +33,7 @@ from segment_grpo_loop import (
     _select_comparison_frames,
     _to_wm_visual,
     _wm_action_block_factor,
+    _stitch_comparison_strip,
     _write_comparison_segment_strip,
     rollout_with_chunks,
     score_chunk_by_goal_latent,
@@ -876,6 +878,84 @@ def test_comparison_ridx_for_column_factor5() -> None:
     assert _comparison_ridx_for_column(0, factor=1, carried_steps=8) == 0
 
 
+def test_comparison_strip_overlay_lines_includes_segment_when_set() -> None:
+    lines = _comparison_strip_overlay_lines(
+        column_idx=0,
+        total_columns=4,
+        factor=1,
+        carried_steps=8,
+        overlay_env_step_start=10,
+        overlay_selected_candidate_index=2,
+        wm_step_index=0,
+        d_full=[1.0, 2.0],
+        delta_full=[0.5, 0.25],
+        overlay_segment_index=12,
+    )
+    assert "seg 0012" in lines
+    assert any(line.startswith("d ") for line in lines)
+
+
+def test_comparison_strip_overlay_lines_omits_segment_when_none() -> None:
+    lines = _comparison_strip_overlay_lines(
+        column_idx=0,
+        total_columns=2,
+        factor=1,
+        carried_steps=2,
+        overlay_env_step_start=0,
+        overlay_selected_candidate_index=0,
+        wm_step_index=0,
+        d_full=None,
+        delta_full=None,
+        overlay_segment_index=None,
+    )
+    assert not any(line.startswith("seg ") for line in lines)
+
+
+def test_stitch_comparison_strip_inserts_gutter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    p0 = tmp_path / "s0.png"
+    p1 = tmp_path / "s1.png"
+    p0.touch()
+    p1.touch()
+    a = np.zeros((8, 4, 3), dtype=np.uint8)
+    b = np.full((8, 6, 3), 200, dtype=np.uint8)
+
+    def _imread(path: object) -> np.ndarray:
+        p = Path(path)
+        if p == p0:
+            return a
+        if p == p1:
+            return b
+        raise AssertionError(f"unexpected path {path!r}")
+
+    captured: dict[str, np.ndarray] = {}
+
+    def _imwrite(path: object, arr: np.ndarray) -> None:
+        captured[str(Path(path))] = np.asarray(arr)
+
+    dummy_v2 = ModuleType("imageio.v2")
+    dummy_v2.imread = _imread
+    dummy_v2.imwrite = _imwrite
+    dummy_pkg = ModuleType("imageio")
+    dummy_pkg.__path__ = []  # type: ignore[attr-defined]
+    dummy_pkg.v2 = dummy_v2
+
+    monkeypatch.setitem(sys.modules, "imageio", dummy_pkg)
+    monkeypatch.setitem(sys.modules, "imageio.v2", dummy_v2)
+
+    out0 = tmp_path / "st0.png"
+    out1 = tmp_path / "st1.png"
+    path0, err0 = _stitch_comparison_strip([p0, p1], out0, gutter_pixels=0)
+    path1, err1 = _stitch_comparison_strip([p0, p1], out1, gutter_pixels=3, gutter_rgb=(10, 20, 30))
+    assert err0 is None and err1 is None
+    assert path0 == out0 and path1 == out1
+    arr0 = captured[str(out0)]
+    arr1 = captured[str(out1)]
+    assert arr0.shape[1] == 4 + 6
+    assert arr1.shape[1] == 4 + 3 + 6
+    gutter_slice = arr1[:, 4 : 4 + 3, :]
+    assert np.all(gutter_slice == np.array([10, 20, 30], dtype=np.uint8))
+
+
 def test_l2_goal_distance_np_prefix_matches_torch_slice() -> None:
     v = np.array([3.0, 4.0], dtype=np.float32)
     g = np.array([0.0, 0.0, 99.0], dtype=np.float32)
@@ -930,6 +1010,7 @@ def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
         overlay_wm_env_steps_per_wm_step=1,
         overlay_goal_latent_np=goal,
         overlay_score_trace=trace,
+        overlay_segment_index=5,
     )
     assert base.shape == with_overlay.shape
     assert not np.array_equal(base, with_overlay)
