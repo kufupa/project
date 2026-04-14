@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=seggrpo-c1003-c20-olay
+#SBATCH --job-name=seggrpo-c1003-c20-olay-g50-220
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=00:45:00
-#SBATCH --output=/vol/bitbucket/aa6622/project/logs/seggrpo_campaign1003_chunk20_overlaydist_%j.out
-#SBATCH --error=/vol/bitbucket/aa6622/project/logs/seggrpo_campaign1003_chunk20_overlaydist_%j.err
+#SBATCH --output=/vol/bitbucket/aa6622/project/logs/seggrpo_campaign1003_chunk20_overlaydist_g50_220_%j.out
+#SBATCH --error=/vol/bitbucket/aa6622/project/logs/seggrpo_campaign1003_chunk20_overlaydist_g50_220_%j.err
 #
-# Same run as submit_segment_grpo_campaign1003_chunk20.slurm but writes a separate JSON artifact
-# (comparison-strip-overlay: d/Δ, per-column seg NNNN, stitched episode strip uses default 6px gutter).
+# Same run as submit_segment_grpo_campaign1003_chunk20_overlaydist.slurm but with
+# goal-frame-index=50 and max-steps=220.
 #
 # Submit:
 #   export SMOLVLA_CHECKPOINT=...
 #   export JEPA_REPO=...
-#   sbatch /vol/bitbucket/aa6622/project/scripts/segment_grpo/submit_segment_grpo_campaign1003_chunk20_overlaydist.slurm
+#   sbatch /vol/bitbucket/aa6622/project/scripts/segment_grpo/submit_segment_grpo_campaign1003_chunk20_overlaydist_g50_max220.slurm
 #
 set -euo pipefail
 PROJECT_ROOT="/vol/bitbucket/aa6622/project"
@@ -27,22 +27,23 @@ PY="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
 export SMOLVLA_CHECKPOINT="${SMOLVLA_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 export JEPA_REPO="${JEPA_REPO:-${HOME}/.cache/torch/hub/facebookresearch_jepa-wms_main}"
 
-echo "[seggrpo-c1003-c20-olay] SMOLVLA_CHECKPOINT=${SMOLVLA_CHECKPOINT}"
-echo "[seggrpo-c1003-c20-olay] JEPA_REPO=${JEPA_REPO}"
-echo "[seggrpo-c1003-c20-olay] output-json -> artifacts/segment_grpo_campaign1003_ep3_s1003_chunk20_overlaydist.json"
+echo "[seggrpo-c1003-c20-olay-g50-220] SMOLVLA_CHECKPOINT=${SMOLVLA_CHECKPOINT}"
+echo "[seggrpo-c1003-c20-olay-g50-220] JEPA_REPO=${JEPA_REPO}"
+echo "[seggrpo-c1003-c20-olay-g50-220] goal-frame-index=50 max-steps=220"
+echo "[seggrpo-c1003-c20-olay-g50-220] output-json -> artifacts/segment_grpo_campaign1003_ep3_s1003_chunk20_overlaydist_goal50_max220.json"
 
 "${PY}" scripts/run_segment_grpo.py \
   --checkpoint "${SMOLVLA_CHECKPOINT}" \
   --jepa-repo "${JEPA_REPO}" \
-  --output-json "${PROJECT_ROOT}/artifacts/segment_grpo_campaign1003_ep3_s1003_chunk20_overlaydist.json" \
+  --output-json "${PROJECT_ROOT}/artifacts/segment_grpo_campaign1003_ep3_s1003_chunk20_overlaydist_goal50_max220.json" \
   --episodes 1 \
   --episode-index 3 \
   --reset-seed 1003 \
-  --goal-frame-index 25 \
+  --goal-frame-index 50 \
   --chunk-len 20 \
   --smolvla-n-action-steps 20 \
   --num-candidates 2 \
-  --max-steps 120 \
+  --max-steps 220 \
   --carry-mode sim \
   --wm-rollout-mode iterative \
   --device cuda \
@@ -53,4 +54,4 @@ echo "[seggrpo-c1003-c20-olay] output-json -> artifacts/segment_grpo_campaign100
   --smolvla-noise-std 0.0 \
   --comparison-strip-overlay
 
-echo "[seggrpo-c1003-c20-olay] finished OK"
+echo "[seggrpo-c1003-c20-olay-g50-220] finished OK"
