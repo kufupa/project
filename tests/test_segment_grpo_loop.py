@@ -773,11 +773,15 @@ def test_sample_smolvla_chunk_zero_noise_repeats_base(monkeypatch: pytest.Monkey
     def _exec(*_a: object, **_k: object) -> np.ndarray:
         return np.array([0.5, -0.25, 0.0, 0.1], dtype=np.float32)
 
+    def _chunk_fail(*_a: object, **_k: object) -> np.ndarray:
+        raise RuntimeError("chunk api unavailable in test")
+
     fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action_chunk = _chunk_fail
     fake_helper._smolvla_exec_action = _exec
     monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
     rng = np.random.default_rng(999)
-    chunk = _sample_smolvla_chunk(
+    chunk, meta = _sample_smolvla_chunk(
         smolvla_bundle=object(),
         image=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.zeros(4, dtype=np.float32),
@@ -788,6 +792,7 @@ def test_sample_smolvla_chunk_zero_noise_repeats_base(monkeypatch: pytest.Monkey
         noise_std=0.0,
     )
     assert chunk.shape == (4, 4)
+    assert meta.get("chunk_generation_mode") == "single_step_fallback"
     for i in range(1, 4):
         np.testing.assert_array_equal(chunk[i], chunk[0])
 
@@ -796,11 +801,15 @@ def test_sample_smolvla_chunk_positive_noise_varies_rows(monkeypatch: pytest.Mon
     def _exec(*_a: object, **_k: object) -> np.ndarray:
         return np.zeros(4, dtype=np.float32)
 
+    def _chunk_fail(*_a: object, **_k: object) -> np.ndarray:
+        raise RuntimeError("chunk api unavailable in test")
+
     fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action_chunk = _chunk_fail
     fake_helper._smolvla_exec_action = _exec
     monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
     rng = np.random.default_rng(42)
-    chunk = _sample_smolvla_chunk(
+    chunk, _meta = _sample_smolvla_chunk(
         smolvla_bundle=object(),
         image=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.zeros(4, dtype=np.float32),
@@ -819,10 +828,14 @@ def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch
     def _exec(*_a: object, **_k: object) -> np.ndarray:
         return np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
 
+    def _chunk_fail(*_a: object, **_k: object) -> np.ndarray:
+        raise RuntimeError("chunk api unavailable in test")
+
+    fake_helper._smolvla_exec_action_chunk = _chunk_fail
     fake_helper._smolvla_exec_action = _exec
     monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
     rng = np.random.default_rng(0)
-    chunk = _sample_smolvla_chunk(
+    chunk, _meta = _sample_smolvla_chunk(
         smolvla_bundle=object(),
         image=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.zeros(4, dtype=np.float32),
@@ -833,6 +846,70 @@ def test_sampled_chunk_keeps_env_action_dim_only(monkeypatch: pytest.MonkeyPatch
         noise_std=0.1,
     )
     assert chunk.shape == (3, 4)
+
+
+def test_sample_smolvla_chunk_sequence_head_uses_distinct_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First column must stay in [-1, 1] so np.clip in _sample_smolvla_chunk does not merge rows.
+    seq = np.stack(
+        [np.array([v, 0.0, 0.0, 0.0], dtype=np.float32) for v in (-1.0, -0.5, 0.0, 0.5, 1.0)],
+        axis=0,
+    )
+
+    def _chunk_ok(*_a: object, **_k: object) -> np.ndarray:
+        return seq
+
+    fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action_chunk = _chunk_ok
+    monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
+    rng = np.random.default_rng(1)
+    chunk, meta = _sample_smolvla_chunk(
+        smolvla_bundle=object(),
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_len=5,
+        env_action_dim=4,
+        task_text="t",
+        rng=rng,
+        noise_std=0.0,
+    )
+    assert meta.get("chunk_generation_mode") == "sequence_head"
+    assert chunk.shape == (5, 4)
+    assert meta.get("unique_action_rows") == 5
+    np.testing.assert_array_equal(chunk, seq)
+
+
+def test_sample_smolvla_chunk_sequence_head_pads_short_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = np.stack(
+        [
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            np.array([-0.25, 0.0, 0.0, 0.0], dtype=np.float32),
+        ],
+        axis=0,
+    )
+
+    def _chunk_ok(*_a: object, **_k: object) -> np.ndarray:
+        return seq
+
+    fake_helper = SimpleNamespace()
+    fake_helper._smolvla_exec_action_chunk = _chunk_ok
+    monkeypatch.setattr("segment_grpo_loop._load_jepa_helper_module", lambda: fake_helper)
+    rng = np.random.default_rng(2)
+    chunk, meta = _sample_smolvla_chunk(
+        smolvla_bundle=object(),
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(4, dtype=np.float32),
+        chunk_len=5,
+        env_action_dim=4,
+        task_text="t",
+        rng=rng,
+        noise_std=0.0,
+    )
+    assert meta.get("chunk_generation_mode") == "sequence_head"
+    assert chunk.shape == (5, 4)
+    np.testing.assert_array_equal(chunk[0], seq[0])
+    np.testing.assert_array_equal(chunk[1], seq[1])
+    for i in range(2, 5):
+        np.testing.assert_array_equal(chunk[i], seq[1])
 
 
 def test_select_comparison_frames_with_wm_step_factor() -> None:
@@ -975,12 +1052,15 @@ def test_latent_overlay_distance_tables_delta_vs_initial() -> None:
     assert abs(delta_full[1] - (d_full[1] - d_full[0])) < 1e-6
 
 
-def test_overlay_decode_panel_metadata_darkens_corner() -> None:
+def test_overlay_decode_panel_metadata_appends_footer_row() -> None:
     pred = np.full((40, 60, 3), 200, dtype=np.uint8)
     out = _overlay_decode_panel_metadata(pred, ["line1", "line2"])
-    assert out.shape == pred.shape
-    # overlay box top-left should be darker than uniform input
-    assert float(np.mean(out[:18, :25])) < float(np.mean(pred[:18, :25]))
+    assert out.shape[0] > pred.shape[0]
+    assert out.shape[1] == pred.shape[1]
+    assert np.array_equal(out[: pred.shape[0]], pred)
+    footer = out[pred.shape[0] :]
+    assert footer.shape[0] > 0
+    assert np.any(np.any(footer != 0, axis=2))
 
 
 def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
@@ -1012,8 +1092,17 @@ def test_build_real_vs_pred_strip_overlay_on_changes_array() -> None:
         overlay_score_trace=trace,
         overlay_segment_index=5,
     )
-    assert base.shape == with_overlay.shape
-    assert not np.array_equal(base, with_overlay)
+    assert with_overlay.shape[1] == base.shape[1]
+    assert with_overlay.shape[0] > base.shape[0]
+    overlay = with_overlay.shape[0] - base.shape[0]
+    assert overlay > 0
+    frame_h = real_frames[0].shape[0]
+    frame_w = real_frames[0].shape[1]
+    assert np.array_equal(with_overlay[:frame_h, :frame_w], real_frames[0])
+    assert np.array_equal(with_overlay[frame_h : frame_h * 2, frame_w : frame_w * 2], pred_frames[0])
+    footer = with_overlay[(frame_h * 2) : (frame_h * 2 + overlay), :frame_w]
+    assert footer.shape[0] > 0
+    assert not np.array_equal(footer, np.zeros_like(footer))
 
 
 def test_comparison_strip_basename_step_range_and_wmf_prefix() -> None:

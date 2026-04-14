@@ -127,6 +127,54 @@ def test_parse_args_smolvla_flags_override(monkeypatch: pytest.MonkeyPatch, tmp_
     assert args.smolvla_noise_std == pytest.approx(0.1)
 
 
+def test_parse_args_smolvla_n_action_steps_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+        ],
+    )
+    args = _parse_args()
+    assert args.smolvla_n_action_steps == 1
+
+
+def test_parse_args_smolvla_n_action_steps_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--smolvla-n-action-steps",
+            "20",
+        ],
+    )
+    args = _parse_args()
+    assert args.smolvla_n_action_steps == 20
+
+
+def test_parse_args_smolvla_n_action_steps_zero_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_segment_grpo.py",
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--smolvla-n-action-steps",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
 def test_parse_args_wm_parity_optional_negation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         sys,
