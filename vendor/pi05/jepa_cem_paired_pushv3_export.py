@@ -392,7 +392,9 @@ class SmolVLAExecBundle:
     device: torch.device
 
 
-def _try_load_smolvla_exec(checkpoint: str, device: torch.device) -> SmolVLAExecBundle | None:
+def _try_load_smolvla_exec(
+    checkpoint: str, device: torch.device, n_action_steps: int = 1
+) -> SmolVLAExecBundle | None:
     ckpt = (checkpoint or "").strip()
     if not ckpt:
         return None
@@ -432,7 +434,7 @@ def _try_load_smolvla_exec(checkpoint: str, device: torch.device) -> SmolVLAExec
         )
         model_kwargs: dict[str, Any] = {
             "device": dev_str,
-            "n_action_steps": 1,
+            "n_action_steps": int(max(1, int(n_action_steps))),
             "expert_width_multiplier": 0.5,
             "self_attn_every_n_layers": 0,
             "load_vlm_weights": load_vlm_weights,
@@ -571,6 +573,53 @@ def _smolvla_exec_action(
     act = bundle.postprocessor(act)
     out = act.detach().float().cpu().numpy().reshape(-1)
     return out
+
+
+def _smolvla_exec_action_chunk(
+    bundle: SmolVLAExecBundle,
+    obs: Any,
+    env: Any,
+    task_text: str,
+) -> np.ndarray:
+    """Return action chunk as float32 array shape (T, action_dim) from one policy forward."""
+    from lerobot.utils.constants import (  # noqa: PLC0415
+        OBS_ENV_STATE,
+        OBS_IMAGE,
+        OBS_STATE,
+    )
+
+    agent_dim, env_dim = _smolvla_state_dims(bundle.policy)
+    if isinstance(obs, np.ndarray):
+        flat = np.asarray(obs, dtype=np.float32).reshape(-1)
+    else:
+        flat = np.asarray(_flatten_obs_state(obs), dtype=np.float32).reshape(-1)
+    if flat.size == 0:
+        raise RuntimeError("empty state vector")
+    _agent_vec, env_vec = _vectors_for_smolvla(flat, agent_dim, env_dim)
+    rgb = _policy_rgb_hwc(env, obs)
+    timg = torch.from_numpy(rgb).unsqueeze(0).permute(0, 3, 1, 2).contiguous().float() / 255.0
+    timg = timg.to(bundle.device)
+    st = torch.from_numpy(_agent_vec).unsqueeze(0).to(bundle.device)
+    es = torch.from_numpy(env_vec).unsqueeze(0).to(bundle.device)
+    batch = {
+        OBS_IMAGE: timg,
+        OBS_STATE: st,
+        OBS_ENV_STATE: es,
+        "task": task_text,
+    }
+    proc = bundle.preprocessor(batch)
+    with torch.inference_mode():
+        acts = bundle.policy.predict_action_chunk(proc)
+    acts = bundle.postprocessor(acts)
+    if hasattr(acts, "detach"):
+        arr = acts.detach().float().cpu().numpy()
+    else:
+        arr = np.asarray(acts, dtype=np.float32)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise RuntimeError(f"Expected 2D chunk action output, got shape={getattr(arr, 'shape', None)}")
+    return np.asarray(arr, dtype=np.float32)
 
 
 def heuristic_push_action(obs: Any, env: Any) -> np.ndarray:
