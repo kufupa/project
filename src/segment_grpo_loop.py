@@ -778,7 +778,7 @@ def _comparison_strip_overlay_lines(
         d_str = f"{d_k:.4f}" if np.isfinite(d_k) else "n/a"
         dd = delta_full[k]
         dd_str = f"{dd:+.4f}" if np.isfinite(dd) else "n/a"
-        lines.append(f"d {d_str}  Δ {dd_str}")
+        lines.append(f"d {d_str}  delta {dd_str}")
     else:
         lines.append("d n/a  Δ n/a")
     if overlay_segment_index is not None:
@@ -822,44 +822,52 @@ def _latent_overlay_distance_tables(
 
 
 def _overlay_decode_panel_metadata(pred_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
-    """Draw small semi-opaque box + text on WM decode panel (bottom of strip column)."""
+    """Append metadata footer below decoded panel for readable per-column overlays."""
     from PIL import Image, ImageDraw, ImageFont
 
-    base = _to_rgb_uint8(pred_rgb)
-    img = Image.fromarray(base).convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    font = ImageFont.load_default()
-    for fp in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
-    ):
-        try:
-            font = ImageFont.truetype(fp, 11)
-            break
-        except OSError:
-            continue
+    pred = _to_rgb_uint8(pred_rgb)
+    _, pred_w = pred.shape[0], pred.shape[1]
+
+    font = getattr(_overlay_decode_panel_metadata, "_font_cache", None)
+    if font is None:
+        font = None
+        for fp in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+        ):
+            try:
+                font = ImageFont.truetype(fp, 13)
+                break
+            except OSError:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        setattr(_overlay_decode_panel_metadata, "_font_cache", font)
 
     line_spacing = 2
-    tw, th = 0, 0
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        tw = max(tw, bbox[2] - bbox[0])
-        th += bbox[3] - bbox[1] + line_spacing
-    th = max(0, th - line_spacing)
+    line_bbox = font.getbbox("Mg")
+    line_h = (line_bbox[3] - line_bbox[1]) if line_bbox is not None else 14
+    if line_h <= 0:
+        line_h = 14
+    line_count = len(lines)
+    text_h = line_count * line_h + max(0, line_count - 1) * line_spacing
+    tx0 = 4
     pad = 4
-    x0, y0 = 2, 2
-    x1, y1 = x0 + tw + 2 * pad, y0 + th + 2 * pad
-    x1 = min(int(img.size[0]) - 1, x1)
-    y1 = min(int(img.size[1]) - 1, y1)
-    draw.rectangle((x0, y0, x1, y1), fill=(0, 0, 0, 210))
-    ty = y0 + pad
+    footer_h = max(1, text_h + 2 * pad)
+    footer = Image.new("RGB", (pred_w, footer_h), (0, 0, 0))
+    draw = ImageDraw.Draw(footer)
+    ty = pad
+    max_text_x = max(0, pred_w - 1)
     for line in lines:
-        draw.text((x0 + pad, ty), line, fill=(255, 255, 255, 255), font=font)
-        bb = draw.textbbox((0, 0), line, font=font)
-        ty += bb[3] - bb[1] + line_spacing
-    out = Image.alpha_composite(img, overlay)
-    return np.asarray(out.convert("RGB"), dtype=np.uint8)
+        if ty > footer_h - pad:
+            break
+        draw.text((min(tx0, max_text_x), ty), line, fill=(255, 255, 255), font=font)
+        ty += line_h + line_spacing
+        # Guard against pathological long lines with tiny widths; keep row readable and bounded.
+        if ty >= footer_h - pad:
+            break
+    footer_np = np.asarray(footer, dtype=np.uint8)
+    return np.concatenate([pred, footer_np], axis=0)
 
 
 def _build_real_vs_pred_strip(
@@ -1096,7 +1104,12 @@ def _extract_image_and_proprio(obs: Any, env: Any) -> tuple[np.ndarray, np.ndarr
     return _to_rgb_uint8(img), np.asarray(proprio, dtype=np.float32).reshape(-1)
 
 
-def load_smolvla_bundle(checkpoint: str | Path | None, device: str | torch.device | None) -> Any:
+def load_smolvla_bundle(
+    checkpoint: str | Path | None,
+    device: str | torch.device | None,
+    *,
+    n_action_steps: int = 1,
+) -> Any:
     """
     Load SmolVLA execution bundle through shared helper.
 
@@ -1110,7 +1123,9 @@ def load_smolvla_bundle(checkpoint: str | Path | None, device: str | torch.devic
         )
     helper = _load_jepa_helper_module()
     try:
-        bundle = helper._try_load_smolvla_exec(ckpt, _resolve_device(device))
+        bundle = helper._try_load_smolvla_exec(
+            ckpt, _resolve_device(device), int(max(1, int(n_action_steps)))
+        )
     except Exception as exc:  # pragma: no cover - robust runtime path
         raise RuntimeError(
             f"Failed to initialize SmolVLA from '{ckpt}'. "
@@ -1667,6 +1682,15 @@ def score_chunk_by_goal_latent(
     return float(distance)
 
 
+def _count_unique_action_rows(chunk: np.ndarray) -> int:
+    """Stable-ish count of distinct action rows (float-safe)."""
+    arr = np.asarray(chunk, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return 0
+    rounded = np.round(arr, decimals=6)
+    return int(len({tuple(row.tolist()) for row in rounded}))
+
+
 def _sample_smolvla_chunk(
     smolvla_bundle: Any,
     image: np.ndarray,
@@ -1677,7 +1701,7 @@ def _sample_smolvla_chunk(
     rng: np.random.Generator,
     *,
     noise_std: float = 0.0,
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, Any]]:
     helper = _load_jepa_helper_module()
     obs = {"image": _to_rgb_uint8(image), "state": np.asarray(proprio, dtype=np.float32).reshape(-1)}
 
@@ -1688,23 +1712,62 @@ def _sample_smolvla_chunk(
         def render(self, *args: Any, **kwargs: Any) -> np.ndarray:
             return self._frame
 
-    try:
-        base = helper._smolvla_exec_action(smolvla_bundle, obs, _RenderProxy(_to_rgb_uint8(image)), task_text)
-        base = np.asarray(base, dtype=np.float32).reshape(-1)
-    except Exception as exc:
-        raise RuntimeError(f"SmolVLA inference failed for chunk sampling: {exc}") from exc
-
     std = float(noise_std)
-    chunk: list[np.ndarray] = []
-    for _ in range(chunk_len):
-        padded = _pad_or_truncate(base, int(env_action_dim))
-        if std > 0.0:
-            noise = rng.normal(0.0, std, size=int(env_action_dim)).astype(np.float32)
-            action = np.clip(padded + noise, -1.0, 1.0)
-        else:
-            action = np.clip(padded, -1.0, 1.0)
-        chunk.append(action)
-    return np.stack(chunk, axis=0).astype(np.float32)
+    meta: dict[str, Any] = {"chunk_generation_mode": "unknown"}
+
+    def _rows_from_base(base_vec: np.ndarray) -> np.ndarray:
+        base_vec = np.asarray(base_vec, dtype=np.float32).reshape(-1)
+        rows_out: list[np.ndarray] = []
+        for _ in range(chunk_len):
+            padded = _pad_or_truncate(base_vec, int(env_action_dim))
+            if std > 0.0:
+                noise = rng.normal(0.0, std, size=int(env_action_dim)).astype(np.float32)
+                action = np.clip(padded + noise, -1.0, 1.0)
+            else:
+                action = np.clip(padded, -1.0, 1.0)
+            rows_out.append(action)
+        return np.stack(rows_out, axis=0).astype(np.float32)
+
+    render_proxy = _RenderProxy(_to_rgb_uint8(image))
+    try:
+        seq = helper._smolvla_exec_action_chunk(
+            smolvla_bundle, obs, render_proxy, task_text
+        )
+        seq = np.asarray(seq, dtype=np.float32)
+        if seq.ndim != 2 or seq.shape[0] < 1:
+            raise RuntimeError(f"invalid chunk shape from SmolVLA: {seq.shape}")
+        meta["chunk_generation_mode"] = "sequence_head"
+        meta["policy_chunk_rows_raw"] = int(seq.shape[0])
+        t_raw = int(seq.shape[0])
+        rows_out: list[np.ndarray] = []
+        for i in range(chunk_len):
+            row = seq[min(i, t_raw - 1)]
+            padded = _pad_or_truncate(row, int(env_action_dim))
+            if std > 0.0:
+                noise = rng.normal(0.0, std, size=int(env_action_dim)).astype(np.float32)
+                action = np.clip(padded + noise, -1.0, 1.0)
+            else:
+                action = np.clip(padded, -1.0, 1.0)
+            rows_out.append(action)
+        chunk = np.stack(rows_out, axis=0).astype(np.float32)
+    except Exception as chunk_exc:
+        meta["chunk_generation_error"] = f"{type(chunk_exc).__name__}: {chunk_exc}"
+        try:
+            base = helper._smolvla_exec_action(
+                smolvla_bundle, obs, render_proxy, task_text
+            )
+            base = np.asarray(base, dtype=np.float32).reshape(-1)
+        except Exception as exc:
+            raise RuntimeError(
+                f"SmolVLA inference failed for chunk sampling: {exc}"
+            ) from exc
+        meta["chunk_generation_mode"] = "single_step_fallback"
+        meta["policy_chunk_rows_raw"] = 1
+        chunk = _rows_from_base(base)
+
+    meta["policy_n_action_steps_returned"] = int(chunk.shape[0])
+    meta["unique_action_rows"] = _count_unique_action_rows(chunk)
+    return chunk, meta
 
 
 def _synthetic_chunk(plan_dim: int, chunk_len: int, candidate_idx: int, rng: np.random.Generator) -> np.ndarray:
@@ -1992,6 +2055,7 @@ def rollout_with_chunks(
     wm_sim_img_size: int = 224,
     smolvla_policy_hflip_corner2: bool = True,
     smolvla_noise_std: float = 0.0,
+    smolvla_n_action_steps: int = 1,
     comparison_strip_overlay: bool = False,
     comparison_strip_stitch_gutter_pixels: int = 0,
 ) -> tuple[EpisodeLog, nn.Module | None]:
@@ -2151,6 +2215,8 @@ def rollout_with_chunks(
             "wm_sim_img_size": int(wm_sim_img_size),
             "smolvla_policy_hflip_corner2": bool(smolvla_policy_hflip_corner2),
             "smolvla_noise_std": float(smolvla_noise_std),
+            "smolvla_n_action_steps_requested": int(smolvla_n_action_steps),
+            "policy_chunk_api_enabled": True,
             "comparison_strip_overlay": bool(comparison_strip_overlay),
             "comparison_strip_stitch_gutter_pixels": int(comparison_strip_stitch_gutter_pixels),
             "wm_goal_for_encode_path": wm_goal_encode_dbg_path,
@@ -2181,8 +2247,9 @@ def rollout_with_chunks(
         candidate_score_traces: dict[int, ScoreTrace | None] = {}
         segment_real_frames: list[np.ndarray] = [np.asarray(current_image, copy=True)]
         for candidate_idx in range(num_candidates):
+            chunk_meta: dict[str, Any] = {}
             if smolvla_bundle is not None and not dry_run:
-                chunk = _sample_smolvla_chunk(
+                chunk, chunk_meta = _sample_smolvla_chunk(
                     smolvla_bundle,
                     current_policy_image,
                     current_proprio,
@@ -2250,6 +2317,7 @@ def rollout_with_chunks(
                     score=float(score),
                     latent_distance=float(distance),
                     meta={
+                        **chunk_meta,
                         "planner_action_dim": int(planner_action_dim),
                         "env_action_dim": int(env_action_dim),
                         "effective_chunk_len": int(effective_len),
