@@ -399,6 +399,7 @@ def _pack_env_actions_for_wm(
     env_dim: int,
     wm_dim: int,
 ) -> np.ndarray:
+    """Pad trailing env steps with **zeros in normalized space** so ``T`` is a multiple of ``factor``."""
     arr = np.asarray(actions_norm_2d, dtype=np.float32)
     if arr.ndim != 2 or arr.shape[1] != env_dim:
         raise RuntimeError(f"Expected normalized actions (T, {env_dim}), got {arr.shape}.")
@@ -411,7 +412,8 @@ def _pack_env_actions_for_wm(
     t = int(arr.shape[0])
     n_pad = (factor - (t % factor)) % factor
     if n_pad:
-        pad = np.repeat(arr[-1:], n_pad, axis=0)
+        # Pad in normalized space with zeros (= preprocessor mean action when std is finite).
+        pad = np.zeros((n_pad, int(env_dim)), dtype=np.float32)
         arr = np.concatenate([arr, pad], axis=0)
     n_blk = int(arr.shape[0]) // factor
     packed = arr.reshape(n_blk, wm_dim)
@@ -821,6 +823,118 @@ def _latent_overlay_distance_tables(
     return d_full, delta_full
 
 
+def _all_candidates_wm_goal_l2_rows(
+    goal_latent_np: np.ndarray,
+    candidate_score_traces: dict[int, ScoreTrace | None],
+    *,
+    num_candidates: int,
+    title: str = "goal_L2_wm_int",
+) -> tuple[list[str], list[dict[str, Any]], int]:
+    """Footer + JSON: per candidate, integer-rounded L2(goal) per WM unroll only (no Δ, no blk).
+
+    Returns ``(lines, json_rows, wm_step_count)``. ``lines[0]`` is title; one line per candidate index
+    in ``0 .. num_candidates-1``. Missing / failed WM trace → ``n/a`` / JSON ``null`` padded to ``wm_step_count``.
+    """
+    g = np.asarray(goal_latent_np, dtype=np.float32).reshape(-1)
+    if g.size == 0 or int(num_candidates) <= 0:
+        return [], [], 0
+    json_rows: list[dict[str, Any]] = []
+    raw_lists: list[list[float | None] | None] = []
+    for idx in range(int(num_candidates)):
+        st = candidate_score_traces.get(idx)
+        d_list: list[float | None] | None = None
+        if st is not None and st.step_vectors:
+            d_full, _dd = _latent_overlay_distance_tables(
+                np.asarray(st.initial_vector, dtype=np.float32).reshape(-1),
+                list(st.step_vectors),
+                g,
+            )
+            d_list = [float(x) if np.isfinite(x) else None for x in d_full]
+        raw_lists.append(d_list)
+    max_k = max((len(d) for d in raw_lists if d), default=0)
+    lines: list[str] = [title]
+    for idx, d_list in enumerate(raw_lists):
+        ints_out: list[int | None] = []
+        png_parts: list[str] = []
+        if max_k <= 0:
+            json_rows.append({"candidate_index": int(idx), "d_goal_l2_wm_int": []})
+            lines.append(f"cand{int(idx):02d}  n/a")
+            continue
+        for k in range(max_k):
+            v = d_list[k] if d_list is not None and k < len(d_list) else None
+            if v is None or not np.isfinite(v):
+                ints_out.append(None)
+                png_parts.append(f"{'n/a':>6s}")
+            else:
+                iv = int(round(float(v)))
+                ints_out.append(iv)
+                png_parts.append(f"{iv:6d}")
+        json_rows.append({"candidate_index": int(idx), "d_goal_l2_wm_int": ints_out})
+        lines.append(f"cand{int(idx):02d}  " + " ".join(png_parts))
+    return lines, json_rows, int(max_k)
+
+
+def _append_wm_megastep_footer(
+    strip_rgb: np.ndarray,
+    lines: list[str],
+    *,
+    min_text_lines: int | None = None,
+) -> np.ndarray:
+    """Monospace footer band under full-width comparison strip (equalize stitch height via padding)."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    base = np.asarray(strip_rgb, dtype=np.uint8)
+    if base.ndim == 2:
+        raise ValueError("strip_rgb must be color HWC")
+    if base.shape[2] == 4:
+        base = base[:, :, :3]
+    elif base.shape[2] != 3:
+        raise ValueError("strip_rgb must be 3 or 4 channels")
+    w = int(base.shape[1])
+    draw_lines = list(lines)
+    if min_text_lines is not None and int(min_text_lines) > len(draw_lines):
+        draw_lines.extend([""] * (int(min_text_lines) - len(draw_lines)))
+    if not draw_lines:
+        return base
+
+    font = getattr(_overlay_decode_panel_metadata, "_font_cache", None)
+    if font is None:
+        font = None
+        for fp in (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+        ):
+            try:
+                font = ImageFont.truetype(fp, 13)
+                break
+            except OSError:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        setattr(_overlay_decode_panel_metadata, "_font_cache", font)
+
+    line_spacing = 2
+    try:
+        line_bbox = font.getbbox("Mg")
+        line_h = max(14, int(line_bbox[3] - line_bbox[1]))
+    except Exception:
+        line_h = 14
+    pad = 4
+    text_h = len(draw_lines) * line_h + max(0, len(draw_lines) - 1) * line_spacing
+    footer_h = max(1, text_h + 2 * pad)
+    footer = Image.new("RGB", (max(1, w), footer_h), (0, 0, 0))
+    draw = ImageDraw.Draw(footer)
+    ty = pad
+    max_text_x = max(0, w - 1)
+    for line in draw_lines:
+        if ty > footer_h - pad:
+            break
+        draw.text((4, min(ty, footer_h - 1)), str(line)[:240], fill=(255, 255, 255), font=font)
+        ty += line_h + line_spacing
+    foot_np = np.asarray(footer, dtype=np.uint8)
+    return np.concatenate([base, foot_np], axis=0)
+
+
 def _overlay_decode_panel_metadata(pred_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
     """Append metadata footer below decoded panel for readable per-column overlays."""
     from PIL import Image, ImageDraw, ImageFont
@@ -974,6 +1088,8 @@ def _write_comparison_segment_strip(
     overlay_decode_meta: bool = False,
     overlay_goal_latent_np: np.ndarray | None = None,
     overlay_score_trace: ScoreTrace | None = None,
+    wm_megastep_footer_lines: list[str] | None = None,
+    wm_megastep_footer_min_lines: int | None = None,
 ) -> tuple[Path | None, str | None]:
     if carried_steps is not None and int(carried_steps) <= 0:
         return None, None
@@ -1005,6 +1121,18 @@ def _write_comparison_segment_strip(
         reason = f"Failed to import imageio for comparison strip for episode {episode_index} segment {segment_index}: {exc}"
         print(f"[segment_grpo] {reason}")
         return None, reason
+
+    if wm_megastep_footer_lines:
+        try:
+            strip = _append_wm_megastep_footer(
+                strip,
+                wm_megastep_footer_lines,
+                min_text_lines=wm_megastep_footer_min_lines,
+            )
+        except Exception as exc:
+            reason = f"Failed to append WM megastep footer for episode {episode_index} segment {segment_index}: {exc}"
+            print(f"[segment_grpo] {reason}")
+            return None, reason
 
     carry = 0 if carried_steps is None else int(carried_steps)
     basename = _comparison_strip_basename(
@@ -2080,7 +2208,9 @@ def rollout_with_chunks(
         raise ValueError("carry_mode must be 'sim' or 'replay'")
 
     rng = np.random.default_rng(seed)
-    task_text = f"{task}"
+    from smolvla_pipeline.evaluator import _resolve_task_text  # noqa: PLC0415
+
+    task_text = _resolve_task_text(task)
     jepa_parity_sim = False
     _render_jepa_rgb = None
 
@@ -2204,6 +2334,7 @@ def rollout_with_chunks(
         start_frame_similarity=start_frame_similarity,
         reset_frame_warning=bool(reset_frame_warning),
         metadata={
+            "smolvla_task_text": task_text,
             "dry_run": dry_run,
             "wm_loaded": wm_bundle is not None,
             "goal_latent_loaded": goal_latent is not None,
@@ -2499,6 +2630,30 @@ def rollout_with_chunks(
         if selected_trace is not None:
             wm_stride = int(getattr(selected_trace, "env_steps_per_wm_step", 1) or 1)
 
+        wm_footer_lines: list[str] | None = None
+        wm_footer_min_lines: int | None = None
+        candidate_wm_goal_l2_meta: list[dict[str, Any]] | None = None
+        footer_goal_np: np.ndarray | None = None
+        if goal_latent is not None:
+            try:
+                footer_goal_np = np.asarray(
+                    goal_latent.detach().cpu().numpy().reshape(-1), dtype=np.float32
+                )
+            except Exception:
+                footer_goal_np = None
+        if footer_goal_np is not None and int(num_candidates) > 0:
+            wm_lines, wm_meta, wm_step_count = _all_candidates_wm_goal_l2_rows(
+                footer_goal_np,
+                candidate_score_traces,
+                num_candidates=int(num_candidates),
+            )
+            if wm_lines:
+                wm_footer_lines = wm_lines
+                candidate_wm_goal_l2_meta = wm_meta
+                wm_footer_min_lines = 1 + int(num_candidates)
+                if wm_step_count > 0:
+                    segment_metadata["wm_step_count"] = int(wm_step_count)
+
         segment_comparison_path = None
         if comparison_root_path is not None and pred_frames and carried_steps > 0:
             overlay_goal_np = None
@@ -2523,6 +2678,8 @@ def rollout_with_chunks(
                 overlay_decode_meta=bool(comparison_strip_overlay),
                 overlay_goal_latent_np=overlay_goal_np,
                 overlay_score_trace=selected_score_trace,
+                wm_megastep_footer_lines=wm_footer_lines,
+                wm_megastep_footer_min_lines=wm_footer_min_lines,
             )
             if segment_path is not None:
                 segment_comparison_path = segment_path
@@ -2536,6 +2693,8 @@ def rollout_with_chunks(
         segment_metadata["comparison_wm_env_steps_per_wm_step"] = int(wm_stride)
         if segment_comparison_path is not None:
             segment_metadata["comparison_strip_filename"] = segment_comparison_path.name
+        if candidate_wm_goal_l2_meta:
+            segment_metadata["candidate_wm_goal_l2_int"] = candidate_wm_goal_l2_meta
 
         episode_log.actions.extend(executed_actions)
         episode_log.latent_scores.append(0.0 if selected_distance is None else float(selected_distance))
