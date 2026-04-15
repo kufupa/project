@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 from segment_grpo_loop import (
     DecodeTrace,
     ScoreTrace,
+    _all_candidates_wm_goal_l2_rows,
     _build_real_vs_pred_strip,
     _comparison_ridx_for_column,
     _comparison_strip_overlay_lines,
@@ -62,6 +63,7 @@ def test_replay_rollout_contracts_shape_and_scores() -> None:
 
     assert episode.steps == 10
     assert episode.done is True
+    assert episode.metadata.get("smolvla_task_text") == "Push the puck to a goal"
     assert len(episode.segments) == 3
     assert episode.steps == len(episode.actions)
     assert len(episode.latent_scores) == len(episode.segments)
@@ -1166,6 +1168,72 @@ def test_write_comparison_segment_strip_returns_deterministic_path(monkeypatch: 
     )
     assert path == tmp_path / "episode_0007" / expected_name
     assert captured["path"] == path
+
+
+def test_write_comparison_segment_strip_appends_wm_megastep_footer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    written: list[np.ndarray] = []
+
+    def _fake_imwrite(path: Path, image: np.ndarray) -> None:
+        written.append(np.asarray(image))
+
+    dummy_v2 = ModuleType("imageio.v2")
+    dummy_v2.imwrite = _fake_imwrite
+    dummy_pkg = ModuleType("imageio")
+    dummy_pkg.__path__ = []  # type: ignore[attr-defined]
+    dummy_pkg.v2 = dummy_v2
+    monkeypatch.setitem(sys.modules, "imageio", dummy_pkg)
+    monkeypatch.setitem(sys.modules, "imageio.v2", dummy_v2)
+
+    real_frames = [np.full((4, 4, 3), 10, dtype=np.uint8), np.full((4, 4, 3), 11, dtype=np.uint8)]
+    pred_frames = [np.full((4, 4, 3), 20, dtype=np.uint8), np.full((4, 4, 3), 21, dtype=np.uint8)]
+    footer = ["title", "k0 x", "k1 y"]
+    path, err = _write_comparison_segment_strip(
+        out_dir=tmp_path,
+        episode_index=0,
+        segment_index=0,
+        real_frames=real_frames,
+        pred_frames=pred_frames,
+        env_step_start=0,
+        selected_candidate_index=0,
+        carried_steps=1,
+        wm_megastep_footer_lines=footer,
+        wm_megastep_footer_min_lines=6,
+    )
+    assert err is None
+    assert path is not None
+    assert len(written) == 1
+    base_h = real_frames[0].shape[0] + pred_frames[0].shape[0]
+    assert written[0].shape[0] > base_h
+
+
+def test_all_candidates_wm_goal_l2_rows_two_candidates_ints() -> None:
+    """Per-candidate integer L2 list; no delta/blk strings; cand1 has no WM trace."""
+    goal = np.zeros(3, dtype=np.float32)
+    st0 = ScoreTrace(
+        step_vectors=[
+            np.array([12.3, 0.0, 0.0], dtype=np.float32),
+            np.array([45.6, 0.0, 0.0], dtype=np.float32),
+        ],
+        final_vector=np.zeros(3, dtype=np.float32),
+        initial_vector=np.zeros(3, dtype=np.float32),
+    )
+    lines, meta, max_k = _all_candidates_wm_goal_l2_rows(
+        goal,
+        {0: st0, 1: None},
+        num_candidates=2,
+    )
+    assert max_k == 2
+    assert len(lines) == 1 + 2
+    assert meta[0]["candidate_index"] == 0
+    assert meta[0]["d_goal_l2_wm_int"] == [12, 46]
+    assert meta[1]["candidate_index"] == 1
+    assert meta[1]["d_goal_l2_wm_int"] == [None, None]
+    blob = "\n".join(lines)
+    assert "dd=" not in blob and "|blk|" not in blob
+    assert "cand00" in lines[1]
+    assert "    12" in lines[1] and "    46" in lines[1]
 
 
 def test_iterative_rollout_final_latent_matches_last_step() -> None:
