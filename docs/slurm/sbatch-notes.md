@@ -67,6 +67,25 @@ Expected healthy startup markers:
 - Campaign folder appears under `artifacts/phase07_smolvla_baseline/campaigns/`
 - `smolvla_topk_best_summary.json` is created and populated
 
+## Segment GRPO top-15 (chunk30 / K=5)
+
+The launcher [`scripts/segment_grpo/submit_segment_grpo_topk15_chunk30_max30_k5_array.slurm`](../../scripts/segment_grpo/submit_segment_grpo_topk15_chunk30_max30_k5_array.slurm) is a normal array job (one `sbatch` from the login node). It does **not** call `sbatch` again from inside the job body.
+
+If you still see `QOSMaxSubmitJobPerUserLimit` or submission failures, common causes match the SmolVLA case above: **submitting `sbatch` from inside another Slurm allocation** (nested submit), or hitting per-user submit caps when something upstream wraps your command in batch submission.
+
+**Recommended:**
+
+- From the **login** node, use **one** submit for all remaining targets without an inner queue:
+  - [`scripts/segment_grpo/submit_segment_grpo_topk15_chunk30_max30_k5_serial.slurm`](../../scripts/segment_grpo/submit_segment_grpo_topk15_chunk30_max30_k5_serial.slurm) — one GPU job, sequential loop over ranks 2–15 (longer wall time).
+- If you already have a GPU shell (`salloc` / `srun` / interactive node), avoid `sbatch` entirely:
+  - `bash scripts/segment_grpo/segment_grpo_topk15_chunk30_max30_k5_run_all_local.sh`
+
+Shared per-target logic lives in [`scripts/segment_grpo/segment_grpo_topk15_chunk30_max30_k5_run_task.sh`](../../scripts/segment_grpo/segment_grpo_topk15_chunk30_max30_k5_run_task.sh).
+
+Each target’s `--goal-frame-index 25` is loaded from that row’s `frames/episode_{episode_index}/` under the resolved oracle baseline (same multi-episode run directory for all top-15 rows; different episode subfolder per seed). `run_segment_grpo.py` asserts the goal PNG path matches the requested episode and frame index.
+
+Slurm may execute a **copy** of the batch script from `/var/spool/slurm/...`, so segment GRPO Slurm entrypoints use a fixed `PROJECT_ROOT` and `${PROJECT_ROOT}/scripts/segment_grpo/` for helper shells (do not resolve helper paths from `BASH_SOURCE` on the staged copy).
+
 ## Quick troubleshooting
 
 - If launch still fails, capture:
