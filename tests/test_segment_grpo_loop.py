@@ -1236,6 +1236,18 @@ def test_all_candidates_wm_goal_l2_rows_two_candidates_ints() -> None:
     assert "    12" in lines[1] and "    46" in lines[1]
 
 
+def test_wm_megastep_action_range_footer_line() -> None:
+    row = _wm_megastep_action_range_footer_line(
+        carried_steps=13,
+        wm_stride=5,
+        wm_step_count=3,
+    )
+    assert "action range" in row
+    assert "  0:5" in row
+    assert "  5:10" in row
+    assert "10:13" in row
+
+
 def test_iterative_rollout_final_latent_matches_last_step() -> None:
     torch = pytest.importorskip("torch")
 
