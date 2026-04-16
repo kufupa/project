@@ -391,6 +391,24 @@ def main() -> int:
                 else:
                     raise
         if goal_reference is not None:
+            expected_ep_dir = f"episode_{int(target_episode):04d}"
+            if int(goal_reference.episode_index) != int(target_episode):
+                raise RuntimeError(
+                    "Oracle goal episode_index mismatch: "
+                    f"target_episode={target_episode} but goal_reference.episode_index={goal_reference.episode_index}"
+                )
+            if goal_reference.goal_frame_path.parent.name != expected_ep_dir:
+                raise RuntimeError(
+                    "Oracle goal PNG is not under this episode's frames directory "
+                    f"(expected parent {expected_ep_dir!r}, got {goal_reference.goal_frame_path})"
+                )
+            gfi = int(args.goal_frame_index)
+            expected_goal_name = f"frame_{gfi - 1:06d}.png"
+            if goal_reference.goal_frame_path.name != expected_goal_name:
+                raise RuntimeError(
+                    "Oracle goal filename does not match --goal-frame-index: "
+                    f"index={gfi} expects {expected_goal_name!r}, path={goal_reference.goal_frame_path}"
+                )
             print(
                 f"[segment_grpo] episode={target_episode} goal_frame={goal_reference.goal_frame_path} "
                 f"start_frame={goal_reference.start_frame_path} reset_seed={target_seed}"
