@@ -9,6 +9,7 @@
 #   MT50_PHASE071_OUTPUT_ROOT — default artifacts/MT50_Phase071_official_lerobot_1task_1ep or ..._1ep
 #   MT50_PHASE071_CHECKPOINT  — directory with train_config.json + pretrained weights
 #   MT50_PHASE071_DRY_RUN     — if true, print command and exit
+#   MT50_LEROBOT_MAX_EPISODES_RENDERED — optional render limit; set 0 for no videos
 #   SMOLVLA_LEROBOT_ENV_DIR   — venv with lerobot (default: ${WORKSPACE_ROOT}/.envs/lerobot_mw_py310)
 #
 set -euo pipefail
@@ -58,6 +59,11 @@ export MUJOCO_GL="${MUJOCO_GL:-egl}"
 TASK="${MT50_PHASE071_TASK:-assembly-v3}"
 EPISODES="${MT50_PHASE071_EPISODES:-1}"
 SEED="${MT50_PHASE071_SEED:-1000}"
+RENDER_LIMIT="${MT50_LEROBOT_MAX_EPISODES_RENDERED:-}"
+if [[ -n "${RENDER_LIMIT}" && ! "${RENDER_LIMIT}" =~ ^[0-9]+$ ]]; then
+  echo "error: MT50_LEROBOT_MAX_EPISODES_RENDERED must be a non-negative integer: ${RENDER_LIMIT}" >&2
+  exit 2
+fi
 
 if [[ "${TASK}" == "all" ]]; then
   if [[ ! -f "${SNAPSHOT}/train_config.json" ]]; then
@@ -82,17 +88,31 @@ fi
 OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${DEFAULT_OUT}}"
 mkdir -p "${OUTPUT_ROOT}"
 
-cmd=(
-  "${PYTHON_BIN}" -m lerobot.scripts.lerobot_eval
-  --policy.path="${SNAPSHOT}"
-  --env.type=metaworld
-  --env.task="${TASK}"
-  --eval.n_episodes="${EPISODES}"
-  --eval.batch_size=1
-  --eval.use_async_envs=false
-  --seed="${SEED}"
-  --output_dir="${OUTPUT_ROOT}"
-)
+if [[ -n "${RENDER_LIMIT}" ]]; then
+  cmd=(
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/lerobot_eval_configurable_rendering.py"
+    --policy.path="${SNAPSHOT}"
+    --env.type=metaworld
+    --env.task="${TASK}"
+    --eval.n_episodes="${EPISODES}"
+    --eval.batch_size=1
+    --eval.use_async_envs=false
+    --seed="${SEED}"
+    --output_dir="${OUTPUT_ROOT}"
+  )
+else
+  cmd=(
+    "${PYTHON_BIN}" -m lerobot.scripts.lerobot_eval
+    --policy.path="${SNAPSHOT}"
+    --env.type=metaworld
+    --env.task="${TASK}"
+    --eval.n_episodes="${EPISODES}"
+    --eval.batch_size=1
+    --eval.use_async_envs=false
+    --seed="${SEED}"
+    --output_dir="${OUTPUT_ROOT}"
+  )
+fi
 
 printf '[mt50:phase071] command:'
 printf ' %q' "${cmd[@]}"
@@ -101,6 +121,7 @@ echo "[mt50:phase071] output_root=${OUTPUT_ROOT}"
 echo "[mt50:phase071] task=${TASK}"
 echo "[mt50:phase071] episodes=${EPISODES}"
 echo "[mt50:phase071] seed=${SEED}"
+echo "[mt50:phase071] max_episodes_rendered=${RENDER_LIMIT:-lerobot_default_10}"
 echo "[mt50:phase071] expected_horizon=500 via LeRobot MetaWorld _max_episode_steps"
 
 if [[ "${MT50_PHASE071_DRY_RUN:-false}" == "true" ]]; then
