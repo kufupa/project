@@ -32,6 +32,18 @@ class OracleReferenceFrames:
     start_frame: np.ndarray
 
 
+@dataclass(frozen=True)
+class OracleActionSequence:
+    """Oracle scripted-policy actions for one episode (from actions.jsonl)."""
+
+    run_dir: Path
+    episode_index: int
+    action_source_path: Path
+    actions: np.ndarray  # (T, env_action_dim), float32
+    n_steps: int
+    env_action_dim: int
+
+
 def _load_png_rgb(path: Path) -> np.ndarray:
     from PIL import Image
 
@@ -140,4 +152,52 @@ def load_oracle_reference_frames(
         goal_frame_path=goal_path,
         start_frame=_load_png_rgb(start_path),
         goal_frame=_load_png_rgb(goal_path),
+    )
+
+
+def load_oracle_action_sequence(run_dir: Path, episode_index: int) -> OracleActionSequence:
+    """
+    Load oracle per-step actions for ``episode_index`` from ``episodes/episode_XXXX/actions.jsonl``.
+
+    Each JSON line must contain an ``action`` key: list of floats (push-v3: length 4).
+    """
+    run_path = Path(run_dir).expanduser().resolve()
+    if not run_path.is_dir():
+        raise FileNotFoundError(f"Oracle run dir not found: {run_path}")
+
+    actions_path = run_path / "episodes" / f"episode_{int(episode_index):04d}" / "actions.jsonl"
+    if not actions_path.is_file():
+        raise FileNotFoundError(f"Oracle actions.jsonl missing: {actions_path}")
+
+    rows: list[list[float]] = []
+    with actions_path.open("r", encoding="utf-8") as fp:
+        for line_no, line in enumerate(fp, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{actions_path}:{line_no} invalid JSON: {exc}") from exc
+            action = obj.get("action")
+            if not isinstance(action, list) or not action:
+                raise ValueError(f"{actions_path}:{line_no} missing or empty 'action' list")
+            rows.append([float(x) for x in action])
+
+    if not rows:
+        raise ValueError(f"Oracle actions.jsonl empty: {actions_path}")
+
+    dims = {len(r) for r in rows}
+    if len(dims) != 1:
+        raise ValueError(f"Oracle action rows have mixed widths {dims} in {actions_path}")
+    env_action_dim = int(next(iter(dims)))
+    arr = np.asarray(rows, dtype=np.float32)
+
+    return OracleActionSequence(
+        run_dir=run_path,
+        episode_index=int(episode_index),
+        action_source_path=actions_path,
+        actions=arr,
+        n_steps=int(arr.shape[0]),
+        env_action_dim=env_action_dim,
     )
