@@ -879,10 +879,10 @@ def _wm_megastep_action_range_footer_line(
     carried_steps: int,
     wm_stride: int,
     wm_step_count: int,
-    title: str = "action range",
+    title: str = "range:",
     cell_width: int = 6,
 ) -> str:
-    """Footer header row showing half-open action ranges per WM megastep."""
+    """Footer row showing half-open action ranges per WM megastep (label + cells)."""
     c = int(carried_steps)
     step_count = int(wm_step_count)
     if c <= 0 or step_count <= 0:
@@ -2210,6 +2210,8 @@ def rollout_with_chunks(
     smolvla_n_action_steps: int = 1,
     comparison_strip_overlay: bool = False,
     comparison_strip_stitch_gutter_pixels: int = 0,
+    oracle_action_sequence: np.ndarray | None = None,
+    oracle_action_source: str | None = None,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -2228,6 +2230,13 @@ def rollout_with_chunks(
     carry_mode = str(carry_mode).strip().lower()
     if carry_mode not in ("sim", "replay"):
         raise ValueError("carry_mode must be 'sim' or 'replay'")
+
+    if oracle_action_sequence is not None:
+        if int(num_candidates) != 1:
+            raise ValueError("oracle_action_sequence requires num_candidates == 1")
+        _ora = np.asarray(oracle_action_sequence, dtype=np.float32)
+        if _ora.ndim != 2 or _ora.shape[0] < 1:
+            raise ValueError(f"oracle_action_sequence must be 2-D (T, A) with T>=1; got shape {_ora.shape}")
 
     rng = np.random.default_rng(seed)
     from smolvla_pipeline.evaluator import _resolve_task_text  # noqa: PLC0415
@@ -2317,7 +2326,7 @@ def rollout_with_chunks(
             print(f"[segment_grpo] reset frame compare failed for episode {episode_index}: {exc}")
 
     if smolvla_bundle is None:
-        if not dry_run:
+        if not dry_run and oracle_action_sequence is None:
             raise RuntimeError("SmolVLA bundle is required when not in dry-run mode.")
         smolvla_bundle = None
 
@@ -2382,6 +2391,11 @@ def rollout_with_chunks(
             "decode_statuses": [],
             "scoring_failure_reasons": [],
             "decode_failure_reasons": [],
+            "oracle_action_mode": oracle_action_sequence is not None,
+            "oracle_action_n_steps": (
+                int(np.asarray(oracle_action_sequence).shape[0]) if oracle_action_sequence is not None else None
+            ),
+            "oracle_action_source": oracle_action_source,
         },
     )
 
@@ -2403,7 +2417,27 @@ def rollout_with_chunks(
         segment_real_frames: list[np.ndarray] = [np.asarray(current_image, copy=True)]
         for candidate_idx in range(num_candidates):
             chunk_meta: dict[str, Any] = {}
-            if smolvla_bundle is not None and not dry_run:
+            if oracle_action_sequence is not None:
+                ora = np.asarray(oracle_action_sequence, dtype=np.float32)
+                slice_end = int(current_step) + int(effective_len)
+                if slice_end > int(ora.shape[0]):
+                    raise RuntimeError(
+                        f"oracle_action_sequence exhausted at env step {current_step}: "
+                        f"need rows [:{slice_end}], have T={ora.shape[0]}"
+                    )
+                oracle_slice = np.asarray(ora[int(current_step) : slice_end], dtype=np.float32)
+                if int(oracle_slice.shape[1]) != int(env_action_dim):
+                    raise ValueError(
+                        f"oracle_action_sequence width {oracle_slice.shape[1]} != env_action_dim {env_action_dim}"
+                    )
+                chunk = oracle_slice
+                chunk_meta = {
+                    "chunk_source": "oracle",
+                    "oracle_start_step": int(current_step),
+                }
+                if oracle_action_source:
+                    chunk_meta["oracle_action_source"] = str(oracle_action_source)
+            elif smolvla_bundle is not None and not dry_run:
                 chunk, chunk_meta = _sample_smolvla_chunk(
                     smolvla_bundle,
                     current_policy_image,
@@ -2670,11 +2704,14 @@ def rollout_with_chunks(
                 num_candidates=int(num_candidates),
             )
             if wm_lines:
-                wm_footer_lines = [_wm_megastep_action_range_footer_line(
-                    carried_steps=int(carried_steps),
-                    wm_stride=wm_stride,
-                    wm_step_count=wm_step_count,
-                )] + wm_lines
+                # goal_L2 block first, then action-range row (read top-to-bottom).
+                wm_footer_lines = list(wm_lines) + [
+                    _wm_megastep_action_range_footer_line(
+                        carried_steps=int(carried_steps),
+                        wm_stride=wm_stride,
+                        wm_step_count=wm_step_count,
+                    )
+                ]
                 candidate_wm_goal_l2_meta = wm_meta
                 wm_footer_min_lines = 2 + int(num_candidates)
                 if wm_step_count > 0:

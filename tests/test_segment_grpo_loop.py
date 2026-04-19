@@ -34,6 +34,7 @@ from segment_grpo_loop import (
     _select_comparison_frames,
     _to_wm_visual,
     _wm_action_block_factor,
+    _wm_megastep_action_range_footer_line,
     _stitch_comparison_strip,
     _write_comparison_segment_strip,
     rollout_with_chunks,
@@ -1242,7 +1243,7 @@ def test_wm_megastep_action_range_footer_line() -> None:
         wm_stride=5,
         wm_step_count=3,
     )
-    assert "action range" in row
+    assert "range:" in row
     assert "  0:5" in row
     assert "  5:10" in row
     assert "10:13" in row
@@ -1376,3 +1377,71 @@ def test_rollout_with_chunks_records_wm_scoring_latent_metadata() -> None:
         wm_scoring_latent="proprio",
     )
     assert episode.metadata.get("wm_scoring_latent") == "proprio"
+
+
+def test_oracle_action_mode_replay_smoke() -> None:
+    oracle = np.linspace(0.0, 0.15, num=16, dtype=np.float32).reshape(4, 4)
+    episode, _adapter = rollout_with_chunks(
+        smolvla_bundle=None,
+        wm_bundle=None,
+        task="push-v3",
+        episode_index=0,
+        chunk_len=4,
+        num_candidates=1,
+        max_steps=4,
+        carry_mode="replay",
+        replay_root=None,
+        goal_latent_source=None,
+        seed=123,
+        train_steps=0,
+        dry_run=True,
+        oracle_action_sequence=oracle,
+        oracle_action_source="/tmp/fake_actions.jsonl",
+    )
+    assert episode.metadata.get("oracle_action_mode") is True
+    assert episode.metadata.get("oracle_action_n_steps") == 4
+    assert len(episode.segments) == 1
+    seg = episode.segments[0]
+    assert len(seg.candidates) == 1
+    np.testing.assert_allclose(seg.candidates[0].actions, oracle)
+    assert np.isfinite(seg.candidates[0].latent_distance or 0.0)
+
+
+def test_oracle_action_mode_rejects_k_gt_one() -> None:
+    oracle = np.zeros((4, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="num_candidates == 1"):
+        rollout_with_chunks(
+            smolvla_bundle=None,
+            wm_bundle=None,
+            task="push-v3",
+            episode_index=0,
+            chunk_len=4,
+            num_candidates=2,
+            max_steps=4,
+            carry_mode="replay",
+            replay_root=None,
+            goal_latent_source=None,
+            seed=123,
+            dry_run=True,
+            oracle_action_sequence=oracle,
+        )
+
+
+def test_oracle_action_mode_raises_when_sequence_too_short() -> None:
+    oracle = np.zeros((3, 4), dtype=np.float32)
+    with pytest.raises(RuntimeError, match="exhausted"):
+        rollout_with_chunks(
+            smolvla_bundle=None,
+            wm_bundle=None,
+            task="push-v3",
+            episode_index=0,
+            chunk_len=4,
+            num_candidates=1,
+            max_steps=4,
+            carry_mode="replay",
+            replay_root=None,
+            goal_latent_source=None,
+            seed=123,
+            dry_run=True,
+            oracle_action_sequence=oracle,
+        )
