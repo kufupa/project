@@ -43,11 +43,12 @@ def main() -> int:
     p.add_argument("--checkpoint", type=str, required=True, help="SmolVLA HF checkpoint dir or id")
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--task", type=str, default="push-v3")
+    p.add_argument("--env-backend", choices=("custom", "official_lerobot"), default="custom")
     p.add_argument("--train-seed-base", type=int, default=2000)
     p.add_argument("--start-update", type=int, default=0)
     p.add_argument("--num-updates", type=int, default=1, help="Number of updates to run from start-update")
     p.add_argument("--resume", type=Path, default=None, help="Path to .pt from save_grpo_checkpoint")
-    p.add_argument("--max-steps", type=int, default=120)
+    p.add_argument("--max-steps", type=int, default=120, help="Use 0 with official_lerobot to use LeRobot env horizon")
     p.add_argument("--group-size", type=int, default=4)
     p.add_argument("--batch-size", type=int, default=1, help="Must be 1 for single-seed group")
     p.add_argument("--update-epochs", type=int, default=1)
@@ -72,7 +73,7 @@ def main() -> int:
     progress_path = out / "progress.jsonl"
     manifest_path = out / "train_manifest.json"
 
-    bundle, action_dim = load_bundle_for_grpo(args.checkpoint, task=args.task)
+    bundle, action_dim = load_bundle_for_grpo(args.checkpoint, task=args.task, env_backend=args.env_backend)
     task_text = _resolve_task_text(args.task, override=None)
     camera_name = _resolve_camera_name()
     flip_corner2 = _resolve_flip_corner2()
@@ -110,6 +111,8 @@ def main() -> int:
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "checkpoint": str(args.checkpoint),
         "task": args.task,
+        "env_backend": args.env_backend,
+        "requested_max_steps": args.max_steps,
         "train_seed_base": args.train_seed_base,
         "start_update": start_u,
         "end_update": end_u,
@@ -133,12 +136,24 @@ def main() -> int:
             group_size=args.group_size,
             action_dim=action_dim,
             device=device,
+            env_backend=args.env_backend,
         )
         returns = torch.tensor(
             [reward_backend.episode_return(tr) for tr in rollouts],
             dtype=torch.float32,
             device=device,
         )
+        successes = [any(bool(s) for s in tr.successes) for tr in rollouts]
+        success_rate = float(sum(1 for s in successes if s) / max(len(successes), 1))
+        avg_ret = float(returns.mean().item())
+        episode_lengths = [len(tr.rewards) for tr in rollouts]
+        terminated_flags = [bool(tr.terminated) for tr in rollouts]
+        truncated_flags = [bool(tr.truncated) for tr in rollouts]
+        resolved_max_steps = int(args.max_steps)
+        if rollouts:
+            resolved_max_steps = int(
+                rollouts[0].metadata.get("resolved_max_steps", resolved_max_steps)
+            )
         advantages = compute_group_advantages(returns)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             _append_progress(
@@ -148,20 +163,48 @@ def main() -> int:
                     "skipped": True,
                     "reason": "zero_advantages",
                     "reset_seed": reset_seed,
+                    "env_backend": args.env_backend,
+                    "max_steps": args.max_steps,
+                    "resolved_max_steps": resolved_max_steps,
+                    "avg_return": avg_ret,
                     "returns": returns.detach().cpu().tolist(),
+                    "successes": successes,
+                    "success_rate": success_rate,
+                    "episode_lengths": episode_lengths,
+                    "terminated": terminated_flags,
+                    "truncated": truncated_flags,
                 },
             )
             state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
             old_policy.load_state_dict(state)
             old_policy.eval()
+            skipped_extra = {
+                "avg_return": avg_ret,
+                "success_rate": success_rate,
+                "successes": successes,
+                "skipped": True,
+                "resolved_max_steps": resolved_max_steps,
+                "episode_lengths": episode_lengths,
+                "terminated": terminated_flags,
+                "truncated": truncated_flags,
+            }
             save_grpo_checkpoint(
                 ckpt_dir / "latest.pt",
                 policy_state=bundle.policy.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 update_index=update,
                 args=vars(args),
-                extra={"skipped": True},
+                extra=skipped_extra,
             )
+            if (update + 1) % args.save_every == 0 or update == end_u - 1:
+                save_grpo_checkpoint(
+                    ckpt_dir / f"update_{update + 1:04d}.pt",
+                    policy_state=bundle.policy.state_dict(),
+                    optimizer_state=optimizer.state_dict(),
+                    update_index=update,
+                    args=vars(args),
+                    extra=skipped_extra,
+                )
             continue
 
         bundle.policy.train()
@@ -189,15 +232,22 @@ def main() -> int:
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
             optimizer.step()
 
-        avg_ret = float(returns.mean().item())
         _append_progress(
             progress_path,
             {
                 "update": update,
                 "reset_seed": reset_seed,
+                "env_backend": args.env_backend,
+                "max_steps": args.max_steps,
+                "resolved_max_steps": resolved_max_steps,
                 "avg_return": avg_ret,
                 "returns": returns.detach().cpu().tolist(),
+                "successes": successes,
+                "success_rate": success_rate,
                 "advantages": advantages.detach().cpu().tolist(),
+                "episode_lengths": episode_lengths,
+                "terminated": terminated_flags,
+                "truncated": truncated_flags,
             },
         )
         state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
@@ -210,7 +260,15 @@ def main() -> int:
             optimizer_state=optimizer.state_dict(),
             update_index=update,
             args=vars(args),
-            extra={"avg_return": avg_ret},
+            extra={
+                "avg_return": avg_ret,
+                "success_rate": success_rate,
+                "successes": successes,
+                "resolved_max_steps": resolved_max_steps,
+                "episode_lengths": episode_lengths,
+                "terminated": terminated_flags,
+                "truncated": truncated_flags,
+            },
         )
         if (update + 1) % args.save_every == 0 or update == end_u - 1:
             save_grpo_checkpoint(
@@ -219,7 +277,15 @@ def main() -> int:
                 optimizer_state=optimizer.state_dict(),
                 update_index=update,
                 args=vars(args),
-                extra={"avg_return": avg_ret},
+                extra={
+                    "avg_return": avg_ret,
+                    "success_rate": success_rate,
+                    "successes": successes,
+                    "resolved_max_steps": resolved_max_steps,
+                    "episode_lengths": episode_lengths,
+                    "terminated": terminated_flags,
+                    "truncated": truncated_flags,
+                },
             )
 
     print(f"Done. Artifacts under {out}")

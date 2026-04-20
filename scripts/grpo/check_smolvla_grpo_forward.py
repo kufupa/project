@@ -16,6 +16,7 @@ if str(_REPO / "src") not in sys.path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--env-backend", choices=("custom", "official_lerobot"), default="custom")
     args = parser.parse_args()
 
     from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process
@@ -27,15 +28,16 @@ def main() -> int:
         _resolve_task_text,
     )
 
-    bundle, action_dim = load_bundle_for_grpo(args.checkpoint, task="push-v3")
+    task = "push-v3"
+    bundle, action_dim = load_bundle_for_grpo(args.checkpoint, task=task, env_backend=args.env_backend)
     task_text = _resolve_task_text("push-v3", override=None)
-    env_h = PushV3GRPOEnv(task="push-v3")
+    env_h = None
     cam = _resolve_camera_name()
     flip = _resolve_flip_corner2()
 
     wrapper = MetaWorldSmolVLAGRPOPolicy(
         bundle,
-        task="push-v3",
+        task=task,
         task_text=task_text,
         camera_name=cam,
         flip_corner2=flip,
@@ -47,18 +49,29 @@ def main() -> int:
     freeze_all_but_grpo_trainables(bundle.policy)
     bundle.policy.train()
 
-    seed_metaworld_process(0)
-    if env_h._tasks:  # noqa: SLF001
-        env_h.set_task_for_episode(0)
-    obs = gymnasium_reset_strict(env_h.inner, 0)
-    if isinstance(obs, tuple):
-        obs = obs[0]
-    proc = wrapper.build_proc_batch(obs, env_h.inner)
-    proc_d = wrapper._proc_to_device(proc)  # noqa: SLF001
-    mean, log_std = bundle.policy.select_action_distr_params(proc_d)
-    loss = mean.sum() + log_std.sum()
-    loss.backward()
-    env_h.close()
+    try:
+        if args.env_backend == "official_lerobot":
+            from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+            env_h = OfficialLeRobotMetaWorldGRPORollout(task=task)
+            obs = env_h.reset(0)
+            proc = env_h.build_proc(obs, bundle=bundle)
+        else:
+            env_h = PushV3GRPOEnv(task=task)
+            seed_metaworld_process(0)
+            if env_h._tasks:  # noqa: SLF001
+                env_h.set_task_for_episode(0)
+            obs = gymnasium_reset_strict(env_h.inner, 0)
+            if isinstance(obs, tuple):
+                obs = obs[0]
+            proc = wrapper.build_proc_batch(obs, env_h.inner)
+        proc_d = wrapper._proc_to_device(proc)  # noqa: SLF001
+        mean, log_std = bundle.policy.select_action_distr_params(proc_d)
+        loss = mean.sum() + log_std.sum()
+        loss.backward()
+    finally:
+        if env_h is not None:
+            env_h.close()
     print("OK: forward+backward on distr params completed.")
     return 0
 

@@ -23,6 +23,10 @@ from smolvla_pipeline.evaluator import (
     _resolve_task_text,
     _safe_success,
 )
+from smolvla_grpo.lerobot_metaworld_adapter import (
+    OfficialLeRobotMetaWorldGRPORollout,
+    resolve_lerobot_horizon,
+)
 from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
 
 
@@ -133,9 +137,17 @@ def collect_rollout_group(
     group_size: int,
     action_dim: int,
     device: torch.device,
+    env_backend: str = "custom",
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` trajectories from same seed/task (GRPO group)."""
-    env_h = PushV3GRPOEnv(task=task)
+    requested_max_steps = int(max_steps)
+    if env_backend == "official_lerobot":
+        env_h = OfficialLeRobotMetaWorldGRPORollout(task=task)
+        max_steps = resolve_lerobot_horizon(env_h, max_steps)
+    elif env_backend == "custom":
+        env_h = PushV3GRPOEnv(task=task)
+    else:
+        raise ValueError("env_backend must be 'custom' or 'official_lerobot'")
     camera_name = _resolve_camera_name()
     flip_corner2 = _resolve_flip_corner2()
     old_wrapper = MetaWorldSmolVLAGRPOPolicy(
@@ -154,23 +166,47 @@ def collect_rollout_group(
     for r in range(group_size):
         gen.manual_seed(int(reset_seed) * 1000003 + r * 7919)
         traj = RolloutTrajectory(reset_seed=reset_seed, rollout_index=r)
-        seed_metaworld_process(int(reset_seed))
-        env_h.set_task_for_episode(episode_index)
-        obs = env_h.reset(reset_seed)
+        traj.metadata["task"] = task
+        traj.metadata["env_backend"] = env_backend
+        traj.metadata["requested_max_steps"] = requested_max_steps
+        traj.metadata["resolved_max_steps"] = int(max_steps)
+        if env_backend == "official_lerobot":
+            obs = env_h.reset(reset_seed)
+            try:
+                policy_old.reset()
+            except Exception:
+                pass
+        else:
+            seed_metaworld_process(int(reset_seed))
+            env_h.set_task_for_episode(episode_index)
+            obs = env_h.reset(reset_seed)
         terminated = False
         truncated = False
         for _step in range(max_steps):
-            proc = old_wrapper.build_proc_batch(obs, env_h.inner)
+            if env_backend == "official_lerobot":
+                proc = env_h.build_proc(obs, bundle=bundle)
+            else:
+                proc = old_wrapper.build_proc_batch(obs, env_h.inner)
             traj.proc_snapshots.append(detach_proc_snapshot(proc))
             with torch.no_grad():
                 step = old_wrapper.sample_action_from_proc(proc, rng=gen)
             traj.exec_actions.append(step.exec_action_np.reshape(-1).tolist())
             traj.unsquashed_actions.append(step.unsquashed.cpu())
             traj.log_probs.append(step.log_prob.cpu())
-            obs, reward, terminated, truncated, info = env_h.step(step.exec_action_np)
+            if env_backend == "official_lerobot":
+                action_batch = step.exec_action_np.reshape(1, -1).astype(np.float32)
+                env_step = env_h.step(action_batch)
+                obs = env_step.observation
+                reward = env_step.reward
+                terminated = env_step.terminated
+                truncated = env_step.truncated
+                success = env_step.success
+            else:
+                obs, reward, terminated, truncated, info = env_h.step(step.exec_action_np)
+                success = _safe_success(info)
             traj.rewards.append(float(reward))
-            traj.successes.append(_safe_success(info))
-            if terminated or truncated:
+            traj.successes.append(bool(success))
+            if success or terminated or truncated:
                 traj.terminated = bool(terminated)
                 traj.truncated = bool(truncated)
                 break
@@ -179,11 +215,24 @@ def collect_rollout_group(
     return rollouts
 
 
-def load_bundle_for_grpo(checkpoint: str, *, task: str = "push-v3") -> tuple[_SmolVLABundle, int]:
+def load_bundle_for_grpo(
+    checkpoint: str,
+    *,
+    task: str = "push-v3",
+    env_backend: str = "custom",
+) -> tuple[_SmolVLABundle, int]:
     bundle = _load_smolvla_bundle(checkpoint)
-    env_probe = PushV3GRPOEnv(task=task)
+    if env_backend == "official_lerobot":
+        env_probe = OfficialLeRobotMetaWorldGRPORollout(task=task)
+    elif env_backend == "custom":
+        env_probe = PushV3GRPOEnv(task=task)
+    else:
+        raise ValueError("env_backend must be 'custom' or 'official_lerobot'")
     try:
-        adim = int(np.prod(env_probe.inner.action_space.shape))
+        if env_backend == "official_lerobot":
+            adim = int(env_probe.action_dim)
+        else:
+            adim = int(np.prod(env_probe.inner.action_space.shape))
     finally:
         env_probe.close()
     return bundle, adim
