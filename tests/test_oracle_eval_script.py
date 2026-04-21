@@ -93,9 +93,9 @@ def test_safe_success_supports_array_shapes():
 def test_clip_action_logs_bounds():
     mod = _load_oracle_eval_module()
     action = np.array([2.5, -2.2, 0.4], dtype=np.float32)
-    action_raw, action_clipped, out_of_bounds = mod._clip_action(action)
-    assert action_raw == [2.5, -2.2, 0.4]
-    assert action_clipped == [1.0, -1.0, 0.4]
+    action_clipped, action_raw, out_of_bounds = mod._clip_action(action)
+    np.testing.assert_allclose(action_raw, [2.5, -2.2, 0.4], rtol=0, atol=1e-5)
+    np.testing.assert_allclose(action_clipped, [1.0, -1.0, 0.4], rtol=0, atol=1e-5)
     assert out_of_bounds is True
 
 

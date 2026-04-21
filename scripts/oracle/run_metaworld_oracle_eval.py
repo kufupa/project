@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,9 +61,22 @@ def _safe_success(info: dict[str, Any]) -> bool:
 
 
 def _clip_action(action: np.ndarray, *, low: float = -1.0, high: float = 1.0) -> tuple[list[float], list[float], bool]:
+    """Return (clipped_action_for_env, raw_action_from_policy, any_axis_oob)."""
     action_clipped = np.clip(action, low, high)
     action_out_of_bounds = bool(np.any((action < low) | (action > high)))
-    return action.tolist(), action_clipped.tolist(), action_out_of_bounds
+    return action_clipped.tolist(), action.tolist(), action_out_of_bounds
+
+
+def _seed_all(seed: int) -> None:
+    """MetaWorld / MuJoCo still sample from global RNG; env.reset(seed=) alone is not enough."""
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    try:
+        import torch
+
+        torch.manual_seed(int(seed))
+    except Exception:
+        pass
 
 
 def _render_rgb_frame(
@@ -168,6 +182,7 @@ def main() -> int:
 
     start_t = time.time()
     started_at = datetime.now(timezone.utc).isoformat()
+    _seed_all(int(args.seed))
     policy = ENV_POLICY_MAP[args.task]()
     action_telemetry = _as_bool(args.action_telemetry)
 
@@ -204,10 +219,12 @@ def main() -> int:
             if save_frames:
                 frames_dir.mkdir(parents=True, exist_ok=True)
 
+            reset_seed = int(args.seed) + int(episode_index)
+            _seed_all(reset_seed)
+
             if tasks:
                 env.set_task(tasks[episode_index % len(tasks)])
 
-            reset_seed = int(args.seed) + int(episode_index)
             obs, info = env.reset(seed=reset_seed)
             _ = info
             rewards: list[float] = []
@@ -231,9 +248,8 @@ def main() -> int:
                     obs_np = np.asarray(obs, dtype=np.float64)
                     action = policy.get_action(obs_np)
                     action_list = np.asarray(action, dtype=np.float32).reshape(-1)
-                    action_list_f = action_list.tolist()
-                    action_to_execute_f, action_clipped_f, action_out_of_bounds = _clip_action(action_list)
-                    obs, reward, terminated, truncated, info = env.step(action_to_execute_f)
+                    action_clipped_f, action_raw_f, action_out_of_bounds = _clip_action(action_list)
+                    obs, reward, terminated, truncated, info = env.step(action_clipped_f)
                     info_d = info if isinstance(info, dict) else {}
                     step_success = _safe_success(info_d)
                     episode_success = episode_success or step_success
@@ -241,14 +257,14 @@ def main() -> int:
 
                     line = {
                         "step": step_idx,
-                        "action": action_list_f,
+                        "action": action_clipped_f,
                         "reward": float(reward),
                         "terminated": bool(terminated),
                         "truncated": bool(truncated),
                         "success": bool(step_success),
                     }
                     if action_telemetry:
-                        line["action_raw"] = action_list_f
+                        line["action_raw"] = action_raw_f
                         line["action_clipped"] = action_clipped_f
                         line["action_out_of_bounds"] = bool(action_out_of_bounds)
                     action_fp.write(json.dumps(line) + "\n")
