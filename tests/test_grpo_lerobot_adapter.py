@@ -13,14 +13,14 @@ _REPO = Path(__file__).resolve().parents[1]
 class FakeVectorEnv:
     """Tiny SyncVectorEnv-like fake for official GRPO adapter tests."""
 
-    class FakeActionSpace:
-        shape = (1, 4)
+    class FakeSingleActionSpace:
+        shape = (4,)
 
-    num_envs = 1
-    action_space = FakeActionSpace()
+    single_action_space = FakeSingleActionSpace()
     metadata = {"render_fps": 80}
 
-    def __init__(self, *, step_info: dict | None = None) -> None:
+    def __init__(self, *, n_envs: int = 1, step_info: dict | None = None) -> None:
+        self.num_envs = int(n_envs)
         self.actions: list[np.ndarray] = []
         self.closed = False
         self.reset_seeds = None
@@ -28,32 +28,35 @@ class FakeVectorEnv:
 
     def reset(self, seed=None):
         self.reset_seeds = seed
+        n = self.num_envs
         return {
-            "pixels": np.zeros((1, 480, 480, 3), dtype=np.uint8),
-            "agent_pos": np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float64),
+            "pixels": np.zeros((n, 480, 480, 3), dtype=np.uint8),
+            "agent_pos": np.tile(np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float64), (n, 1)),
         }, {}
 
     def step(self, action):
         action_np = np.asarray(action, dtype=np.float32)
         self.actions.append(action_np)
+        n = self.num_envs
+        assert action_np.shape == (n, 4), action_np.shape
         return (
             {
-                "pixels": np.ones((1, 480, 480, 3), dtype=np.uint8),
-                "agent_pos": np.array([[4.0, 3.0, 2.0, 1.0]], dtype=np.float64),
+                "pixels": np.ones((n, 480, 480, 3), dtype=np.uint8),
+                "agent_pos": np.tile(np.array([[4.0, 3.0, 2.0, 1.0]], dtype=np.float64), (n, 1)),
             },
-            np.array([7.0], dtype=np.float32),
-            np.array([True]),
-            np.array([False]),
+            np.full((n,), 7.0, dtype=np.float32),
+            np.ones((n,), dtype=bool),
+            np.zeros((n,), dtype=bool),
             self.step_info,
         )
 
     def call(self, name):
         if name == "_max_episode_steps":
-            return [500]
+            return (500,) * self.num_envs
         if name == "task_description":
-            return ["assemble the nut onto the peg"]
+            return tuple(["assemble the nut onto the peg"] * self.num_envs)
         if name == "task":
-            return ["assembly-v3"]
+            return tuple(["assembly-v3"] * self.num_envs)
         raise KeyError(name)
 
     def close(self):
@@ -66,14 +69,15 @@ def _install_fake_official_lerobot(
     task: str = "assembly-v3",
     envs_by_task: dict | None = None,
     step_info: dict | None = None,
+    n_envs: int = 1,
 ):
-    fake_vec = FakeVectorEnv(step_info=step_info)
+    fake_vec = FakeVectorEnv(n_envs=n_envs, step_info=step_info)
 
     def fake_make_env(cfg, *, n_envs, use_async_envs, trust_remote_code=False):
         assert getattr(cfg, "type") == "metaworld"
         assert getattr(cfg, "task") == task
         assert getattr(cfg, "obs_type") == "pixels_agent_pos"
-        assert n_envs == 1
+        assert n_envs == fake_vec.num_envs
         assert use_async_envs is False
         assert trust_remote_code is False
         return envs_by_task if envs_by_task is not None else {"assembly-v3": {0: fake_vec}}
@@ -95,7 +99,8 @@ def _install_fake_official_lerobot(
 
     def fake_add_envs_task(env, observation):
         observation = dict(observation)
-        observation["task"] = env.call("task_description")
+        td = env.call("task_description")
+        observation["task"] = list(td) if isinstance(td, tuple) else td
         return observation
 
     import lerobot.envs.configs as configs
@@ -141,6 +146,38 @@ def test_official_adapter_uses_make_env_and_vector_contract(monkeypatch):
     assert fake_vec.actions[-1].shape == (1, 4)
     rollout.close()
     assert fake_vec.closed is True
+
+
+def test_official_adapter_step_batch_matches_n_envs(monkeypatch):
+    fin = np.array([{"is_success": True}, {"is_success": False}], dtype=object)
+    _install_fake_official_lerobot(monkeypatch, n_envs=2, step_info={"final_info": fin})
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=2)
+    try:
+        rollout.reset(42)
+        b = rollout.step_batch(np.zeros((2, 4), dtype=np.float32))
+        assert b.reward.shape == (2,)
+        assert b.success.tolist() == [True, False]
+    finally:
+        rollout.close()
+
+
+def test_official_adapter_rejects_step_when_n_envs_gt_1(monkeypatch):
+    _install_fake_official_lerobot(monkeypatch, n_envs=2)
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=2)
+    try:
+        rollout.reset(0)
+        try:
+            rollout.step(np.zeros((1, 4), dtype=np.float32))
+        except ValueError as exc:
+            assert "step_batch" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+    finally:
+        rollout.close()
 
 
 def test_official_adapter_rejects_non_batched_vector_action(monkeypatch):
@@ -189,6 +226,8 @@ def test_official_adapter_reads_vector_final_info_success(monkeypatch):
 def test_phase11_rollout_exposes_official_backend_static():
     text = (_REPO / "src" / "smolvla_grpo" / "phase11_rollout.py").read_text(encoding="utf-8")
     assert "env_backend" in text
+    assert "rollout_execution" in text
+    assert "collect_official_lerobot_vector_rollout_group" in text
     assert "OfficialLeRobotMetaWorldGRPORollout" in text
     assert "resolve_lerobot_horizon" in text
     assert "env_h.build_proc" in text
@@ -204,11 +243,22 @@ def test_grpo_scripts_expose_official_lerobot_backend_and_success_logging():
     for text in (train, smoke, forward):
         assert "--env-backend" in text
         assert "official_lerobot" in text
+    assert "--rollout-execution" in train
+    assert "--rollout-execution" in smoke
+    assert "--action-transform" in train
+    assert "--run-label" in train
     assert "env_backend=args.env_backend" in train
     assert "success_rate" in train
     assert "successes" in train
     assert "resolved_max_steps" in train
     assert "episode_lengths" in train
+    assert "num_env_steps" in train
+    assert "rollout_seconds" in train
+    assert "optimize_seconds" in train
+    assert "update_seconds" in train
+    assert "phase111_grpo_update" in train
+    assert "action_clip_fraction" in train
+    assert "action_clip_any_fraction" in train
     assert "terminated" in train
     assert "truncated" in train
     rollout = (_REPO / "src" / "smolvla_grpo" / "phase11_rollout.py").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""MetaWorld SmolVLA GRPO policy: fork `select_action_distr_params` + Gaussian + tanh log-prob (safe-robot style)."""
+"""MetaWorld SmolVLA GRPO policy: fork `select_action_distr_params` + Gaussian log-prob."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import torch.nn as nn
 
 from smolvla_pipeline.evaluator import (
     _SmolVLABundle,
-    _coerce_exec_action,
     _collect_policy_rgb,
     _flatten_obs_state,
     _maybe_flip_corner2_frame,
@@ -27,9 +26,23 @@ class SampledStep:
     """One env step: exec action for MetaWorld + tensors for GRPO."""
 
     exec_action_np: np.ndarray
-    squished_policy_tensor: torch.Tensor
+    policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
+    action_clip_fraction: float = 0.0
+    action_clip_any: bool = False
+
+
+@dataclass
+class SampledBatchStep:
+    """Batched env step: actions aligned with vector env rows."""
+
+    exec_action_np: np.ndarray
+    policy_tensor: torch.Tensor
+    unsquashed: torch.Tensor
+    log_prob: torch.Tensor
+    action_clip_fraction: np.ndarray
+    action_clip_any: np.ndarray
 
 
 class MetaWorldSmolVLAGRPOPolicy:
@@ -46,6 +59,9 @@ class MetaWorldSmolVLAGRPOPolicy:
         action_dim: int,
         eps: float = 1e-8,
         policy_module: Any | None = None,
+        action_transform: str = "no_tanh",
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
     ) -> None:
         self.bundle = bundle
         self.task_text = task_text
@@ -55,6 +71,19 @@ class MetaWorldSmolVLAGRPOPolicy:
         self.eps = float(eps)
         self._policy: Any = policy_module if policy_module is not None else bundle.policy
         self._agent_dim, self._env_dim = _smolvla_state_dims(self._policy)
+        if action_transform not in ("no_tanh", "tanh_norm_ablation"):
+            raise ValueError("action_transform must be 'no_tanh' or 'tanh_norm_ablation'")
+        self.action_transform = action_transform
+        self.action_low = (
+            np.asarray(action_low, dtype=np.float32).reshape(self.action_dim)
+            if action_low is not None
+            else np.full((self.action_dim,), -1.0, dtype=np.float32)
+        )
+        self.action_high = (
+            np.asarray(action_high, dtype=np.float32).reshape(self.action_dim)
+            if action_high is not None
+            else np.full((self.action_dim,), 1.0, dtype=np.float32)
+        )
 
     def build_proc_batch(self, obs: Any, env: Any) -> Any:
         flat = _flatten_obs_state(obs)
@@ -99,6 +128,31 @@ class MetaWorldSmolVLAGRPOPolicy:
         log_prob_u = log_prob_u.sum(dim=-1)
         correction = torch.sum(torch.log(1 - squished.pow(2) + eps), dim=-1)
         return log_prob_u - correction
+
+    @staticmethod
+    def calculate_gaussian_log_prob(
+        mean: torch.Tensor,
+        log_std: torch.Tensor,
+        sample: torch.Tensor,
+    ) -> torch.Tensor:
+        std = torch.exp(log_std)
+        var = std * std
+        return -0.5 * (((sample - mean) ** 2) / var + 2 * log_std + math.log(2 * math.pi)).sum(dim=-1)
+
+    def _postprocess_and_clip(self, policy_tensor: torch.Tensor) -> tuple[np.ndarray, float, bool]:
+        out = self.bundle.postprocessor(policy_tensor)
+        if hasattr(out, "detach"):
+            raw_np = out.detach().float().cpu().numpy().reshape(-1)
+        else:
+            raw_np = np.asarray(out, dtype=np.float32).reshape(-1)
+        if raw_np.size != self.action_dim:
+            raise RuntimeError(
+                f"Policy action dim mismatch: expected {self.action_dim}, got {raw_np.size}. "
+                "Refusing silent pad/truncate."
+            )
+        clipped = np.clip(raw_np, self.action_low, self.action_high).astype(np.float32, copy=False)
+        changed = np.not_equal(clipped, raw_np)
+        return clipped, float(np.mean(changed)), bool(np.any(changed))
 
     def assert_grpo_api(self) -> None:
         """Raise if forked LeRobot GRPO hooks are missing."""
@@ -147,19 +201,71 @@ class MetaWorldSmolVLAGRPOPolicy:
         else:
             noise = torch.randn(mean.shape, generator=rng, device=mean.device, dtype=mean.dtype)
         unsquashed = mean + std * noise
-        squished = torch.tanh(unsquashed)
-        log_prob = self.calculate_log_prob(mean, log_std, unsquashed, squished, eps=self.eps)
-        out = self.bundle.postprocessor(squished)
-        exec_np = _coerce_exec_action(
-            out,
-            action_dim=self.action_dim,
-            np_module=np,
-        )
+        if self.action_transform == "tanh_norm_ablation":
+            policy_tensor = torch.tanh(unsquashed)
+            log_prob = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+        else:
+            policy_tensor = unsquashed
+            log_prob = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
+        exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
         return SampledStep(
             exec_action_np=exec_np,
-            squished_policy_tensor=squished.detach(),
+            policy_tensor=policy_tensor.detach(),
             unsquashed=unsquashed.detach(),
             log_prob=log_prob.detach(),
+            action_clip_fraction=clip_fraction,
+            action_clip_any=clip_any,
+        )
+
+    def sample_action_batch_from_proc(
+        self,
+        proc: Any,
+        *,
+        reset_seed: int,
+        rollout_index_offset: int,
+        n_envs: int,
+    ) -> SampledBatchStep:
+        """Sample one action per batch row; RNG matches serial `collect_rollout_group` indexing."""
+        proc_d = self._proc_to_device(proc)
+        mean, log_std = self._policy.select_action_distr_params(proc_d)
+        b = int(mean.shape[0])
+        if b != int(n_envs):
+            raise ValueError(f"proc batch dim {b} != n_envs {int(n_envs)}")
+        exec_rows: list[np.ndarray] = []
+        policy_rows: list[torch.Tensor] = []
+        unsq_rows: list[torch.Tensor] = []
+        lp_rows: list[torch.Tensor] = []
+        clip_frac_rows: list[float] = []
+        clip_any_rows: list[bool] = []
+        base = int(rollout_index_offset)
+        for r in range(b):
+            gen = torch.Generator(device=mean.device)
+            gen.manual_seed(int(reset_seed) * 1000003 + (base + r) * 7919)
+            m = mean[r : r + 1]
+            ls = log_std[r : r + 1]
+            std = torch.exp(ls)
+            noise = torch.randn(m.shape, generator=gen, device=m.device, dtype=m.dtype)
+            unsquashed = m + std * noise
+            if self.action_transform == "tanh_norm_ablation":
+                policy_tensor = torch.tanh(unsquashed)
+                log_prob = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+            else:
+                policy_tensor = unsquashed
+                log_prob = self.calculate_gaussian_log_prob(m, ls, unsquashed)
+            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
+            exec_rows.append(np.asarray(exec_np, dtype=np.float32))
+            policy_rows.append(policy_tensor.detach())
+            unsq_rows.append(unsquashed.detach())
+            lp_rows.append(log_prob.detach())
+            clip_frac_rows.append(clip_fraction)
+            clip_any_rows.append(clip_any)
+        return SampledBatchStep(
+            exec_action_np=np.stack(exec_rows, axis=0),
+            policy_tensor=torch.cat(policy_rows, dim=0),
+            unsquashed=torch.cat(unsq_rows, dim=0),
+            log_prob=torch.cat(lp_rows, dim=0).reshape(b),
+            action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
+            action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
         )
 
     def sample_action(
@@ -201,8 +307,10 @@ class MetaWorldSmolVLAGRPOPolicy:
         u = unsquashed_actions.to(mean.device)
         if u.shape != mean.shape:
             u = u.reshape(mean.shape)
-        squished = torch.tanh(u)
-        return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        if self.action_transform == "tanh_norm_ablation":
+            squished = torch.tanh(u)
+            return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        return self.calculate_gaussian_log_prob(mean, log_std, u)
 
     def get_action_probs_chunk(
         self,

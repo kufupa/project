@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=phase111_single_task_grpo_%j.out
 #SBATCH --error=phase111_single_task_grpo_%j.err
 #SBATCH --export=NIL
@@ -57,15 +57,21 @@ SAVE_EVERY="${GRPO_PHASE111_SAVE_EVERY:-5}"
 # Phase11 and the CS238 GRPO runs. Use GRPO_PHASE111_MAX_STEPS=0 only when
 # intentionally training on the full official LeRobot horizon (500 for v3).
 MAX_STEPS="${GRPO_PHASE111_MAX_STEPS:-120}"
+ROLLOUT_EXEC="${GRPO_PHASE111_ROLLOUT_EXECUTION:-serial}"
+ASYNC_START="${GRPO_PHASE111_ASYNC_START_METHOD:-forkserver}"
 LR="${GRPO_PHASE111_LR:-1e-5}"
 INIT_LOG_STD="${GRPO_PHASE111_INIT_LOG_STD:--2.0}"
 EULER_NOISE="${GRPO_PHASE111_EULER_NOISE:-0.2}"
+ACTION_TRANSFORM="${GRPO_PHASE111_ACTION_TRANSFORM:-no_tanh}"
+RUN_LABEL="${GRPO_PHASE111_RUN_LABEL:-no_tanh_main}"
 RESUME="${GRPO_PHASE111_RESUME:-}"
 OUT="${GRPO_PHASE111_OUT:-${PROJECT_ROOT}/artifacts/phase111_on_grpo_lerobot/${TASK}/g${GROUP_SIZE}_u${NUM_UPDATES}_seed${SEED_BASE}}"
 
 # Optional positional overrides to avoid Slurm --export=NIL env retrieval issues:
 #   $1 task, $2 num_updates, $3 group_size, $4 max_steps, $5 save_every,
-#   $6 seed_base, $7 start_update, $8 out_dir, $9 resume_path
+#   $6 seed_base, $7 start_update, $8 out_dir, $9 resume_path,
+#   $10 rollout_execution, $11 async_start_method, $12 action_transform,
+#   $13 run_label
 if [[ $# -ge 1 && -n "${1:-}" ]]; then TASK="${1}"; fi
 if [[ $# -ge 2 && -n "${2:-}" ]]; then NUM_UPDATES="${2}"; fi
 if [[ $# -ge 3 && -n "${3:-}" ]]; then GROUP_SIZE="${3}"; fi
@@ -75,6 +81,10 @@ if [[ $# -ge 6 && -n "${6:-}" ]]; then SEED_BASE="${6}"; fi
 if [[ $# -ge 7 && -n "${7:-}" ]]; then START_UPDATE="${7}"; fi
 if [[ $# -ge 8 && -n "${8:-}" ]]; then OUT="${8}"; fi
 if [[ $# -ge 9 && -n "${9:-}" ]]; then RESUME="${9}"; fi
+if [[ $# -ge 10 && -n "${10:-}" ]]; then ROLLOUT_EXEC="${10}"; fi
+if [[ $# -ge 11 && -n "${11:-}" ]]; then ASYNC_START="${11}"; fi
+if [[ $# -ge 12 && -n "${12:-}" ]]; then ACTION_TRANSFORM="${12}"; fi
+if [[ $# -ge 13 && -n "${13:-}" ]]; then RUN_LABEL="${13}"; fi
 
 echo "[phase111-single] checkpoint=${CHECKPOINT}"
 echo "[phase111-single] out=${OUT}"
@@ -82,10 +92,20 @@ echo "[phase111-single] task=${TASK}"
 echo "[phase111-single] num_updates=${NUM_UPDATES}"
 echo "[phase111-single] group_size=${GROUP_SIZE}"
 echo "[phase111-single] max_steps=${MAX_STEPS}"
+echo "[phase111-single] rollout_execution=${ROLLOUT_EXEC}"
+echo "[phase111-single] async_start_method=${ASYNC_START}"
+echo "[phase111-single] action_transform=${ACTION_TRANSFORM}"
+echo "[phase111-single] run_label=${RUN_LABEL}"
 
 EXTRA=()
 if [[ -n "${RESUME}" ]]; then
   EXTRA+=(--resume "${RESUME}")
+fi
+if [[ "${ROLLOUT_EXEC}" != "serial" ]]; then
+  EXTRA+=(--rollout-execution "${ROLLOUT_EXEC}")
+fi
+if [[ "${ROLLOUT_EXEC}" == "vector_async" ]]; then
+  EXTRA+=(--async-start-method "${ASYNC_START}")
 fi
 
 "${GRPO_PYTHON}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
@@ -102,6 +122,8 @@ fi
   --lr "${LR}" \
   --init-log-std "${INIT_LOG_STD}" \
   --euler-step-noise-std "${EULER_NOISE}" \
+  --action-transform "${ACTION_TRANSFORM}" \
+  --run-label "${RUN_LABEL}" \
   "${EXTRA[@]}"
 
 test -f "${OUT}/train_manifest.json"
@@ -123,14 +145,31 @@ manifest = json.loads((out / "train_manifest.json").read_text())
 rows = [json.loads(line) for line in (out / "progress.jsonl").read_text().splitlines() if line.strip()]
 assert manifest["env_backend"] == "official_lerobot"
 assert manifest["task"] == task
+assert manifest["rollout_execution"] in {"serial", "vector_sync", "vector_async"}
+assert manifest["action_transform"] in {"no_tanh", "tanh_norm_ablation"}
+assert manifest["run_label"]
+if manifest["rollout_execution"] == "vector_async":
+    assert manifest["async_start_method"] == "forkserver"
 assert rows, "progress.jsonl has no rows"
+assert len(rows) == num_updates, f"expected {num_updates} progress rows, got {len(rows)}"
 row = rows[-1]
 assert row["env_backend"] == "official_lerobot"
+assert row["rollout_execution"] == manifest["rollout_execution"]
+assert row["action_transform"] == manifest["action_transform"]
+assert row["run_label"] == manifest["run_label"]
 assert "returns" in row
 assert "successes" in row
 assert "success_rate" in row
 assert "episode_lengths" in row
 assert "resolved_max_steps" in row
+assert "num_env_steps" in row
+assert "action_clip_fraction" in row
+assert "action_clip_any_fraction" in row
+assert "rollout_seconds" in row
+assert "optimize_seconds" in row
+assert "update_seconds" in row
+if num_updates >= 100:
+    assert (out / "checkpoints" / "update_0100.pt").is_file()
 print(
     "PHASE111_SINGLE_TASK_GRPO_OK",
     f"rows={len(rows)}",
