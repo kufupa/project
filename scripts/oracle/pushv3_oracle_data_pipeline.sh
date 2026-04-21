@@ -253,7 +253,12 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   log_info "  ${BASELINE_CMD[*]}"
   predicted_timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
   task_slug="$(printf '%s' "${TASK}" | tr -c 'A-Za-z0-9' '_' | tr '[:upper:]' '[:lower:]')"
-  predicted_output="${OUTPUT_ROOT}/run_${predicted_timestamp}_ep${EPISODES}_voracle_t${task_slug}_s${SEED}_r*"
+  run_prefix_raw="${ORACLE_RUN_PREFIX:-${RUN_NAME_PREFIX:-}}"
+  predicted_prefix=""
+  if [[ -n "${run_prefix_raw}" ]]; then
+    predicted_prefix="$(printf '%s' "${run_prefix_raw}" | tr -c 'A-Za-z0-9' '_' | tr '[:upper:]' '[:lower:]' | sed 's/__*/_/g' | sed 's/^_\|_$//g')_"
+  fi
+  predicted_output="${OUTPUT_ROOT}/${predicted_prefix}run_${predicted_timestamp}_ep${EPISODES}_voracle_t${task_slug}_s${SEED}_r*"
   log_info "Expected eval output directory: ${predicted_output}"
   log_info "Skipping export/summarization."
   exit 0

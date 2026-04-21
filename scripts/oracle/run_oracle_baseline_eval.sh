@@ -119,10 +119,19 @@ fi
 mkdir -p "${OUTPUT_ROOT}"
 timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
 task_slug="$(printf '%s' "${TASK}" | tr -c 'A-Za-z0-9' '_' | tr '[:upper:]' '[:lower:]')"
+run_prefix_raw="${ORACLE_RUN_PREFIX:-${RUN_NAME_PREFIX:-}}"
+run_prefix_slug=""
+if [[ -n "${run_prefix_raw}" ]]; then
+  run_prefix_slug="$(printf '%s' "${run_prefix_raw}" | tr -c 'A-Za-z0-9' '_' | tr '[:upper:]' '[:lower:]' | sed 's/__*/_/g' | sed 's/^_\|_$//g')"
+fi
 output_dir=""
 for _ in $(seq 1 10); do
   nonce="$(date +%s%N | tail -c 7)"
-  candidate="${OUTPUT_ROOT}/run_${timestamp}_ep${EPISODES}_voracle_t${task_slug}_s${SEED}_r${nonce}"
+  if [[ -n "${run_prefix_slug}" ]]; then
+    candidate="${OUTPUT_ROOT}/${run_prefix_slug}_run_${timestamp}_ep${EPISODES}_voracle_t${task_slug}_s${SEED}_r${nonce}"
+  else
+    candidate="${OUTPUT_ROOT}/run_${timestamp}_ep${EPISODES}_voracle_t${task_slug}_s${SEED}_r${nonce}"
+  fi
   if mkdir "${candidate}" 2>/dev/null; then
     output_dir="${candidate}"
     break

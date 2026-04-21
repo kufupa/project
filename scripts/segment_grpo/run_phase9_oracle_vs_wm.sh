@@ -14,7 +14,12 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 : "${JEPA_REPO:=${HOME}/.cache/torch/hub/facebookresearch_jepa-wms_main}"
-: "${ORACLE_RUN_DIR:=${PROJECT_ROOT}/artifacts/phase06_oracle_baseline/run_20260411T131839Z_ep60_voracle_tpush_v3_s1000_r402093}"
+
+if [[ -z "${ORACLE_RUN_DIR:-}" ]]; then
+  echo "[phase9] ERROR: ORACLE_RUN_DIR must point to a phase06 oracle run directory (manifest + frames)." >&2
+  echo "[phase9] Example: export ORACLE_RUN_DIR=/path/to/run_*_voracle_*" >&2
+  exit 2
+fi
 
 if [[ ! -d "${JEPA_REPO}" ]]; then
   echo "[phase9] ERROR: JEPA_REPO is not a directory: ${JEPA_REPO}" >&2
