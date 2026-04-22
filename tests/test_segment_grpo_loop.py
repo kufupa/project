@@ -14,9 +14,12 @@ SRC_ROOT = ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+import segment_grpo_loop as segment_grpo_loop_module
+
 from segment_grpo_loop import (
     DecodeTrace,
     ScoreTrace,
+    _clip_action_for_metaworld_box,
     _all_candidates_wm_goal_l2_rows,
     _build_real_vs_pred_strip,
     _comparison_ridx_for_column,
@@ -37,11 +40,18 @@ from segment_grpo_loop import (
     _wm_megastep_action_range_footer_line,
     _stitch_comparison_strip,
     _write_comparison_segment_strip,
+    _reset_env,
     rollout_with_chunks,
     score_chunk_by_goal_latent,
     WMBundle,
 )
 
+
+def test_clip_action_for_metaworld_box_matches_oracle_eval_contract() -> None:
+    a = np.array([2.0, -1.5, 0.25], dtype=np.float32)
+    clipped = _clip_action_for_metaworld_box(a)
+    assert clipped.dtype == np.float32
+    assert np.allclose(clipped, np.array([1.0, -1.0, 0.25], dtype=np.float32))
 
 
 def test_replay_rollout_contracts_shape_and_scores() -> None:
@@ -1445,3 +1455,68 @@ def test_oracle_action_mode_raises_when_sequence_too_short() -> None:
             dry_run=True,
             oracle_action_sequence=oracle,
         )
+
+
+def test_reset_env_strict_requires_reset_seed_kwarg() -> None:
+    class LegacyEnv:
+        def reset(self):  # noqa: ANN001
+            return ({"obs": 1}, {})
+
+    with pytest.raises(RuntimeError, match=r"env\.reset\(seed="):
+        _reset_env(LegacyEnv(), 0)
+
+
+def test_reset_env_delegates_to_gymnasium_reset_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def _fake_strict(env: object, seed: int) -> tuple[dict[str, bool], dict[str, bool]]:
+        calls.append((id(env), int(seed)))
+        return ({"ok": True}, {"i": True})
+
+    monkeypatch.setattr(segment_grpo_loop_module, "gymnasium_reset_strict", _fake_strict)
+    monkeypatch.setattr(
+        segment_grpo_loop_module,
+        "_extract_image_and_proprio",
+        lambda _obs, _env: (
+            np.zeros((2, 2, 3), dtype=np.uint8),
+            np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
+        ),
+    )
+
+    class E:
+        pass
+
+    env = E()
+    img, prop, info = _reset_env(env, 99)
+    assert calls == [(id(env), 99)]
+    assert img.shape == (2, 2, 3)
+    np.testing.assert_allclose(prop, [0.1, 0.2, 0.3, 0.4])
+    assert info == {"i": True}
+
+
+def test_rollout_dry_run_oracle_sim_twice_identical_action_trace() -> None:
+    """Golden-style check without MetaWorld: same seed + oracle actions => same stepped actions."""
+    t, a = 16, 4
+    oracle = np.zeros((t, a), dtype=np.float32)
+    oracle[:, 0] = np.linspace(-0.2, 0.2, t, dtype=np.float32)
+    common = dict(
+        smolvla_bundle=None,
+        wm_bundle=None,
+        task="push-v3",
+        episode_index=0,
+        chunk_len=4,
+        num_candidates=1,
+        max_steps=10,
+        carry_mode="sim",
+        replay_root=None,
+        goal_latent_source=None,
+        seed=4242,
+        dry_run=True,
+        oracle_action_sequence=oracle,
+        oracle_action_source="pytest",
+        train_steps=0,
+    )
+    ep1, _ = rollout_with_chunks(**common)
+    ep2, _ = rollout_with_chunks(**common)
+    assert ep1.actions == ep2.actions
+    assert len(ep1.segments) == len(ep2.segments)
