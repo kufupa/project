@@ -13,17 +13,22 @@
 #
 set -euo pipefail
 
+# Slurm may copy this script under /var/spool/slurm; do not derive repo from BASH_SOURCE alone.
+# With sbatch --chdir=<project>, cwd is project; mt10_tasks.sh marks project root.
 if [[ -n "${MT10_PROJECT_ROOT:-}" ]]; then
   PROJECT_ROOT="${MT10_PROJECT_ROOT}"
-elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-  PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+elif [[ -f "$(pwd)/scripts/mt10/mt10_tasks.sh" ]]; then
+  PROJECT_ROOT="$(pwd)"
 else
-  SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  PROJECT_ROOT="$(cd "${SUBMIT_DIR}/../.." && pwd)"
+  _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PROJECT_ROOT="$(cd "${_here}/../.." && pwd)"
 fi
 
 cd "${PROJECT_ROOT}"
 mkdir -p "${PROJECT_ROOT}/logs"
+
+ART="${PROJECT_ROOT}/artifacts"
+export PUSHV3_OUTPUT_ROOT="${PUSHV3_OUTPUT_ROOT:-${ART}/mt10_phase06_oracle_baseline}"
 
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
