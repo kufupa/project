@@ -379,58 +379,136 @@ Interestingly reducing the action horizon any further wouldn't lead to any impro
 Cell values are cross-episode mean latent distances per bin. Each task has a VLA row and a \(\Delta_{\mathrm{oracle}}\) row, where \(\Delta_{\mathrm{oracle}} = \mathrm{oracle} - \mathrm{VLA}\). A positive value means oracle is farther from the world-model goal than VLA, and a negative value means oracle is closer. In this representation, larger raw values mean larger latent distance, so values closer to zero are preferable when the distance is interpreted as reconstruction error.
 
 
+% SmolVLA uses MEAN/STD normalization for state and action; visual features use IDENTITY at the policy level.
+
+% Dataset actions for MetaWorld MT50 are not pre‑clipped; they can exceed 
+% [−1,1] in the stored data.
+
+% Clipping to MetaWorld’s 
+% [−1,1] action space happens only in the env_postprocessor at rollout time.
+
+
+
+
+% Evidence:
+
+% Legacy Phase11: max_steps=120.
+% train_u1_to_u4: ~58.5 min for 4 updates = 14.6 min/update.
+% long_to25: ~295.7 min for 20 updates = 14.8 min/update.
+% Current Phase111 official:
+% pilot 0→10: ~676 min for 10 updates = 67.6 min/update.
+% resume 10→20: ~633 min for 10 updates = 63.3 min/update.
+% Slowdown: ~4.3x to 4.6x vs legacy.
+% CS238 report:
+
+% Says Model 1: 20 updates took 12.26h, avg 0.613h/update = 36.8 min/update.
+% Our current 63–68 min/update is ~1.7–1.8x slower than that.
+% But their run = LIBERO, not our MetaWorld official LeRobot path. Compare useful, not exact.
+
+
+
+
+
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l l r r}
+\hline
+Run & Task & Episodes & Success (\%) \\
+\hline
+Non-fixed reset & pick-place-wall-v3 & 20 & 55.0 \\
+Non-fixed reset & shelf-place-v3 & 20 & 30.0 \\
+Non-fixed reset & stick-pull-v3 & 20 & 0.0 \\
+Non-fixed reset & stick-push-v3 & 20 & 75.0 \\
+\hline
+Fixed reset & pick-place-wall-v3 & 20 & 0.0 \\
+Fixed reset & shelf-place-v3 & 20 & 0.0 \\
+Fixed reset & stick-pull-v3 & 20 & 0.0 \\
+Fixed reset & stick-push-v3 & 20 & 30.0 \\
+\hline
+\end{tabular}
+\caption{Phase072 hard-task evaluation, seed 1010, 20 episodes per task.}
+\end{table}
+
+
 
 
 
 % Check training data, ensure we use same tanh? / normalization method
+\paragraph{SmolVLA Meta-World checkpoint contract.}
+The public checkpoint \texttt{jadechoghari/smolvla\_metaworld} is a LeRobot SmolVLA policy fine-tuned from \texttt{lerobot/smolvla\_base} on the \texttt{lerobot/metaworld\_mt50} dataset, under Apache-2.0 license.\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld}}  Its public training configuration specifies Meta-World MT50 evaluation with RGB observations \texttt{observation.image}, proprioception \texttt{observation.state}, 4-D actions, seed \texttt{1000}, \texttt{chunk\_size=50}, \texttt{n\_action\_steps=1}, and synchronous eval environments (\texttt{use\_async\_envs=false}).  The normalization contract is \texttt{VISUAL: IDENTITY}, \texttt{STATE: MEAN\_STD}, and \texttt{ACTION: MEAN\_STD}; there is no config-level tanh action squashing contract in the official checkpoint metadata.\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld/raw/main/train_config.json}}  Therefore, for reproduction, the policy output path should preserve LeRobot's standard action unnormalization rather than assuming a tanh-squashed Gaussian action head.
 
 % VLA 0 shot - MT10 % success rate
 % check smolvla paper and reproduce results
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Method & Easy & Medium & Hard & Very Hard & Avg. \\
+    \midrule
+    SmolVLA (0.45B), zero-shot Meta-World & 82.5 & 41.8 & 45.0 & 60.0 & 57.3 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Reported SmolVLA zero-shot Meta-World success rate by difficulty bucket.}
+  \label{tab:smolvla-metaworld-reported-zero-shot}
+\end{table}
 
 % push-v3 15%
 
+\paragraph{Meta-World evaluation ledger.}
+Table~\ref{tab:mt50-eval-ledger} records the evaluation work used to debug the SmolVLA Meta-World reproduction.  The canonical path is now the official LeRobot evaluator with \texttt{jadechoghari/smolvla\_metaworld}; older custom runs are retained only as diagnostics because their wrappers and action handling differ from the current evaluation stack.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-\subsection{GRPO}
-\begin{table}[t]
-\centering
-\begin{tabular}{l l r l r r}
-\hline
-Checkpoint & 1000--1019 eval dir & 1000--1019 success\% & 1020--1049 eval dir & 1020--1049 success\% & Overall success\% \\ 
-\hline
-update\_0001.pt & eval\_grpo\_u1\_20ep (extra) & 15.00 & eval\_update0001\_seed1020\_ep30 & 16.67 & 16.00 \\
-update\_0005.pt & eval\_grpo\_u5\_20ep (extra) & 15.00 & eval\_update0005\_seed1020\_ep30 & 13.33 & 14.00 \\
-update\_0010.pt & run\_progressive/eval\_update0010\_seed1000\_ep20 & 15.00 & eval\_update0010\_seed1020\_ep30 & 6.67 & 10.00 \\
-update\_0015.pt & run\_progressive/eval\_update0015\_seed1000\_ep20 & 25.00 & eval\_update0015\_seed1020\_ep30 & 13.33 & 18.00 \\
-update\_0020.pt & run\_progressive/eval\_update0020\_seed1000\_ep20 & 0.00 & eval\_update0020\_seed1020\_ep30 & 3.33 & 2.00 \\
-update\_0025.pt & run\_progressive/eval\_update0025\_seed1000\_ep20 & 30.00 & eval\_update0025\_seed1020\_ep30 & 0.00 & 12.00 \\
-update\_0030.pt & run\_progressive/eval\_update0030\_seed1000\_ep20 & 10.00 & eval\_update0030\_seed1020\_ep30 & 13.33 & 12.00 \\
-update\_0035.pt & run\_progressive/eval\_update0035\_seed1000\_ep20 & 15.00 & eval\_update0035\_seed1020\_ep30 & 16.67 & 16.00 \\
-update\_0040.pt & run\_progressive/eval\_update0040\_seed1000\_ep20 & 10.00 & eval\_update0040\_seed1020\_ep30 & 3.33 & 6.00 \\
-update\_0045.pt & run\_progressive/eval\_update0045\_seed1000\_ep20 & 5.00 & eval\_update0045\_seed1020\_ep30 & 10.00 & 8.00 \\
-update\_0050.pt & -- & -- & eval\_update0050\_seed1020\_ep30 & 16.67 & 16.67 \\
-update\_0055.pt & -- & -- & eval\_update0055\_seed1020\_ep30 & 20.00 & 20.00 \\
-update\_0060.pt & -- & -- & eval\_update0060\_seed1020\_ep30 & 23.33 & 23.33 \\
-update\_0065.pt & -- & -- & eval\_update0065\_seed1020\_ep30 & 16.67 & 16.67 \\
-update\_0070.pt & -- & -- & eval\_update0070\_seed1020\_ep30 & 23.33 & 23.33 \\
-update\_0075.pt & -- & -- & eval\_update0075\_seed1020\_ep30 & 16.67 & 16.67 \\
-\hline
-\end{tabular}
-\caption{Phase11 GRPO checkpoints and eval success rates.}
-\label{tab:phase11-eval-success}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{p{0.22\linewidth}p{0.17\linewidth}p{0.17\linewidth}p{0.32\linewidth}}
+    \toprule
+    Run & Method / params & Result & Why kept \\
+    \midrule
+    \texttt{MT50\_Phase071\_official\_lerobot\_1task\_1ep} & Official LeRobot, assembly-v3, 1 episode, seed 1000, video on & 1/1 success & Smoke test: verified checkpoint load, environment launch, video writing, and success extraction. \\
+    \texttt{MT50\_Phase072\_official\_lerobot\_10ep} & Official LeRobot, all 50 tasks, 10 episodes each, seed 1000, 3 GPU shards, default random resets & Difficulty-macro 45.0\%; very hard 17/50 & Main reproduction baseline.  Lower than reported SmolVLA macro 57.3\%, mainly very-hard tasks. \\
+    \texttt{MT50\_Phase072\_official\_lerobot\_push\_10ep} & Official LeRobot, push-v3 only, 10 episodes, seed 1000, video off & 1/10 success & Checked no-video path and isolated slow single-task rerun. \\
+    \texttt{MT50\_Phase073\_fixed\_veryhard\_10ep\_video} & Official LeRobot, five very-hard tasks, 10 episodes each, seed 1000, \texttt{MT50\_METAWORLD\_FREEZE\_RAND\_VEC=true}, video on & 8/50 success; disassemble-v3 8/10, others 0/10 & Tested fixed object/goal reset hypothesis.  Fixed reset improves determinism, but did not recover brittle grasp tasks. \\
+    \texttt{MT50\_Phase074\_action\_debug\_3task\_3ep\_video} & Official LeRobot, shelf-place-v3/stick-pull-v3/stick-push-v3, 3 episodes each, random reset, no action transform, video and per-step action logs & 5/9 success; shelf-place 2/3, stick-pull 0/3, stick-push 3/3 & Debug run, not benchmark.  Logged normalized, postprocessed, and sent actions to test gripper/action-contract hypotheses. \\
+    \texttt{MT50\_Phase17\_official\_lerobot\_10ep\_2gpu\_full} & Official LeRobot, all 50 tasks, 10 episodes each, seed 1000, two GPU shards, very-hard tasks first, video off & In progress / awaiting final \texttt{eval\_info.json} & Overnight clean full MT50 rerun with less video overhead. \\
+    \texttt{MT50\_Phase07\_500\_1ep} and \texttt{MT50\_Phase07\_500\_10ep} & Earlier custom SmolVLA parity evaluator, 500-step episodes, seed 1000 & Diagnostic only & Useful history, but not the final benchmark path because wrappers/action handling differ from official LeRobot. \\
+    \texttt{phase11\_env\_on\_policy\_grpo} & Custom on-policy GRPO stack and environment wrapper & Diagnostic only & Out of sync with official SmolVLA eval: includes custom policy wrapper/action treatment, so not directly comparable to LeRobot MT50 scores. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Evaluation runs used during the SmolVLA Meta-World reproduction audit.}
+  \label{tab:mt50-eval-ledger}
 \end{table}
+
+\paragraph{Very-hard task check.}
+The main failure mode is concentrated in the very-hard bucket.  Summing the randomized Phase072 run and the fixed-reset Phase073 run gives: disassemble-v3 12/20 (60\%), pick-place-wall-v3 3/20 (15\%), shelf-place-v3 1/20 (5\%), stick-pull-v3 0/20 (0\%), and stick-push-v3 9/20 (45\%).  Total very-hard success is 25/100 (25\%).  Thus fixed resets alone are not a sufficient explanation for the reported-performance gap.
+
+\paragraph{Reset determinism.}
+The \texttt{MT50\_METAWORLD\_FREEZE\_RAND\_VEC=true} flag is our launcher-level switch for a runtime adapter, not a permanent edit to LeRobot.  It keeps Meta-World's \texttt{\_freeze\_rand\_vec} enabled after LeRobot task setup, so object/goal positions are reused instead of resampled at every reset.  With default LeRobot, \texttt{\_freeze\_rand\_vec=false}; a fixed seed then gives a deterministic reset sequence only if task order, number of resets, process layout, wrappers, \texttt{eval.batch\_size=1}, and \texttt{eval.use\_async\_envs=false} are unchanged.  For exact multi-GPU comparability, the safer pattern is one task per worker process, unique output directory per task, stable task order, fixed seed, synchronous envs, and explicit logging of seed/reset mode.  This is reproducible, but not automatically paper-correct: Phase073 showed fixed resets can hurt several brittle tasks.
+
+\paragraph{Action contract and gripper clipping.}
+The SmolVLA checkpoint uses LeRobot \texttt{MEAN\_STD} action unnormalization, so postprocessed actions outside \([-1,1]\) are expected before the environment boundary.  Meta-World internally clips the XYZ end-effector part, but the gripper dimension is not equivalently clipped on our observed path.  Because the Gym action space is \texttt{Box(-1,1,shape=(4,))}, gripper values outside \([-1,1]\) violate the environment action contract.  Phase074 found frequent XYZ out-of-range values and low but real gripper out-of-range rate (up to about 3.7\% of steps on the debug tasks).  We therefore added a targeted ablation: keep XYZ unchanged, clip only the final gripper action via \texttt{MT50\_LEROBOT\_ACTION\_TRANSFORM=clip\_gripper}, and compare against a clean no-transform rerun before treating clipping as a benchmark change.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+% table / diagram for VLA WM
+% WM, VLA, env
+% normalization, clipping, y/n
+t
+
+
+
+
 
 \section{Submission of papers to NeurIPS 2024}
 

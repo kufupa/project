@@ -27,6 +27,7 @@
 \usepackage{hyperref}       % hyperlinks
 \usepackage{url}            % simple URL typesetting
 \usepackage{graphicx}       % \resizebox for wide tables
+\usepackage{float}          % [H] table placement
 \usepackage{booktabs}       % professional-quality tables
 \usepackage{amsfonts}       % blackboard math symbols
 \usepackage{nicefrac}       % compact symbols for 1/2, etc.
@@ -379,58 +380,228 @@ Interestingly reducing the action horizon any further wouldn't lead to any impro
 Cell values are cross-episode mean latent distances per bin. Each task has a VLA row and a \(\Delta_{\mathrm{oracle}}\) row, where \(\Delta_{\mathrm{oracle}} = \mathrm{oracle} - \mathrm{VLA}\). A positive value means oracle is farther from the world-model goal than VLA, and a negative value means oracle is closer. In this representation, larger raw values mean larger latent distance, so values closer to zero are preferable when the distance is interpreted as reconstruction error.
 
 
+% SmolVLA uses MEAN/STD normalization for state and action; visual features use IDENTITY at policy level.
+% Meta-World MT50 dataset actions are not globally clipped to [-1,1]: XYZ stats exceed the env action box, gripper stats stay in [-1,1].
+% Current official LeRobot MetaWorld eval has identity env_postprocessor: no LeRobot-side [-1,1] clip before env.step.
+% MetaWorld clips XYZ inside SawyerXYZEnv; gripper is passed raw to simulation/reward path.
+
+
+
+
+% Evidence:
+
+% Legacy Phase11: max_steps=120.
+% train_u1_to_u4: ~58.5 min for 4 updates = 14.6 min/update.
+% long_to25: ~295.7 min for 20 updates = 14.8 min/update.
+% Current Phase111 official:
+% pilot 0→10: ~676 min for 10 updates = 67.6 min/update.
+% resume 10→20: ~633 min for 10 updates = 63.3 min/update.
+% Slowdown: ~4.3x to 4.6x vs legacy.
+% CS238 report:
+
+% Says Model 1: 20 updates took 12.26h, avg 0.613h/update = 36.8 min/update.
+% Our current 63–68 min/update is ~1.7–1.8x slower than that.
+% But their run = LIBERO, not our MetaWorld official LeRobot path. Compare useful, not exact.
+
+
+
 
 
 
 % Check training data, ensure we use same tanh? / normalization method
+\paragraph{SmolVLA Meta-World checkpoint contract.}
+The checkpoint \texttt{jadechoghari/smolvla\_metaworld} is a LeRobot SmolVLA policy fine-tuned from \texttt{lerobot/smolvla\_base} on \texttt{lerobot/metaworld\_mt50}, under Apache-2.0 license.\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld}}  
+
+\paragraph{Meta-World MT50 target protocol.}
+Reported SmolVLA MT50 numbers are against LeRobot-style MT50 evaluation: all 50 tasks, the four difficulty buckets (easy, medium, hard, very hard), typically 10 episodes per task (500 total), and 500-step rollout horizon.
 
 % VLA 0 shot - MT10 % success rate
 % check smolvla paper and reproduce results
+\begin{table}[H]
+  \centering
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Method & Easy & Medium & Hard & Very Hard & Avg. \\
+    \midrule
+    SmolVLA (0.45B), zero-shot Meta-World & 82.5 & 41.8 & 45.0 & 60.0 & 57.3 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Reported SmolVLA zero-shot Meta-World success rate by difficulty bucket.}
+  \label{tab:smolvla-metaworld-reported-zero-shot}
+\end{table}
+
+Its public config states that the training/eval setup uses:
+\begin{itemize}
+  \item Meta-World MT50 with observations \texttt{observation.image} and \texttt{observation.state}
+  \item 4-D actions
+  \item Seed: \texttt{1000}
+  \item \texttt{chunk\_size=50}
+  \item \texttt{n\_action\_steps=1}
+  \item Sync rollout mode (\texttt{eval.batch\_size=1}, \texttt{eval.use\_async\_envs=false})
+  \item Normalization contract: \texttt{VISUAL: IDENTITY}, \texttt{STATE: MEAN\_STD}, \texttt{ACTION: MEAN\_STD}\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld/raw/main/train_config.json}}
+  \item Runtime action handling is therefore controlled by LeRobot's official postprocessing and environment execution path, which is handled in the action protocol audit below.
+\end{itemize}
 
 % push-v3 15%
 
+\paragraph{Reproduction audit order.}
+Starting point: Table~\ref{tab:smolvla-metaworld-reported-zero-shot} is the target number from SmolVLA.  We then moved from smoke tests to full MT50, reset-mode checks, and action-path debugging.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-\subsection{GRPO}
-\begin{table}[t]
-\centering
-\begin{tabular}{l l r l r r}
-\hline
-Checkpoint & 1000--1019 eval dir & 1000--1019 success\% & 1020--1049 eval dir & 1020--1049 success\% & Overall success\% \\ 
-\hline
-update\_0001.pt & eval\_grpo\_u1\_20ep (extra) & 15.00 & eval\_update0001\_seed1020\_ep30 & 16.67 & 16.00 \\
-update\_0005.pt & eval\_grpo\_u5\_20ep (extra) & 15.00 & eval\_update0005\_seed1020\_ep30 & 13.33 & 14.00 \\
-update\_0010.pt & run\_progressive/eval\_update0010\_seed1000\_ep20 & 15.00 & eval\_update0010\_seed1020\_ep30 & 6.67 & 10.00 \\
-update\_0015.pt & run\_progressive/eval\_update0015\_seed1000\_ep20 & 25.00 & eval\_update0015\_seed1020\_ep30 & 13.33 & 18.00 \\
-update\_0020.pt & run\_progressive/eval\_update0020\_seed1000\_ep20 & 0.00 & eval\_update0020\_seed1020\_ep30 & 3.33 & 2.00 \\
-update\_0025.pt & run\_progressive/eval\_update0025\_seed1000\_ep20 & 30.00 & eval\_update0025\_seed1020\_ep30 & 0.00 & 12.00 \\
-update\_0030.pt & run\_progressive/eval\_update0030\_seed1000\_ep20 & 10.00 & eval\_update0030\_seed1020\_ep30 & 13.33 & 12.00 \\
-update\_0035.pt & run\_progressive/eval\_update0035\_seed1000\_ep20 & 15.00 & eval\_update0035\_seed1020\_ep30 & 16.67 & 16.00 \\
-update\_0040.pt & run\_progressive/eval\_update0040\_seed1000\_ep20 & 10.00 & eval\_update0040\_seed1020\_ep30 & 3.33 & 6.00 \\
-update\_0045.pt & run\_progressive/eval\_update0045\_seed1000\_ep20 & 5.00 & eval\_update0045\_seed1020\_ep30 & 10.00 & 8.00 \\
-update\_0050.pt & -- & -- & eval\_update0050\_seed1020\_ep30 & 16.67 & 16.67 \\
-update\_0055.pt & -- & -- & eval\_update0055\_seed1020\_ep30 & 20.00 & 20.00 \\
-update\_0060.pt & -- & -- & eval\_update0060\_seed1020\_ep30 & 23.33 & 23.33 \\
-update\_0065.pt & -- & -- & eval\_update0065\_seed1020\_ep30 & 16.67 & 16.67 \\
-update\_0070.pt & -- & -- & eval\_update0070\_seed1020\_ep30 & 23.33 & 23.33 \\
-update\_0075.pt & -- & -- & eval\_update0075\_seed1020\_ep30 & 16.67 & 16.67 \\
-\hline
-\end{tabular}
-\caption{Phase11 GRPO checkpoints and eval success rates.}
-\label{tab:phase11-eval-success}
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{p{0.12\linewidth}p{0.34\linewidth}p{0.20\linewidth}p{0.23\linewidth}}
+    \toprule
+    Run & Setup & Result & Outcome \\
+    \midrule
+    Phase072 & MT50 50 tasks $\times$ 10 ep; seed 1000 & 289/500; diff.-macro 45.0\%; very-hard 17/50 & Main baseline. Seed-1010 fixed/non-fixed comparison is in Table~\ref{tab:mt50-reset-ablation-s1010}. \\
+    Phase072 very-hard & MT50 shelf-place-v3 + stick tasks; 3 ep each; seed 1000 & 5/9 & Debug for action-contract checks (logs + video). \\
+    Phase073 & MT50 five very-hard tasks $\times$ 10 ep; seed 1000; \texttt{MT50\_METAWORLD\_FREEZE\_RAND\_VEC}=true & 8/50 & Catastrophic regression. \\
+    Phase17 & MT50 50 tasks $\times$ 10 ep; seed 1000 & 286/500; diff.-macro 45.2\%; easy: 75.4\% (28), medium: 30.0\% (11), hard: 43.3\% (6), very-hard: 32.0\% (5) & Clean rerun after protocol cleanup. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Chronology of SmolVLA Meta-World reproduction runs, with reset policy details split out in Table~\ref{tab:mt50-reset-ablation-s1010}.}
+  \label{tab:mt50-eval-ledger}
 \end{table}
+
+\\paragraph{Reset determinism and seed-1010 ablation.}
+\textbf{Seed-1010 fixed-vs-non-fixed reset ablation.}
+\begin{itemize}
+  \item \textbf{Source}. We use the LeRobot official Meta-World backend (`\texttt{src/lerobot/envs/metaworld.py}` in the installed \texttt{lerobot\_mw\_py310} package) plus the phase scripts in this repo (\texttt{run\_official\_lerobot\_mt50\_eval.sh}, shard \texttt{submit\_mt50\_*} scripts).
+  \item \textbf{Control}. \texttt{MT50\_METAWORLD\_FREEZE\_RAND\_VEC} is a runtime adapter switch; when on, env resets use fixed \texttt{\_freeze\_rand\_vec} semantics, when off, LeRobot default seed-driven randomization is used.
+  \item \textbf{Why we tested it}. Earlier custom runs showed reset behavior drift could hide model effects, so we isolate reset mode first with matched seeds, task order, and episodes.
+  \item \textbf{Code-note}. A previous phase script comment (`run\_mt50\_phase07\_10ep\_no\_video.slurm`) marks `env.\_freeze\_rand\_vec` as the post-\texttt{set\_task} control point.
+  \item \textbf{Async note}. With \texttt{eval.use\_async\_envs=false} and \texttt{eval.batch\_size=1}, resets stay deterministic per episode and are not interleaved across async workers.
+\end{itemize}
+
+\textbf{What this table shows}. This table reports a seed-1010 fixed-vs-non-fixed ablation on four hard tasks:
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{llrr}
+    \toprule
+    Reset mode & Task & Episodes & Success (\%) \\
+    \midrule
+    Non-fixed & pick-place-wall-v3 & 20 & 55.0 \\
+    Non-fixed & shelf-place-v3 & 20 & 30.0 \\
+    Non-fixed & stick-pull-v3 & 20 & 0.0 \\
+    Non-fixed & stick-push-v3 & 20 & 75.0 \\
+    \midrule
+    Fixed & pick-place-wall-v3 & 20 & 0.0 \\
+    Fixed & shelf-place-v3 & 20 & 0.0 \\
+    Fixed & stick-pull-v3 & 20 & 0.0 \\
+    Fixed & stick-push-v3 & 20 & 30.0 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Separate seed-1010 reset ablation on four hard tasks.  This supports the reset-determinism discussion, but is not the main Phase072 seed-1000 MT50 baseline.}
+  \label{tab:mt50-reset-ablation-s1010}
+\end{table}
+\begin{itemize}
+  \item LeRobot default path is non-fixed (`\texttt{\_freeze\_rand\_vec = false}`), so same-seed episodes still sample new object/goal vectors after task setup.
+  \item Matching seed is not enough: we also keep task order, reset count, wrappers, process layout, \texttt{eval.batch\_size=1}, and \texttt{eval.use\_async\_envs=false} fixed.
+  \item Exact 3-GPU/2-GPU MT50 comparisons use one task per worker, one run directory per shard, identical task lists, and fixed seed.
+  \item Fixed reset improves reproducibility but can reduce success in brittle tasks; this is expected in the cited four-task ablation and is why it is not the main Phase072 baseline.
+\end{itemize}
+
+\paragraph{Action protocol audit (official LeRobot path).}
+\begin{itemize}
+  \item \textbf{Evidence used.}
+  \begin{itemize}
+    \item \textbf{Checkpoint / config}. \texttt{jadechoghari/smolvla\_metaworld} train config and model metadata.\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld/raw/main/train_config.json}}
+    \item \textbf{Dataset}. \texttt{lerobot/metaworld\_mt50} action stats and dataset card.\footnote{\url{https://huggingface.co/datasets/lerobot/metaworld_mt50/raw/main/meta/stats.json}}
+    \item \textbf{LeRobot sources}. Backend eval/env and preprocessing code paths.\footnote{\url{https://github.com/huggingface/lerobot/blob/main/src/lerobot/envs/metaworld.py}}\footnote{\url{https://github.com/huggingface/lerobot/blob/main/src/lerobot/processor/normalize_processor.py}}
+    \item \textbf{Meta-World sources}. Action space and policy helper references.\footnote{\url{https://github.com/Farama-Foundation/Metaworld/blob/master/metaworld/sawyer_xyz_env.py}}\footnote{\url{https://github.com/Farama-Foundation/Metaworld/blob/master/metaworld/policies/policy.py}}
+    \item \textbf{Local traces}. Phase074 action logs from the official-path reproduction runs (artifact-level rollout traces in this repository).
+    \item Repo-local GRPO/evaluator wrappers are not used as evidence for the official protocol.
+  \end{itemize}
+  \item \textbf{Meta-World contract.}
+  \begin{itemize}
+    \item Official action space is \(\mathrm{Box}(-1,1,(4,))\): \(dx,dy,dz,\) gripper.\footnote{\url{https://metaworld.farama.org/benchmark/action_space/}}
+    \item Meta-World source clips XYZ in \texttt{set\_xyz\_action}, then scales and applies mocap bounds; gripper is passed into simulation as \([g,-g]\).\footnote{\url{https://github.com/Farama-Foundation/Metaworld/blob/master/metaworld/sawyer_xyz_env.py}}
+    \item Expert policy helper \texttt{move()} can emit XYZ responses above \([-1,1]\) and warns that environments clip the response.\footnote{\url{https://github.com/Farama-Foundation/Metaworld/blob/master/metaworld/policies/policy.py}}
+  \end{itemize}
+  \item \textbf{Training target.}
+  \begin{itemize}
+    \item Dataset family: \texttt{lerobot/metaworld\_mt50}, a benchmark dataset of expert action trajectories.
+    \item Checkpoint trains on this dataset with \([x,y,z,\mathrm{gripper}]\), shape \(4\).\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld/raw/main/train_config.json}}
+    \item Dataset action stats from \texttt{meta/stats.json}:\footnote{\url{https://huggingface.co/datasets/lerobot/metaworld_mt50/raw/main/meta/stats.json}}
+    \begin{itemize}
+      \item Mean: \([0.25,0.51,-0.13,0.38]\).
+      \item Standard deviation: \([2.03,2.01,3.39,0.71]\).
+      \item Minimum: \([-11.47,-14.93,-17.28,-1.0]\).
+      \item Maximum: \([19.46,12.47,24.63,1.0]\).
+    \end{itemize}
+    \item Therefore training actions are not globally clipped to \([-1,1]\).  SmolVLA learns the dataset action distribution, not a bounded tanh action head.  In the official-path local evaluation, we do not add a repo-local \texttt{tanh} or clip transform before \texttt{env.step}; Meta-World still applies its own execution-time constraints.
+  \end{itemize}
+  \item \textbf{Policy normalization.}
+  \begin{itemize}
+    \item Checkpoint mapping is \texttt{VISUAL=IDENTITY}, \texttt{STATE=MEAN\_STD}, \texttt{ACTION=MEAN\_STD}.\footnote{\url{https://huggingface.co/jadechoghari/smolvla_metaworld/raw/main/config.json}}
+    \item Train target is z-scored action.  Eval postprocessor must invert it: \(a_{\mathrm{env}} = a_{\mathrm{policy}}\sigma+\mu\).
+    \item LeRobot normalizer source implements inverse \texttt{MEAN\_STD} as tensor \(\times\) std \(+\) mean.\footnote{\url{https://github.com/huggingface/lerobot/blob/main/src/lerobot/processor/normalize_processor.py}}
+  \end{itemize}
+  \item \textbf{Current interpretation.}
+  \begin{itemize}
+    \item Evidence indicates the dataset stores raw expert XYZ commands before Meta-World internal XYZ clipping.
+    \item This is a strong inference, not an author-confirmed fact: no official dataset generation script or maintainer answer was found.
+    \item Same ambiguity is publicly raised in the HF dataset discussion and LeRobot issue tracker.\footnote{\url{https://huggingface.co/datasets/lerobot/metaworld_mt50/discussions/5}}\footnote{\url{https://github.com/huggingface/lerobot/issues/2617}}
+  \end{itemize}
+  \item \textbf{Phase074 action debug.}
+  \begin{itemize}
+    \item With no action transform, \texttt{sent\_action} equals postprocessed action.
+    \item Sent-action range: dim0 \([-2.88,6.54]\), dim1 \([-2.62,1.53]\), dim2 \([-6.43,7.94]\), dim3 \([-1.09,0.76]\).
+    \item Out-of-box rates: 1124/2422 steps had at least one OOB dim (46.4\%); 1318/9688 components were OOB (13.6\%).
+    \item Gripper OOB was low but real: 41/2422 steps (1.7\%); worst debug task was \texttt{stick-push-v3}, 8/232 steps (3.4\%).
+    \item Previous 54.4\% figure used the wrong denominator: component OOB count divided by step count.
+  \end{itemize}
+  \item \textbf{Bottom-line normalization note.}
+  \begin{itemize}
+    \item Normal action unnormalization is LeRobot automatic.  The checkpoint ships processor configs and safetensor stats; official eval preprocesses observations, calls \texttt{policy.select\_action}, postprocesses action, then calls \texttt{env.step}.
+    \item Before the postprocessor, policy action is z-score space, not \([-1,1]\) action space.  \(0\) means dataset mean, \(+1\) means one dataset standard deviation above mean, and \(-1\) means one standard deviation below mean.
+    \item The postprocessor maps normalized action back with \(a_{\mathrm{raw}} = a_{\mathrm{norm}}\sigma+\mu\).  For the gripper, normalized \(0 \mapsto 0.38\), \(1 \mapsto 1.09\), and \(-1 \mapsto -0.33\); so normalized \(1\) can already become raw gripper \(>1\).
+    \item Our local additions are render disablement, fixed-reset control, action-debug logging, and possible \texttt{clip\_gripper} ablation.  Normal action unnormalization is still the LeRobot checkpoint/runtime contract, not our custom transform.
+  \end{itemize}
+  \begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{p{4.2cm} p{2.0cm} p{1.6cm} p{4.8cm}}
+    \toprule
+    \textbf{Stage} & \textbf{Normalize?} & \textbf{Clip?} & \textbf{Why}
+    \\
+    \midrule
+    MT50 training target (dataset) & Y & N & SmolVLA trained on \texttt{MEAN\_STD} action stats from \texttt{meta/stats.json}. \\
+    SmolVLA policy output (inference) & N (already z-scored) & N & Output is model coordinate in normalized action space. \\
+    LeRobot postprocessor for env step & Y (inverse) & N/optional local & Converts normalized output to env units: \(a_{\mathrm{env}}=a_{\mathrm{norm}}\sigma+\mu\). \\
+    Meta-World execution (\texttt{env.step}) & N & Y & Uses env action-box constraints (and internal XYZ clipping path). \\
+    Env action \(\rightarrow\) JEPA-WM input & Y (JEPA stats) & N & JEPA-WM is trained on its own normalized action space before packing. \\
+    Packing to WM action vector & N & N & \(5\times4\)-D steps become one \(20\)-D WM step. \\
+    Current GRPO wrapper branch (\texttt{MetaWorldSmolVLAGRPOPolicy}) & Y (custom) & Y & Extra tanh/clip debug-local only; not required by LeRobot official path. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Normalization and clipping controls across training, evaluation, and scoring paths.}
+  \label{tab:normalization-clipping-audit}
+  \end{table}
+\end{itemize}
+
+
+
+
+
+
+
+
+
+
+
+
+
+% table / diagram for VLA WM
+% WM, VLA, env
+% normalization, clipping, y/n
+
+
+
+
 
 \section{Submission of papers to NeurIPS 2024}
 

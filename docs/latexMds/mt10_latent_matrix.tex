@@ -1,0 +1,34 @@
+% MT10 WM-goal latent L2 (integer-rounded per WM step group), cross-episode mean per bin.
+% Paste fragment; add booktabs to preamble if desired.
+
+\noindent\textbf{MT10 WM-goal latent L2.} Cross-episode mean per env step bin; integer L2 in WM visual latent (artifact \texttt{d\_goal\_l2\_wm\_int}). \textbf{VLA:} phase08 SmolVLA policy; \textbf{oracle:} phase09 oracle-action replay.
+Phase8 root: \texttt{/vol/bitbucket/aa6622/project/artifacts/mt10\_phase08\_segment\_grpo\_baseline}; Phase9 root: \texttt{/vol/bitbucket/aa6622/project/artifacts/mt10\_phase09\_oracle\_vs\_wm\_baseline}.
+
+\begin{center}
+\begin{tabular}{llrrrrrrrrrr}
+\hline
+\textbf{Task} & \textbf{Run} & \textbf{0:5} & \textbf{5:10} & \textbf{10:15} & \textbf{15:20} & \textbf{20:25} & \textbf{25:30} & \textbf{30:35} & \textbf{35:40} & \textbf{40:45} & \textbf{45:50} \\
+\hline
+button-press-topdown-v3 & VLA & 571 & 554 & 525 & 495 & 459 & 416 & 382 & 350 & 330 & 362 \\
+button-press-topdown-v3 & oracle & 571 & 554 & 527 & 499 & 460 & 416 & 379 & 346 & 332 & 363 \\
+door-open-v3 & VLA & 473 & 458 & 453 & 453 & 451 & 444 & 431 & 424 & 438 & 475 \\
+door-open-v3 & oracle & 473 & 457 & 454 & 455 & 450 & 441 & 421 & 404 & 417 & 464 \\
+drawer-close-v3 & VLA & 410 & 407 & 409 & 416 & 411 & 395 & 388 & 387 & 386 & 391 \\
+drawer-close-v3 & oracle & 411 & 409 & 411 & 418 & 414 & 397 & 387 & 390 & 393 & 393 \\
+drawer-open-v3 & VLA & 389 & 378 & 376 & 377 & 373 & 364 & 354 & 348 & 347 & 350 \\
+drawer-open-v3 & oracle & 388 & 376 & 377 & 383 & 388 & 377 & 361 & 350 & 344 & 345 \\
+peg-insert-side-v3 & VLA & 466 & 466 & 468 & 463 & 456 & 446 & 434 & 423 & 416 & 413 \\
+peg-insert-side-v3 & oracle & 464 & 464 & 468 & 467 & 457 & 446 & 432 & 415 & 396 & 385 \\
+pick-place-v3 & VLA & 439 & 433 & 431 & 431 & 433 & 435 & 425 & 398 & 365 & 347 \\
+pick-place-v3 & oracle & 437 & 429 & 425 & 425 & 428 & 429 & 422 & 398 & 368 & 346 \\
+push-v3 & VLA & 415 & 412 & 411 & 404 & 394 & 381 & 366 & 352 & 331 & 312 \\
+push-v3 & oracle & 416 & 414 & 417 & 414 & 404 & 394 & 388 & 380 & 356 & 331 \\
+reach-v3 & VLA & 489 & 463 & 447 & 430 & 410 & 395 & 385 & 379 & 378 & 381 \\
+reach-v3 & oracle & 489 & 461 & 440 & 420 & 399 & 385 & 375 & 369 & 368 & 372 \\
+window-close-v3 & VLA & 576 & 554 & 524 & 494 & 472 & 463 & 468 & 469 & 472 & 472 \\
+window-close-v3 & oracle & 576 & 554 & 524 & 496 & 482 & 470 & 474 & 475 & 474 & 475 \\
+window-open-v3 & VLA & 483 & 454 & 414 & 403 & 405 & 413 & 415 & 414 & 411 & 408 \\
+window-open-v3 & oracle & 483 & 453 & 412 & 401 & 405 & 410 & 409 & 407 & 405 & 404 \\
+\hline
+\end{tabular}
+\end{center}
