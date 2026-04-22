@@ -14,7 +14,7 @@ SRC_ROOT = ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from segment_grpo_loop import load_wm_bundle, rollout_with_chunks  # noqa: E402
+from segment_grpo_loop import _resolve_device, load_wm_bundle, rollout_with_chunks  # noqa: E402
 from segment_grpo_reference import (  # noqa: E402
     load_oracle_action_sequence,
     load_oracle_reference_frames,
@@ -95,17 +95,23 @@ def main() -> int:
 
     base_seed = int(oracle_manifest.get("seed", 1000))
 
+    jepa_repo_resolved: str | None
     if args.dry_run:
         wm_bundle = None
+        wm_device_record = "dry_run"
+        jepa_repo_resolved = str(args.jepa_repo.expanduser().resolve()) if args.jepa_repo is not None else None
     else:
         if args.jepa_repo is None:
             raise SystemExit("Missing --jepa-repo (or pass --dry-run).")
+        resolved_repo = args.jepa_repo.expanduser().resolve()
+        jepa_repo_resolved = str(resolved_repo)
         wm_bundle = load_wm_bundle(
-            args.jepa_repo.expanduser().resolve(),
+            resolved_repo,
             args.jepa_ckpt,
             args.device,
             required=True,
         )
+        wm_device_record = str(_resolve_device(args.device))
 
     run_dir = ensure_unique_run_dir(
         args.output_root.expanduser().resolve(),
@@ -221,6 +227,11 @@ def main() -> int:
             "oracle_action_mode": True,
             "episodes_info": episode_summaries,
             "run_dir": str(run_dir),
+            "jepa_repo": jepa_repo_resolved,
+            "jepa_ckpt": str(args.jepa_ckpt),
+            "wm_device": wm_device_record,
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
         },
     )
     print(f"[phase9] wrote manifest: {manifest_out}")
