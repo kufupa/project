@@ -131,3 +131,8 @@ def test_phase9_main_dry_run_writes_manifest(
     assert manifest["episodes"] == 2
     assert len(manifest["episodes_info"]) == 2
     assert manifest["episodes_info"][0]["effective_max_steps"] == 10
+    assert manifest["jepa_repo"] is None
+    assert manifest["jepa_ckpt"] == "jepa_wm_metaworld.pth.tar"
+    assert manifest["wm_device"] == "dry_run"
+    assert manifest["python_executable"] == sys.executable
+    assert manifest["python_version"] == sys.version.split()[0]

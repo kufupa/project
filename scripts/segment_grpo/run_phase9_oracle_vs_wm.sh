@@ -13,7 +13,9 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-: "${JEPA_REPO:=${HOME}/.cache/torch/hub/facebookresearch_jepa-wms_main}"
+VOL_CACHE="${WORKSPACE_ROOT}/.cache"
+export TORCH_HOME="${TORCH_HOME:-${VOL_CACHE}/torch}"
+: "${JEPA_REPO:=${TORCH_HOME}/hub/facebookresearch_jepa-wms_main}"
 
 if [[ -z "${ORACLE_RUN_DIR:-}" ]]; then
   echo "[phase9] ERROR: ORACLE_RUN_DIR must point to a phase06 oracle run directory (manifest + frames)." >&2
@@ -26,7 +28,7 @@ if [[ ! -d "${JEPA_REPO}" ]]; then
   exit 1
 fi
 
-export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 exec "${PYTHON_BIN}" scripts/run_phase9_oracle_vs_wm.py \
   --oracle-run-root "${ORACLE_RUN_DIR}" \
