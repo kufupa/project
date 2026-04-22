@@ -15,7 +15,8 @@ PY="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/pyt
 ORACLE_SH="${PROJECT_ROOT}/scripts/oracle/run_oracle_baseline_eval.sh"
 CAMPAIGN="${PROJECT_ROOT}/scripts/segment_grpo/run_all60_frame50_k3.py"
 PHASE9_PY="${PROJECT_ROOT}/scripts/run_phase9_oracle_vs_wm.py"
-REPORT_JSON="${MT10_PREFLIGHT_REPORT_JSON:-${PROJECT_ROOT}/artifacts/mt10_runs/mt10_preflight_report.json}"
+# Default path includes SLURM_JOB_ID when set so concurrent preflights do not clobber the same JSON.
+REPORT_JSON="${MT10_PREFLIGHT_REPORT_JSON:-${PROJECT_ROOT}/artifacts/mt10_runs/mt10_preflight_report${SLURM_JOB_ID:+_job${SLURM_JOB_ID}}.json}"
 ROWS_TMP="$(mktemp)"
 
 PREFIX="${MT10_PREFLIGHT_PREFIX:-mt10_preflight}"
