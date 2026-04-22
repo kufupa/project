@@ -6,12 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any
+
+_PROJECT_SRC = Path(__file__).resolve().parents[2] / "src"
+if str(_PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_SRC))
+
+from metaworld_determinism import gymnasium_reset_strict, metaworld_strict_ctor_requested, seed_metaworld_process
 
 import imageio.v2 as imageio
 import metaworld
@@ -69,14 +75,7 @@ def _clip_action(action: np.ndarray, *, low: float = -1.0, high: float = 1.0) ->
 
 def _seed_all(seed: int) -> None:
     """MetaWorld / MuJoCo still sample from global RNG; env.reset(seed=) alone is not enough."""
-    random.seed(int(seed))
-    np.random.seed(int(seed))
-    try:
-        import torch
-
-        torch.manual_seed(int(seed))
-    except Exception:
-        pass
+    seed_metaworld_process(int(seed))
 
 
 def _render_rgb_frame(
@@ -189,10 +188,13 @@ def main() -> int:
     mt1 = metaworld.MT1(args.task)
     env_cls = mt1.train_classes[args.task]
     tasks = list(getattr(mt1, "train_tasks", []) or [])
-    try:
+    if metaworld_strict_ctor_requested():
         env = env_cls(render_mode="rgb_array", camera_name=camera_name)
-    except Exception:
-        env = env_cls()
+    else:
+        try:
+            env = env_cls(render_mode="rgb_array", camera_name=camera_name)
+        except Exception:
+            env = env_cls()
     if hasattr(env, "render_mode"):
         try:
             env.render_mode = "rgb_array"
@@ -225,7 +227,13 @@ def main() -> int:
             if tasks:
                 env.set_task(tasks[episode_index % len(tasks)])
 
-            obs, info = env.reset(seed=reset_seed)
+            out = gymnasium_reset_strict(env, reset_seed)
+            if isinstance(out, tuple):
+                obs = out[0]
+                info = out[1] if len(out) > 1 and isinstance(out[1], dict) else {}
+            else:
+                obs = out
+                info = {}
             _ = info
             rewards: list[float] = []
             episode_success = False
