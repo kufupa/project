@@ -26,6 +26,7 @@
 \usepackage[T1]{fontenc}    % use 8-bit T1 fonts
 \usepackage{hyperref}       % hyperlinks
 \usepackage{url}            % simple URL typesetting
+\usepackage{graphicx}       % \resizebox for wide tables
 \usepackage{booktabs}       % professional-quality tables
 \usepackage{amsfonts}       % blackboard math symbols
 \usepackage{nicefrac}       % compact symbols for 1/2, etc.
@@ -47,7 +48,7 @@
 
 \author{%
   David S.~Hippocampus\thanks{Use footnote for providing further information
-    about author (webpage, alternative address)---\emph{not} for acknowledging
+    about author (webpage, alternative address) - \emph{not} for acknowledging
     funding agencies.} \\
   Department of Computer Science\\
   Cranberry-Lemon University\\
@@ -84,8 +85,7 @@
 
 
 \begin{abstract}
-Vision-language-action (VLA) policies are attractive because one checkpoint can cover many instructions, but they still misbehave when the visuals or dynamics drift from training. We are exploring \emph{segment-level} reranking instead of fine-tuning: at each segment, sample $K$ short action chunks from a frozen SmolVLA policy, score each chunk with a JEPA-style world model by latent distance to a goal, execute the best chunk in the real simulator, and optionally apply a tiny GRPO-style preference update on top of the WM scores. The present write-up describes an early harness (logging, comparison strips, oracle-aligned goals) rather than a finished benchmark story. \textbf{TODO:} aggregate success rates, ablations, and a cleaner theoretical positioning once the pilot campaigns stabilize.
-
+Vision-language-action (VLA) policies show great promise of generalisation due to their extensive training data priors, where one checkpoint can cover many instructions and different observations, but they still misbehave when the visuals or dynamics drift from training. We are exploring test-time adaptations, rather than fine-tuning, to make these VLAs even more generalisable. We start with \emph{segment-level} reranking: at each segment, sample $K$ short action chunks from a frozen SmolVLA policy, score each chunk with a JEPA-style world model by latent distance to a goal, execute the best chunk in the real simulator, and optionally apply a tiny GRPO-style preference update on top of the WM scores. The present write-up describes an early harness (logging, comparison strips, oracle-aligned goals) rather than a finished benchmark story. \textbf{TODO:} aggregate success rates, ablations, and a cleaner theoretical positioning once the pilot campaigns stabilize.
 \end{abstract}
 
 
@@ -94,15 +94,15 @@ Vision-language-action (VLA) policies are attractive because one checkpoint can 
 All experiments below are \textbf{Meta-World (MT1)} in simulation: same ecosystem, different \texttt{MT1(task)} strings (e.g.\ \texttt{push-v3} for the current segment-GRPO driver; other tasks use the same artifact layout where scripts exist). We compare (i) scripted oracle rollouts, (ii) frozen SmolVLA open-loop baselines, and (iii) WM-scored segment planning; no LIBERO/RoboCasa stack in this draft.
 
 \begin{itemize}
-  \item \textbf{Problem.} A frozen VLA can be wrong for a full horizon even when short chunks are locally plausible. We ask whether a \emph{test-time} reranker---a JEPA-style world model (WM) scoring candidate action chunks in latent space---improves goal progress without updating SmolVLA weights, and whether a small GRPO-style update on auxiliary parameters helps beyond pure argmax selection.
+  \item \textbf{Problem.} A frozen VLA can be wrong for a full horizon even when short chunks are locally plausible. We ask whether a \emph{test-time} reranker - a JEPA-style world model (WM) scoring candidate action chunks in latent space - improves goal progress without updating SmolVLA weights, and whether a small GRPO-style update on auxiliary parameters helps beyond pure argmax selection.
 
-  \item \textbf{World model (JEPA-WMS).} We load a pretrained JEPA world-model bundle (Facebook \texttt{jepa-wms} codebase + checkpoint, e.g.\ \texttt{jepa\_wm\_metaworld.pth.tar}) and use it in two roles: (a) \emph{scoring}---unroll each candidate chunk in WM latent space and measure $L_2$ distance from the predicted latent prefix to a \emph{goal latent} (encode oracle RGB, optionally with proprio from the live state; configurable slice \texttt{visual} / \texttt{proprio} / \texttt{concat}); (b) \emph{diagnostics}---decode the latent trace for the selected chunk to RGB for side-by-side comparison strips vs.\ simulator frames. Rollout can be \texttt{iterative} (one WM step per env action) or \texttt{batched}; megastep stride affects how many strip columns map to how many env steps.
+  \item \textbf{World model (JEPA-WMS).} We load a pretrained JEPA world-model bundle (Facebook \texttt{jepa-wms} codebase + checkpoint, e.g.\ \texttt{jepa\_wm\_metaworld.pth.tar}) and use it in two roles: (a) \emph{scoring} - unroll each candidate chunk in WM latent space and measure $L_2$ distance from the predicted latent prefix to a \emph{goal latent} (encode oracle RGB, optionally with proprio from the live state; configurable slice \texttt{visual} / \texttt{proprio} / \texttt{concat}); (b) \emph{diagnostics} - decode the latent trace for the selected chunk to RGB for side-by-side comparison strips vs.\ simulator frames. Rollout can be \texttt{iterative} (one WM step per env action) or \texttt{batched}; megastep stride affects how many strip columns map to how many env steps.
 
-  \item \textbf{Phase 6 --- oracle baseline (\texttt{artifacts/phase06\_oracle\_baseline}).} Meta-World \textbf{scripted} policies (\texttt{metaworld.policies.ENV\_POLICY\_MAP}), not SmolVLA. Pipeline entrypoints: \texttt{scripts/oracle/run\_metaworld\_oracle\_eval.py} via \texttt{run\_oracle\_baseline\_eval.sh} / \texttt{pushv3\_oracle\_data\_pipeline.sh}. Outputs per run include \texttt{eval\_info.json}, \texttt{run\_manifest.json}, per-step \texttt{actions.jsonl}, and (when enabled) per-frame PNGs under \texttt{frames/episode\_XXXX/frame\_*.png}. Top-$K$ episodes are summarized to \texttt{optimal\_report.json} for downstream targeting. Segment-GRPO resolves the latest compatible run under this root (task tag in dirname) unless \texttt{--oracle-run-root} overrides.
+  \item \textbf{Phase 6  -  oracle baseline (\texttt{artifacts/phase06\_oracle\_baseline}).} Meta-World \textbf{scripted} policies (\texttt{metaworld.policies.ENV\_POLICY\_MAP}), not SmolVLA. Pipeline entrypoints: \texttt{scripts/oracle/run\_metaworld\_oracle\_eval.py} via \texttt{run\_oracle\_baseline\_eval.sh} / \texttt{pushv3\_oracle\_data\_pipeline.sh}. Outputs per run include \texttt{eval\_info.json}, \texttt{run\_manifest.json}, per-step \texttt{actions.jsonl}, and (when enabled) per-frame PNGs under \texttt{frames/episode\_XXXX/frame\_*.png}. Top-$K$ episodes are summarized to \texttt{optimal\_report.json} for downstream targeting. Segment-GRPO resolves the latest compatible run under this root (task tag in dirname) unless \texttt{--oracle-run-root} overrides.
 
-  \item \textbf{Phase 7 --- SmolVLA baseline (\texttt{artifacts/phase07\_smolvla\_baseline}).} Frozen SmolVLA rollouts on the same Meta-World tasks via \texttt{scripts/smolvla/run\_metaworld\_smolvla\_eval.py} (LeRobot Meta-World backend; checkpoint such as \texttt{jadechoghari/smolvla\_metaworld}). Standard artifacts: \texttt{eval\_info.json}, \texttt{run\_manifest.json}, videos / action logs as configured. Top-15 oracle rows drive matched-episode campaigns under \texttt{campaigns/} so SmolVLA episodes align with phase-6 episode indices and reset seeds for apples-to-apples comparisons.
+  \item \textbf{Phase 7  -  SmolVLA baseline (\texttt{artifacts/phase07\_smolvla\_baseline}).} Frozen SmolVLA rollouts on the same Meta-World tasks via \texttt{scripts/smolvla/run\_metaworld\_smolvla\_eval.py} (LeRobot Meta-World backend; checkpoint such as \texttt{jadechoghari/smolvla\_metaworld}). Standard artifacts: \texttt{eval\_info.json}, \texttt{run\_manifest.json}, videos / action logs as configured. Top-15 oracle rows drive matched-episode campaigns under \texttt{campaigns/} so SmolVLA episodes align with phase-6 episode indices and reset seeds for apples-to-apples comparisons.
 
-  \item \textbf{Phase 8 --- segment WM + GRPO pilot (\texttt{artifacts/phase08\_segment\_grpo\_baseline}).} \texttt{scripts/run\_segment\_grpo.py} $\rightarrow$ \texttt{rollout\_with\_chunks}: each segment samples $K$ length-$A$ action matrices from SmolVLA, scores all candidates with the WM vs.\ encoded oracle goal, executes the highest-scoring chunk in Meta-World sim (with camera/proprio parity flags aligned to WM training), logs JSON (\texttt{EpisodeLog}), and writes comparison PNGs (optional per-column overlay + footer with per-candidate integer $L_2$ traces). Optional \texttt{--train-steps} applies a tiny MLP adapter step using softmax weights from WM scores (GRPO-style group update); default pilot runs often leave this at zero.
+  \item \textbf{Phase 8  -  segment WM + GRPO pilot (\texttt{artifacts/phase08\_segment\_grpo\_baseline}).} \texttt{scripts/run\_segment\_grpo.py} $\rightarrow$ \texttt{rollout\_with\_chunks}: each segment samples $K$ length-$A$ action matrices from SmolVLA, scores all candidates with the WM vs.\ encoded oracle goal, executes the highest-scoring chunk in Meta-World sim (with camera/proprio parity flags aligned to WM training), logs JSON (\texttt{EpisodeLog}), and writes comparison PNGs (optional per-column overlay + footer with per-candidate integer $L_2$ traces). Optional \texttt{--train-steps} applies a tiny MLP adapter step using softmax weights from WM scores (GRPO-style group update); default pilot runs often leave this at zero.
 
   \item \textbf{Oracle frames in phase 8.} Goal (and optional start) pixels are \textbf{read from phase-6 PNGs}, not re-rendered: \texttt{load\_oracle\_reference\_frames} maps 1-based \texttt{--goal-frame-index} to \texttt{frame\_\{index-1\}.png} under the chosen oracle \texttt{run\_*} and episode directory; used for WM encode and reset sanity checks.
 
@@ -115,14 +115,44 @@ All experiments below are \textbf{Meta-World (MT1)} in simulation: same ecosyste
 \end{itemize}
 
 
-\subsection{Evaluation and results (placeholder)}
+\subsection{Evaluation and results}
 \begin{itemize}
   \item Current phase-8 runs prioritize \textbf{traceability}: stitched comparison strips, per-segment JSON (\texttt{candidate\_wm\_goal\_l2\_int}, decode/scoring status fields), and matched seeds vs.\ phase-7 / phase-6 references.
   \item \textbf{TODO:} freeze primary metrics (task success, WM latent margin, human-readable strip QC rubric) and report confidence intervals over episode sets.
   \item \textbf{TODO:} one main-figure result; relegate strip galleries to appendix or supplementary.
 \end{itemize}
 
+\paragraph{Pilot (push-v3): per-megastep WM goal $L_2$ on the selected chunk.}
+Table~\ref{tab:segment-grpo-wm-l2-pilot} lists the top-15 oracle-aligned Meta-World episodes (phase-7 \texttt{targets.json} ranks). For each episode we run one segment of segment-GRPO with $K{=}5$, chunk length 30, max steps 30, oracle goal frame index 25, WM stride five env steps per WM megastep. Columns \texttt{0--5}, \ldots, \texttt{25--30} are integer-rounded $L_2$ distances to the encoded oracle goal latent after each WM unroll step, logged as \texttt{d\_goal\_l2\_wm\_int} for the \emph{selected} candidate only. The \textbf{closest} column names the half-open env-step band where that distance is smallest (ties broken by the earliest band).
 
+\begin{table}[t]
+  \caption{WM integer goal $L_2$ by megastep (stride 5) for the selected chunk, push-v3 top-15 episodes.}
+  \label{tab:segment-grpo-wm-l2-pilot}
+  \centering
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}rrrcccccc@{}}
+    \toprule
+    Rank & Ep. & Seed & Closest & $0{:}5$ & $5{:}10$ & $10{:}15$ & $15{:}20$ & $20{:}25$ & $25{:}30$ \\
+    \midrule
+     1 &   3 & 1003 & $25{:}30$ & 361 & 353 & 346 & 329 & 294 & 289 \\
+     2 &  53 & 1053 & $25{:}30$ & 361 & 353 & 346 & 329 & 294 & 289 \\
+     3 &  16 & 1016 & $25{:}30$ & 369 & 368 & 370 & 363 & 345 & 311 \\
+     4 &  44 & 1044 & $0{:}5$   & 343 & 349 & 377 & 401 & 418 & 423 \\
+     5 &  39 & 1039 & $25{:}30$ & 348 & 346 & 342 & 331 & 316 & 304 \\
+     6 &   8 & 1008 & $25{:}30$ & 380 & 374 & 366 & 342 & 314 & 271 \\
+     7 &  58 & 1058 & $25{:}30$ & 380 & 374 & 366 & 342 & 314 & 271 \\
+     8 &  10 & 1010 & $15{:}20$ & 340 & 332 & 320 & 285 & 302 & 309 \\
+     9 &  42 & 1042 & $0{:}5$   & 353 & 365 & 387 & 410 & 424 & 426 \\
+    10 &   9 & 1009 & $20{:}25$ & 335 & 333 & 335 & 315 & 307 & 309 \\
+    11 &  59 & 1059 & $20{:}25$ & 335 & 333 & 335 & 315 & 307 & 309 \\
+    12 &   5 & 1005 & $15{:}20$ & 290 & 278 & 260 & 259 & 298 & 328 \\
+    13 &  55 & 1055 & $15{:}20$ & 290 & 278 & 260 & 259 & 298 & 328 \\
+    14 &  33 & 1033 & $5{:}10$  & 327 & 326 & 334 & 351 & 368 & 386 \\
+    15 &  28 & 1028 & $15{:}20$ & 319 & 320 & 315 & 306 & 344 & 385 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
 
 
 \section{Submission of papers to NeurIPS 2024}
