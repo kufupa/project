@@ -30,6 +30,8 @@ class OracleReferenceFrames:
     start_frame_path: Path
     goal_frame: np.ndarray
     start_frame: np.ndarray
+    # Optional: flatten_obs_state aligned with goal_frame PNG (from flat_obs.jsonl).
+    goal_flat_obs: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,36 @@ def parse_top15_report(path: Path) -> list[TopEpisode]:
     return payload
 
 
+def load_oracle_goal_flat_obs(run_dir: Path, episode_index: int, goal_frame_idx_zero_based: int) -> np.ndarray | None:
+    """
+    Load flattened observation for the oracle frame index that matches ``frame_{idx:06d}.png``.
+
+    Written by ``run_metaworld_oracle_eval.py`` as ``episodes/episode_XXXX/flat_obs.jsonl`` when
+    ``--save-frames`` is enabled. Returns ``None`` if the file is missing or has no matching row.
+    """
+    run_path = Path(run_dir).expanduser().resolve()
+    path = run_path / "episodes" / f"episode_{int(episode_index):04d}" / "flat_obs.jsonl"
+    if not path.is_file():
+        return None
+    want = int(goal_frame_idx_zero_based)
+    with path.open("r", encoding="utf-8") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(obj.get("frame_index", -1)) != want:
+                continue
+            flat = obj.get("flat_obs")
+            if not isinstance(flat, list) or not flat:
+                return None
+            return np.asarray(flat, dtype=np.float32).reshape(-1)
+    return None
+
+
 def load_oracle_reference_frames(
     run_dir: Path,
     episode_index: int,
@@ -143,6 +175,8 @@ def load_oracle_reference_frames(
     if not goal_path.exists():
         raise FileNotFoundError(f"Oracle goal frame not found: {goal_path}")
 
+    goal_flat_obs = load_oracle_goal_flat_obs(run_path, int(episode_index), goal_idx)
+
     return OracleReferenceFrames(
         run_dir=run_path,
         episode_index=int(episode_index),
@@ -152,6 +186,7 @@ def load_oracle_reference_frames(
         goal_frame_path=goal_path,
         start_frame=_load_png_rgb(start_path),
         goal_frame=_load_png_rgb(goal_path),
+        goal_flat_obs=goal_flat_obs,
     )
 
 

@@ -2028,6 +2028,7 @@ def _load_goal_latent(
     fallback_proprio: np.ndarray | None,
     *,
     goal_frame: np.ndarray | None = None,
+    goal_proprio: np.ndarray | None = None,
     wm_scoring_latent: str = "visual",
     wm_goal_flip_horizontal: bool = True,
     wm_goal_debug_path: Path | str | None = None,
@@ -2067,11 +2068,12 @@ def _load_goal_latent(
             return _encode_state_to_latent(wm_bundle, img, proprio, wm_scoring_latent=wm_scoring_latent), debug_written
 
     if wm_bundle is not None and goal_frame is not None:
-        proprio = (
-            np.asarray(fallback_proprio, dtype=np.float32).reshape(-1)
-            if fallback_proprio is not None
-            else np.zeros(int(wm_bundle.proprio_dim), dtype=np.float32)
-        )
+        if goal_proprio is not None:
+            proprio = np.asarray(goal_proprio, dtype=np.float32).reshape(-1)
+        elif fallback_proprio is not None:
+            proprio = np.asarray(fallback_proprio, dtype=np.float32).reshape(-1)
+        else:
+            proprio = np.zeros(int(wm_bundle.proprio_dim), dtype=np.float32)
         prepared = _prepare_goal_image_for_wm(goal_frame, flip_horizontal=wm_goal_flip_horizontal)
         if wm_goal_debug_path is not None:
             _write_wm_goal_encode_debug(prepared, wm_goal_debug_path)
@@ -2221,6 +2223,7 @@ def rollout_with_chunks(
     comparison_strip_stitch_gutter_pixels: int = 0,
     oracle_action_sequence: np.ndarray | None = None,
     oracle_action_source: str | None = None,
+    goal_proprio: np.ndarray | None = None,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -2229,6 +2232,9 @@ def rollout_with_chunks(
     - score each chunk by JEPA-WM latent distance-to-goal,
     - execute selected chunk prefix of A actions,
     - carry simulation forward either by env stepping (sim) or replay index jumps (replay).
+
+    When ``goal_proprio`` is set with ``goal_frame``, WM goal encode uses that vector (oracle
+    ``flat_obs.jsonl`` at the goal frame). Otherwise goal encode uses live reset proprio (legacy).
     """
     if chunk_len <= 0:
         raise ValueError("chunk_len must be > 0")
@@ -2348,6 +2354,10 @@ def rollout_with_chunks(
         wm_goal_debug_path = Path(comparison_root) / f"episode_{episode_index:04d}" / "wm_goal_for_encode.png"
 
     wm_goal_encode_dbg_path: str | None = None
+    goal_proprio_source = "none"
+    if goal_frame is not None:
+        goal_proprio_source = "oracle_flat_obs" if goal_proprio is not None else "fallback_reset"
+
     if wm_bundle is not None:
         goal_latent, wm_goal_encode_dbg_path = _load_goal_latent(
             goal_latent_source,
@@ -2355,6 +2365,7 @@ def rollout_with_chunks(
             fallback_image=current_image,
             fallback_proprio=current_proprio,
             goal_frame=goal_frame,
+            goal_proprio=goal_proprio,
             wm_scoring_latent=wm_scoring_latent,
             wm_goal_flip_horizontal=wm_goal_flip_horizontal,
             wm_goal_debug_path=wm_goal_debug_path,
@@ -2409,6 +2420,7 @@ def rollout_with_chunks(
                 int(np.asarray(oracle_action_sequence).shape[0]) if oracle_action_sequence is not None else None
             ),
             "oracle_action_source": oracle_action_source,
+            "goal_proprio_source": goal_proprio_source,
         },
     )
 

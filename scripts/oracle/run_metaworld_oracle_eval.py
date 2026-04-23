@@ -117,6 +117,14 @@ def _write_frame_png(path: Path, frame: np.ndarray) -> None:
     imageio.imwrite(path, frame)
 
 
+def _append_flat_obs_jsonl(fp: Any, frame_index: int, obs: Any) -> None:
+    """One JSON line per saved frame; ``frame_index`` matches ``frame_{index:06d}.png``."""
+    from smolvla_obs_state import flatten_obs_state
+
+    vec = np.asarray(flatten_obs_state(obs), dtype=np.float32).reshape(-1)
+    fp.write(json.dumps({"frame_index": int(frame_index), "flat_obs": vec.tolist()}) + "\n")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Meta-World oracle rollout evaluator for push-v3 style tasks."
@@ -239,6 +247,9 @@ def main() -> int:
             episode_success = False
             frames: list[np.ndarray] = []
             frame_seq = 0
+            flat_obs_fp: Any | None = None
+            if save_frames:
+                flat_obs_fp = (episode_dir / "flat_obs.jsonl").open("w", encoding="utf-8")
 
             if write_video or save_frames:
                 frame = _render_rgb_frame(
@@ -248,6 +259,8 @@ def main() -> int:
                     frames.append(frame)
                     if save_frames:
                         _write_frame_png(frames_dir / f"frame_{frame_seq:06d}.png", frame)
+                        if flat_obs_fp is not None:
+                            _append_flat_obs_jsonl(flat_obs_fp, frame_seq, obs)
                     frame_seq += 1
 
             actions_path = episode_dir / "actions.jsonl"
@@ -287,10 +300,16 @@ def main() -> int:
                                 _write_frame_png(
                                     frames_dir / f"frame_{frame_seq:06d}.png", frame
                                 )
+                                if flat_obs_fp is not None:
+                                    _append_flat_obs_jsonl(flat_obs_fp, frame_seq, obs)
                             frame_seq += 1
 
                     if bool(terminated) or bool(truncated):
                         break
+
+            if flat_obs_fp is not None:
+                flat_obs_fp.close()
+                flat_obs_fp = None
 
             if rewards:
                 sum_reward = float(np.sum(rewards, dtype=np.float64))
@@ -324,6 +343,9 @@ def main() -> int:
                     "actions": str((episode_dir / "actions.jsonl").relative_to(output_dir)),
                     "episode_meta": str((episode_dir / "episode_meta.json").relative_to(output_dir)),
                     "frames_dir": str(frames_dir.relative_to(output_dir)) if save_frames else None,
+                    "flat_obs": str((episode_dir / "flat_obs.jsonl").relative_to(output_dir))
+                    if save_frames
+                    else None,
                     "video": rel_video,
                 },
             }
