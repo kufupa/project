@@ -15,6 +15,11 @@ def _slug_task(task: str) -> str:
     return _slug_component(task)
 
 
+def slug_task(task: str) -> str:
+    """Public alias for task slug used in run directory names (same rules as phase9 `build_run_dir_name`)."""
+    return _slug_task(task)
+
+
 def effective_run_name_prefix_slug() -> str:
     """Slug from RUN_NAME_PREFIX or ORACLE_RUN_PREFIX when set (empty otherwise)."""
     raw = (os.environ.get("RUN_NAME_PREFIX") or os.environ.get("ORACLE_RUN_PREFIX") or "").strip()

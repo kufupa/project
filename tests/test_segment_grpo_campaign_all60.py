@@ -65,6 +65,7 @@ def test_default_run_dir_respects_run_name_prefix_env(
     )
     run_dir = campaign_module._resolve_run_dir(args)
     assert run_dir.name.startswith("mt10_")
+    assert "_tpush_v3" in run_dir.name
 
 
 def test_seed_derivation_and_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, campaign_module):
@@ -123,7 +124,13 @@ def test_seed_derivation_and_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert rc == 0
     assert calls == [(0, 1000), (1, 1001), (2, 1002)]
     manifest = json.loads((run_dir / "test" / "segment_grpo_manifest.json").read_text())
-    assert manifest["counts"] == {"ok": 3, "resume_skip": 0, "missing_goal": 0, "failed": 0}
+    assert manifest["counts"] == {
+        "ok": 3,
+        "resume_skip": 0,
+        "missing_goal": 0,
+        "missing_prefetch": 0,
+        "failed": 0,
+    }
     assert len((run_dir / "test" / "episodes.jsonl").read_text().splitlines()) == 3
 
 
