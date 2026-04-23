@@ -7,6 +7,11 @@ from that run's ``frames/episode_*/`` tree; ``--task`` + episode index must matc
 that run. ``--goal-frame-index`` is a fixed PNG index, not a per-task success
 time.
 
+When ``--prefetch-run-root`` is set, each child loads
+``<root>/out_episode_{campaign_offset:04d}.json``; the prior campaign must use the
+same ``--episode-start`` / episode ordering so prefetch rows align with
+``expected_episode_index`` validation in the child.
+
 Phase-specific: edits no existing file, spawns a fresh Python process per
 episode to guarantee memory isolation, handles skip/resume/failure policy.
 """
@@ -28,7 +33,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from segment_grpo_reference import resolve_latest_oracle_pushv3_run  # noqa: E402
-from smolvla_pipeline.run_layout import effective_run_name_prefix_slug, slug_run_directory_prefix  # noqa: E402
+from smolvla_pipeline.run_layout import (  # noqa: E402
+    effective_run_name_prefix_slug,
+    slug_run_directory_prefix,
+    slug_task,
+)
 
 
 @dataclass
@@ -36,7 +45,7 @@ class EpisodeOutcome:
     episode_offset: int
     target_episode_index: int
     reset_seed: int
-    status: str  # "ok" | "resume_skip" | "missing_goal" | "failed"
+    status: str  # "ok" | "resume_skip" | "missing_goal" | "missing_prefetch" | "failed"
     output_json: str | None
     stderr_tail: str | None
     wall_seconds: float
@@ -88,6 +97,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1800.0,
         help="Seconds; subprocess.run timeout per episode. Timeouts logged as failures.",
     )
+    p.add_argument(
+        "--prefetch-run-root",
+        type=Path,
+        default=None,
+        help=(
+            "Prior segment_grpo campaign run directory containing out_episode_XXXX.json per offset; "
+            "passed through as --prefetch-candidates-json to each child."
+        ),
+    )
+    p.add_argument("--prefetch-segment-index", type=int, default=0)
+    p.add_argument(
+        "--wm-selection-env-steps",
+        type=int,
+        default=None,
+        help="Forwarded to run_segment_grpo.py --wm-selection-env-steps when set.",
+    )
     return p.parse_args(argv)
 
 
@@ -98,6 +123,7 @@ def _resolve_run_dir(args: argparse.Namespace) -> Path:
         name = (
             f"run_{stamp}_all60_f{int(args.goal_frame_index)}"
             f"_k{int(args.num_candidates)}_s{int(args.seed_base)}"
+            f"_t{slug_task(str(args.task))}"
         )
         cli_prefix = str(getattr(args, "run_name_prefix", "") or "").strip()
         if cli_prefix:
@@ -130,6 +156,7 @@ def _episode_json_path(run_dir: Path, episode_offset: int) -> Path:
 
 def _build_child_argv(
     args: argparse.Namespace,
+    episode_offset: int,
     target_episode: int,
     reset_seed: int,
     episode_json: Path,
@@ -184,6 +211,18 @@ def _build_child_argv(
         argv += ["--no-comparison-strip-overlay"]
     if args.dry_run:
         argv += ["--dry-run"]
+    wm_sel = getattr(args, "wm_selection_env_steps", None)
+    if wm_sel is not None:
+        argv += ["--wm-selection-env-steps", str(int(wm_sel))]
+    prefetch_root = getattr(args, "prefetch_run_root", None)
+    if prefetch_root is not None:
+        prefetch_json = Path(prefetch_root).expanduser().resolve() / f"out_episode_{int(episode_offset):04d}.json"
+        argv += [
+            "--prefetch-candidates-json",
+            str(prefetch_json),
+            "--prefetch-segment-index",
+            str(int(getattr(args, "prefetch_segment_index", 0))),
+        ]
     return argv
 
 
@@ -250,7 +289,27 @@ def _run_episode(
         )
         return EpisodeOutcome(i, target_episode, reset_seed, "missing_goal", None, None, 0.0)
 
-    argv = _build_child_argv(args, target_episode, reset_seed, ep_json, oracle_run)
+    if getattr(args, "prefetch_run_root", None) is not None:
+        prefetch_json = (
+            Path(args.prefetch_run_root).expanduser().resolve() / f"out_episode_{int(i):04d}.json"
+        )
+        if not prefetch_json.is_file():
+            record = {
+                "episode_offset": i,
+                "target_episode_index": target_episode,
+                "reset_seed": reset_seed,
+                "reason": "prefetch_json_missing",
+                "expected_path": str(prefetch_json),
+            }
+            _append_jsonl(skipped_jsonl, record)
+            print(
+                f"[campaign] {i + 1}/{total} SKIP-MISSING-PREFETCH target_episode={target_episode} "
+                f"expected={prefetch_json}",
+                flush=True,
+            )
+            return EpisodeOutcome(i, target_episode, reset_seed, "missing_prefetch", None, None, 0.0)
+
+    argv = _build_child_argv(args, i, target_episode, reset_seed, ep_json, oracle_run)
     t0 = time.time()
     try:
         proc = subprocess.run(
@@ -355,6 +414,7 @@ def _write_manifest(
             "ok": sum(1 for o in outcomes if o.status == "ok"),
             "resume_skip": sum(1 for o in outcomes if o.status == "resume_skip"),
             "missing_goal": sum(1 for o in outcomes if o.status == "missing_goal"),
+            "missing_prefetch": sum(1 for o in outcomes if o.status == "missing_prefetch"),
             "failed": sum(1 for o in outcomes if o.status == "failed"),
         },
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -374,6 +434,11 @@ def _write_manifest(
         "task": args.task,
         "wm_rollout_mode": args.wm_rollout_mode,
         "wm_scoring_latent": args.wm_scoring_latent,
+        "prefetch_run_root": str(args.prefetch_run_root) if args.prefetch_run_root is not None else None,
+        "prefetch_segment_index": int(getattr(args, "prefetch_segment_index", 0)),
+        "wm_selection_env_steps": (
+            int(args.wm_selection_env_steps) if getattr(args, "wm_selection_env_steps", None) is not None else None
+        ),
     }
     manifest_path = run_dir / "segment_grpo_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
