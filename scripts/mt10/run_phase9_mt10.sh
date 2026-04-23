@@ -46,7 +46,7 @@ for a in "$@"; do
 done
 
 for task in "${MT10_TASK_IDS[@]}"; do
-  oracle_root="$("${PY}" -c "import json,sys; m=json.load(open(sys.argv[1])); print(m.get('tasks',{}).get(sys.argv[2],''))" "${INDEX_JSON}" "${task}")"
+  oracle_root="$("${PY}" -c "import json,sys; m=json.load(open(sys.argv[1],encoding='utf-8')); print(m.get('tasks',{}).get(sys.argv[2],''))" "${INDEX_JSON}" "${task}")"
   if [[ -z "${oracle_root}" ]]; then
     echo "[mt10:phase9] ERROR: no phase6 oracle path for task=${task} in ${INDEX_JSON}" >&2
     exit 4
@@ -71,7 +71,14 @@ for task in "${MT10_TASK_IDS[@]}"; do
       --dry-run
     )
     "${cmd[@]}" 2>&1 | tee "${logf}"
+    py_rc="${PIPESTATUS[0]:-1}"
     set -o pipefail
+    if [[ "${py_rc}" -ne 0 ]]; then
+      echo "[mt10:phase9] ERROR: dry-run driver failed rc=${py_rc} task=${task}" >&2
+      tail -n 80 "${logf}" >&2 || true
+      rm -f "${logf}"
+      exit "${py_rc}"
+    fi
     run_dir="$(grep '\[phase9\] run directory:' "${logf}" | tail -n 1 | awk '{print $NF}' || true)"
     rm -f "${logf}"
     if [[ -z "${run_dir}" ]]; then
@@ -109,7 +116,14 @@ for task in "${MT10_TASK_IDS[@]}"; do
     cmd+=(--jepa-repo "${JEPA_REPO}")
   fi
   "${cmd[@]}" 2>&1 | tee "${logf}"
+  py_rc="${PIPESTATUS[0]:-1}"
   set -o pipefail
+  if [[ "${py_rc}" -ne 0 ]]; then
+    echo "[mt10:phase9] ERROR: phase9 driver failed rc=${py_rc} task=${task}" >&2
+    tail -n 80 "${logf}" >&2 || true
+    rm -f "${logf}"
+    exit "${py_rc}"
+  fi
   run_dir="$(grep '\[phase9\] run directory:' "${logf}" | tail -n 1 | awk '{print $NF}' || true)"
   rm -f "${logf}"
   if [[ -z "${run_dir}" ]]; then
