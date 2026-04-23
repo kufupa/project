@@ -2224,6 +2224,8 @@ def rollout_with_chunks(
     oracle_action_sequence: np.ndarray | None = None,
     oracle_action_source: str | None = None,
     goal_proprio: np.ndarray | None = None,
+    prefetched_candidate_actions: Sequence[np.ndarray] | None = None,
+    wm_selection_env_steps: int | None = None,
 ) -> tuple[EpisodeLog, nn.Module | None]:
     """
     Run one segment-level GRPO rollout.
@@ -2252,6 +2254,38 @@ def rollout_with_chunks(
         _ora = np.asarray(oracle_action_sequence, dtype=np.float32)
         if _ora.ndim != 2 or _ora.shape[0] < 1:
             raise ValueError(f"oracle_action_sequence must be 2-D (T, A) with T>=1; got shape {_ora.shape}")
+
+    if prefetched_candidate_actions is not None:
+        if oracle_action_sequence is not None:
+            raise ValueError("prefetched_candidate_actions is incompatible with oracle_action_sequence")
+        if int(max_steps) > int(chunk_len):
+            raise ValueError(
+                "prefetched_candidate_actions (v1) requires max_steps <= chunk_len "
+                f"(got max_steps={max_steps}, chunk_len={chunk_len})"
+            )
+        if len(prefetched_candidate_actions) != int(num_candidates):
+            raise ValueError(
+                f"prefetched_candidate_actions length {len(prefetched_candidate_actions)} "
+                f"!= num_candidates {num_candidates}"
+            )
+        need_rows = int(max_steps)
+        if wm_selection_env_steps is not None:
+            need_rows = max(need_rows, int(wm_selection_env_steps))
+        for ci, arr in enumerate(prefetched_candidate_actions):
+            a = np.asarray(arr, dtype=np.float32)
+            if a.shape[0] < need_rows:
+                raise ValueError(
+                    f"prefetch candidate {ci}: {a.shape[0]} rows < required {need_rows} "
+                    f"(max_steps / wm_selection_env_steps)"
+                )
+    if wm_selection_env_steps is not None:
+        if int(wm_selection_env_steps) < 1:
+            raise ValueError("wm_selection_env_steps must be >= 1")
+        if int(wm_selection_env_steps) > int(chunk_len) or int(wm_selection_env_steps) > int(max_steps):
+            raise ValueError(
+                f"wm_selection_env_steps={wm_selection_env_steps} exceeds "
+                f"chunk_len={chunk_len} or max_steps={max_steps}"
+            )
 
     rng = np.random.default_rng(seed)
     from smolvla_pipeline.evaluator import _resolve_task_text  # noqa: PLC0415
@@ -2345,8 +2379,11 @@ def rollout_with_chunks(
             print(f"[segment_grpo] reset frame compare failed for episode {episode_index}: {exc}")
 
     if smolvla_bundle is None:
-        if not dry_run and oracle_action_sequence is None:
-            raise RuntimeError("SmolVLA bundle is required when not in dry-run mode.")
+        if not dry_run and oracle_action_sequence is None and prefetched_candidate_actions is None:
+            raise RuntimeError(
+                "SmolVLA bundle is required when not in dry-run mode unless "
+                "oracle_action_sequence or prefetched_candidate_actions is set."
+            )
         smolvla_bundle = None
 
     wm_goal_debug_path: Path | None = None
@@ -2421,6 +2458,10 @@ def rollout_with_chunks(
             ),
             "oracle_action_source": oracle_action_source,
             "goal_proprio_source": goal_proprio_source,
+            "prefetch_mode": prefetched_candidate_actions is not None,
+            "wm_selection_env_steps": (
+                int(wm_selection_env_steps) if wm_selection_env_steps is not None else None
+            ),
         },
     )
 
@@ -2435,6 +2476,9 @@ def rollout_with_chunks(
         segment_idx = len(episode_log.segments)
         segment_start = current_step
         effective_len = min(chunk_len, max_steps - current_step)
+
+        wm_score_image = np.asarray(current_image, copy=True)
+        wm_score_proprio = np.asarray(current_proprio, copy=True)
 
         segment_candidates: list[ChunkCandidate] = []
         candidate_traces: dict[int, DecodeTrace | None] = {}
@@ -2462,6 +2506,21 @@ def rollout_with_chunks(
                 }
                 if oracle_action_source:
                     chunk_meta["oracle_action_source"] = str(oracle_action_source)
+            elif prefetched_candidate_actions is not None:
+                raw = np.asarray(prefetched_candidate_actions[candidate_idx], dtype=np.float32)
+                if int(raw.shape[1]) != int(env_action_dim):
+                    raise ValueError(
+                        f"prefetch candidate {candidate_idx} width {raw.shape[1]} != env_action_dim {env_action_dim}"
+                    )
+                if int(raw.shape[0]) < int(effective_len):
+                    raise RuntimeError(
+                        f"prefetch candidate {candidate_idx}: rows {raw.shape[0]} < effective_len {effective_len}"
+                    )
+                chunk = np.asarray(raw[: int(effective_len)], dtype=np.float32).copy()
+                chunk_meta = {
+                    "chunk_source": "prefetch",
+                    "prefetch_rows_available": int(raw.shape[0]),
+                }
             elif smolvla_bundle is not None and not dry_run:
                 chunk, chunk_meta = _sample_smolvla_chunk(
                     smolvla_bundle,
@@ -2484,13 +2543,20 @@ def rollout_with_chunks(
             score_trace: ScoreTrace | None = None
             if wm_bundle is not None and goal_latent is not None:
                 try:
+                    score_chunk_len = int(effective_len)
+                    score_chunk_actions = chunk
+                    if wm_selection_env_steps is not None:
+                        score_chunk_len = int(
+                            min(int(wm_selection_env_steps), int(effective_len), int(chunk.shape[0]))
+                        )
+                        score_chunk_actions = np.asarray(chunk[:score_chunk_len], dtype=np.float32)
                     distance, score_trace, decode_trace = score_chunk_by_goal_latent(
                         wm_bundle,
-                        current_image,
-                        current_proprio,
-                        chunk,
+                        wm_score_image,
+                        wm_score_proprio,
+                        score_chunk_actions,
                         goal_latent,
-                        chunk_len=effective_len,
+                        chunk_len=int(score_chunk_len),
                         return_latent_trace=True,
                         wm_rollout_mode=wm_rollout_mode,
                         wm_scoring_latent=wm_scoring_latent,
@@ -2643,8 +2709,37 @@ def rollout_with_chunks(
                     segment_done = True
                     env_done = True
 
-        if wm_bundle is not None and selected_trace is not None:
-            pred_frames, decode_failure_reason = _decode_latent_trace_to_frames(wm_bundle, selected_trace)
+        strip_decode_trace = None
+        strip_decode_score_trace = None
+        if (
+            wm_selection_env_steps is not None
+            and wm_bundle is not None
+            and goal_latent is not None
+            and not dry_run
+        ):
+            try:
+                _, strip_decode_score_trace, strip_decode_trace = score_chunk_by_goal_latent(
+                    wm_bundle,
+                    wm_score_image,
+                    wm_score_proprio,
+                    best_actions,
+                    goal_latent,
+                    chunk_len=int(effective_len),
+                    return_latent_trace=True,
+                    wm_rollout_mode=wm_rollout_mode,
+                    wm_scoring_latent=wm_scoring_latent,
+                )
+            except Exception as exc:
+                strip_decode_trace = None
+                strip_decode_score_trace = None
+                if strict_wm_scoring:
+                    raise
+                print(f"[segment_grpo] strip WM full-horizon unroll failed: {exc}")
+
+        trace_for_decode = strip_decode_trace if strip_decode_trace is not None else selected_trace
+        decode_failure_reason: str | None = None
+        if wm_bundle is not None and trace_for_decode is not None:
+            pred_frames, decode_failure_reason = _decode_latent_trace_to_frames(wm_bundle, trace_for_decode)
             if decode_failure_reason is not None and 0 <= selected_idx < len(segment_candidates):
                 if strict_decode:
                     raise RuntimeError(
@@ -2657,7 +2752,7 @@ def rollout_with_chunks(
                 pred_frames = []
             elif decode_failure_reason is None:
                 segment_candidates[int(selected_idx)].meta["decode_status"] = "ok"
-        elif wm_bundle is not None and selected_trace is None and selected_meta is not None:
+        elif wm_bundle is not None and trace_for_decode is None and selected_meta is not None:
             decode_failure_reason = "No latent trace available for selected candidate."
             if strict_decode:
                 raise RuntimeError(
@@ -2674,9 +2769,11 @@ def rollout_with_chunks(
         selected_trace_len = 0
         if pred_frames:
             selected_trace_len = len(pred_frames)
-        elif selected_trace is not None:
+        elif trace_for_decode is not None:
             selected_trace_len = (
-                len(selected_trace.visual_latents) if selected_trace.visual_latents else len(selected_trace.proprio_latents)
+                len(trace_for_decode.visual_latents)
+                if trace_for_decode.visual_latents
+                else len(trace_for_decode.proprio_latents)
             )
         if selected_meta is not None:
             selected_meta["latent_trace_len"] = int(selected_trace_len)
@@ -2707,9 +2804,10 @@ def rollout_with_chunks(
             "selected": True,
         }
 
+        decode_trace_for_stride = strip_decode_trace if strip_decode_trace is not None else selected_trace
         wm_stride = 1
-        if selected_trace is not None:
-            wm_stride = int(getattr(selected_trace, "env_steps_per_wm_step", 1) or 1)
+        if decode_trace_for_stride is not None:
+            wm_stride = int(getattr(decode_trace_for_stride, "env_steps_per_wm_step", 1) or 1)
 
         wm_footer_lines: list[str] | None = None
         wm_footer_min_lines: int | None = None
@@ -2743,6 +2841,9 @@ def rollout_with_chunks(
                     segment_metadata["wm_step_count"] = int(wm_step_count)
 
         segment_comparison_path = None
+        overlay_score_trace = (
+            strip_decode_score_trace if strip_decode_score_trace is not None else selected_score_trace
+        )
         if comparison_root_path is not None and pred_frames and carried_steps > 0:
             overlay_goal_np = None
             if comparison_strip_overlay and goal_latent is not None:
@@ -2765,7 +2866,7 @@ def rollout_with_chunks(
                 wm_env_steps_per_wm_step=wm_stride,
                 overlay_decode_meta=bool(comparison_strip_overlay),
                 overlay_goal_latent_np=overlay_goal_np,
-                overlay_score_trace=selected_score_trace,
+                overlay_score_trace=overlay_score_trace,
                 wm_megastep_footer_lines=wm_footer_lines,
                 wm_megastep_footer_min_lines=wm_footer_min_lines,
             )

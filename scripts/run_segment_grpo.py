@@ -21,6 +21,7 @@ from segment_grpo_loop import (  # noqa: E402
 from segment_grpo_reference import (  # noqa: E402
     TopEpisode,
     load_oracle_reference_frames,
+    load_prefetch_candidate_actions,
     parse_top15_report,
     resolve_latest_oracle_pushv3_run,
 )
@@ -192,9 +193,37 @@ def _parse_args() -> argparse.Namespace:
             "0 disables (default: %(default)s)."
         ),
     )
+    parser.add_argument(
+        "--prefetch-candidates-json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional prior segment_grpo episode JSON; load candidate action chunks from "
+            "segments[--prefetch-segment-index] and skip SmolVLA sampling."
+        ),
+    )
+    parser.add_argument(
+        "--prefetch-segment-index",
+        type=int,
+        default=0,
+        help="Which segment in the prefetch JSON to read (default: first segment).",
+    )
+    parser.add_argument(
+        "--wm-selection-env-steps",
+        type=int,
+        default=None,
+        help=(
+            "If set, WM scores only the first N env actions of each candidate chunk (argmax on prefix); "
+            "after selection, a second WM unroll on the full executed chunk can drive strip decode."
+        ),
+    )
     args = parser.parse_args()
     if int(args.smolvla_n_action_steps) < 1:
         parser.error("--smolvla-n-action-steps must be >= 1")
+    if args.prefetch_candidates_json is not None and int(args.prefetch_segment_index) < 0:
+        parser.error("--prefetch-segment-index must be >= 0")
+    if args.wm_selection_env_steps is not None and int(args.wm_selection_env_steps) < 1:
+        parser.error("--wm-selection-env-steps must be >= 1 when set")
     return args
 
 
@@ -309,9 +338,12 @@ def main() -> int:
         f"comparison_strip_stitch_gutter_pixels={args.comparison_strip_stitch_gutter_pixels}"
     )
 
+    prefetch_mode = args.prefetch_candidates_json is not None
     smolvla_bundle = None
     try:
-        if args.checkpoint:
+        if prefetch_mode:
+            print("[segment_grpo] prefetch candidates mode: skipping SmolVLA load.")
+        elif args.checkpoint:
             smolvla_bundle = load_smolvla_bundle(
                 args.checkpoint,
                 device,
@@ -320,7 +352,7 @@ def main() -> int:
         elif args.dry_run:
             print("[segment_grpo] --checkpoint missing: using synthetic action fallback.")
         else:
-            print("Error: --checkpoint is required when not using --dry-run.")
+            print("Error: --checkpoint is required when not using --dry-run or prefetch mode.")
             return 1
     except Exception as exc:
         if args.dry_run:
@@ -344,7 +376,7 @@ def main() -> int:
         else:
             raise
 
-    if smolvla_bundle is None and not args.dry_run:
+    if smolvla_bundle is None and not args.dry_run and not prefetch_mode:
         print("Error: SmolVLA bundle unavailable and --dry-run is disabled.")
         return 1
 
@@ -420,6 +452,23 @@ def main() -> int:
         artifact_dir = episode_output.parent / f"{episode_output.stem}_artifacts"
         comparison_root = artifact_dir / "comparison"
 
+        prefetched_candidate_actions = None
+        wm_selection_env_steps = (
+            int(args.wm_selection_env_steps) if args.wm_selection_env_steps is not None else None
+        )
+        if prefetch_mode:
+            target_rows = max(int(args.chunk_len), int(args.max_steps))
+            if wm_selection_env_steps is not None:
+                target_rows = max(target_rows, int(wm_selection_env_steps))
+            prefetched_candidate_actions = load_prefetch_candidate_actions(
+                args.prefetch_candidates_json,
+                num_candidates=int(args.num_candidates),
+                target_rows=target_rows,
+                segment_index=int(args.prefetch_segment_index),
+                expected_task=str(args.task),
+                expected_episode_index=int(target_episode),
+            )
+
         episode_log, adapter = rollout_with_chunks(
             smolvla_bundle,
             wm_bundle,
@@ -454,6 +503,8 @@ def main() -> int:
             smolvla_n_action_steps=int(args.smolvla_n_action_steps),
             comparison_strip_overlay=bool(args.comparison_strip_overlay),
             comparison_strip_stitch_gutter_pixels=int(args.comparison_strip_stitch_gutter_pixels),
+            prefetched_candidate_actions=prefetched_candidate_actions,
+            wm_selection_env_steps=wm_selection_env_steps,
         )
         episode_path = _resolve_output_path(output_json_base, episode_idx, int(args.episodes))
         _write_json(episode_path, episode_log.to_dict())
