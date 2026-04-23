@@ -45,6 +45,18 @@ class SampledBatchStep:
     action_clip_any: np.ndarray
 
 
+@dataclass
+class SampledActionChunk:
+    exec_action_np: np.ndarray
+    policy_tensor: torch.Tensor
+    unsquashed_chunk: torch.Tensor
+    log_prob_steps: torch.Tensor
+    log_prob_sum: torch.Tensor
+    action_clip_fraction: np.ndarray
+    action_clip_any: np.ndarray
+    unique_action_rows: int
+
+
 class MetaWorldSmolVLAGRPOPolicy:
     """Wraps LeRobot SmolVLAPolicy + preprocessor/postprocessor for Push-v3 rollouts."""
 
@@ -153,6 +165,54 @@ class MetaWorldSmolVLAGRPOPolicy:
         clipped = np.clip(raw_np, self.action_low, self.action_high).astype(np.float32, copy=False)
         changed = np.not_equal(clipped, raw_np)
         return clipped, float(np.mean(changed)), bool(np.any(changed))
+
+    def _get_distr_params_chunk(
+        self,
+        proc: Any,
+        *,
+        chunk_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if int(chunk_len) < 1:
+            raise ValueError("chunk_len must be >= 1")
+        policy_hook = getattr(self._policy, "_get_distr_params_chunk", None)
+        if callable(policy_hook):
+            try:
+                mean, log_std = policy_hook(proc)
+            except TypeError:
+                mean, log_std = policy_hook(proc, chunk_len=int(chunk_len))
+            return self._reshape_chunk_params(mean, log_std, chunk_len=int(chunk_len))
+        model = getattr(self._policy, "model", None)
+        model_hook = getattr(model, "_get_distr_params_chunk", None)
+        if callable(model_hook):
+            try:
+                mean, log_std = model_hook(proc)
+            except TypeError:
+                mean, log_std = model_hook(proc, chunk_len=int(chunk_len))
+            return self._reshape_chunk_params(mean, log_std, chunk_len=int(chunk_len))
+        mean, log_std = self._policy.select_action_distr_params(proc)
+        return self._reshape_chunk_params(mean, log_std, chunk_len=int(chunk_len))
+
+    def _reshape_chunk_params(
+        self,
+        mean: torch.Tensor,
+        log_std: torch.Tensor,
+        *,
+        chunk_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mean = mean.reshape(-1, self.action_dim)
+        log_std = log_std.reshape(-1, self.action_dim)
+        if int(mean.shape[0]) == 1 and int(chunk_len) > 1:
+            mean = mean.expand(int(chunk_len), self.action_dim)
+            log_std = log_std.expand(int(chunk_len), self.action_dim)
+        if int(mean.shape[0]) > int(chunk_len):
+            mean = mean[: int(chunk_len)]
+            log_std = log_std[: int(chunk_len)]
+        if int(mean.shape[0]) != int(chunk_len) or int(log_std.shape[0]) != int(chunk_len):
+            raise RuntimeError(
+                "Chunk distribution params must have chunk_len rows "
+                f"({int(chunk_len)}), got mean={tuple(mean.shape)} log_std={tuple(log_std.shape)}."
+            )
+        return mean, log_std
 
     def assert_grpo_api(self) -> None:
         """Raise if forked LeRobot GRPO hooks are missing."""
@@ -276,6 +336,49 @@ class MetaWorldSmolVLAGRPOPolicy:
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
         )
 
+    def sample_action_chunk_from_proc(
+        self,
+        proc: Any,
+        *,
+        chunk_len: int,
+        rng: torch.Generator | None = None,
+    ) -> SampledActionChunk:
+        proc_d = self._proc_to_device(proc)
+        mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=int(chunk_len))
+        std = torch.exp(log_std)
+        if rng is None:
+            noise = torch.randn_like(mean)
+        else:
+            noise = torch.randn(mean.shape, generator=rng, device=mean.device, dtype=mean.dtype)
+        unsquashed = mean + std * noise
+        if self.action_transform == "tanh_norm_ablation":
+            policy_tensor = torch.tanh(unsquashed)
+            log_prob_steps = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+        else:
+            policy_tensor = unsquashed
+            log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
+
+        exec_rows: list[np.ndarray] = []
+        clip_frac_rows: list[float] = []
+        clip_any_rows: list[bool] = []
+        for row in policy_tensor:
+            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(row.reshape(1, -1))
+            exec_rows.append(np.asarray(exec_np, dtype=np.float32))
+            clip_frac_rows.append(clip_fraction)
+            clip_any_rows.append(clip_any)
+
+        exec_action_np = np.stack(exec_rows, axis=0)
+        return SampledActionChunk(
+            exec_action_np=exec_action_np,
+            policy_tensor=policy_tensor.detach(),
+            unsquashed_chunk=unsquashed.detach(),
+            log_prob_steps=log_prob_steps.detach().reshape(int(chunk_len)),
+            log_prob_sum=log_prob_steps.detach().sum(),
+            action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
+            action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+            unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
+        )
+
     def sample_action(
         self,
         obs: Any,
@@ -315,6 +418,20 @@ class MetaWorldSmolVLAGRPOPolicy:
         u = unsquashed_actions.to(mean.device)
         if u.shape != mean.shape:
             u = u.reshape(mean.shape)
+        if self.action_transform == "tanh_norm_ablation":
+            squished = torch.tanh(u)
+            return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        return self.calculate_gaussian_log_prob(mean, log_std, u)
+
+    def get_action_probs_for_chunk_from_proc(
+        self,
+        proc: Any,
+        unsquashed_chunk: torch.Tensor,
+    ) -> torch.Tensor:
+        proc_d = self._proc_to_device(proc)
+        chunk_len = int(unsquashed_chunk.reshape(-1, self.action_dim).shape[0])
+        mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=chunk_len)
+        u = unsquashed_chunk.to(mean.device).reshape(mean.shape)
         if self.action_transform == "tanh_norm_ablation":
             squished = torch.tanh(u)
             return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
