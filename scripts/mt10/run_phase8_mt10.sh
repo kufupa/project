@@ -46,7 +46,7 @@ for a in "$@"; do
 done
 
 for task in "${MT10_TASK_IDS[@]}"; do
-  oracle_root="$("${PY}" -c "import json,sys; m=json.load(open(sys.argv[1])); print(m.get('tasks',{}).get(sys.argv[2],''))" "${INDEX_JSON}" "${task}")"
+  oracle_root="$("${PY}" -c "import json,sys; m=json.load(open(sys.argv[1],encoding='utf-8')); print(m.get('tasks',{}).get(sys.argv[2],''))" "${INDEX_JSON}" "${task}")"
   if [[ -z "${oracle_root}" ]]; then
     echo "[mt10:phase8] ERROR: no phase6 oracle path for task=${task} in ${INDEX_JSON}" >&2
     exit 4
@@ -92,11 +92,41 @@ for task in "${MT10_TASK_IDS[@]}"; do
   if [[ -n "${JEPA_REPO:-}" ]]; then
     cmd+=(--jepa-repo "${JEPA_REPO}")
   fi
+  PREFETCH_INDEX="${MT10_PHASE8_PREFETCH_INDEX_JSON:-}"
+  if [[ -n "${PREFETCH_INDEX}" ]]; then
+    if [[ ! -f "${PREFETCH_INDEX}" ]]; then
+      echo "[mt10:phase8] ERROR: MT10_PHASE8_PREFETCH_INDEX_JSON not a file: ${PREFETCH_INDEX}" >&2
+      exit 4
+    fi
+    prefetch_root="$("${PY}" -c "import json,sys; m=json.load(open(sys.argv[1],encoding='utf-8')); print(m.get('segment_grpo_run_dirs',{}).get(sys.argv[2],''))" "${PREFETCH_INDEX}" "${task}")"
+    if [[ -z "${prefetch_root}" ]]; then
+      echo "[mt10:phase8] ERROR: no segment_grpo_run_dirs entry for task=${task} in ${PREFETCH_INDEX}" >&2
+      exit 4
+    fi
+    if [[ ! -d "${prefetch_root}" ]]; then
+      echo "[mt10:phase8] ERROR: prefetch run root not a directory: ${prefetch_root}" >&2
+      exit 4
+    fi
+    cmd+=(--prefetch-run-root "${prefetch_root}")
+  fi
+  if [[ -n "${MT10_PHASE8_WM_SELECTION_ENV_STEPS:-}" ]]; then
+    cmd+=(--wm-selection-env-steps "${MT10_PHASE8_WM_SELECTION_ENV_STEPS}")
+  fi
+  if [[ -n "${MT10_PHASE8_PREFETCH_SEGMENT_INDEX:-}" ]]; then
+    cmd+=(--prefetch-segment-index "${MT10_PHASE8_PREFETCH_SEGMENT_INDEX}")
+  fi
   if [[ -n "${MT10_PHASE8_RUN_NAME:-}" ]]; then
     cmd+=(--run-name "${MT10_PHASE8_RUN_NAME}")
   fi
   "${cmd[@]}" 2>&1 | tee "${logf}"
+  py_rc="${PIPESTATUS[0]:-1}"
   set -o pipefail
+  if [[ "${py_rc}" -ne 0 ]]; then
+    echo "[mt10:phase8] ERROR: campaign failed rc=${py_rc} task=${task}" >&2
+    tail -n 80 "${logf}" >&2 || true
+    rm -f "${logf}"
+    exit "${py_rc}"
+  fi
   run_dir="$(grep '\[campaign\] run_dir=' "${logf}" | tail -n 1 | sed 's/^.*run_dir=//' || true)"
   rm -f "${logf}"
   if [[ -z "${run_dir}" ]]; then
