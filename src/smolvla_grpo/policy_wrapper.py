@@ -221,9 +221,10 @@ class MetaWorldSmolVLAGRPOPolicy:
         self,
         proc: Any,
         *,
-        reset_seed: int,
-        rollout_index_offset: int,
         n_envs: int,
+        rngs: Sequence[torch.Generator] | None = None,
+        reset_seed: int | None = None,
+        rollout_index_offset: int = 0,
     ) -> SampledBatchStep:
         """Sample one action per batch row; RNG matches serial `collect_rollout_group` indexing."""
         proc_d = self._proc_to_device(proc)
@@ -237,10 +238,17 @@ class MetaWorldSmolVLAGRPOPolicy:
         lp_rows: list[torch.Tensor] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
+        if rngs is not None and len(rngs) != b:
+            raise ValueError(f"rngs length {len(rngs)} != n_envs {b}")
+        if rngs is None and reset_seed is None:
+            raise ValueError("Either rngs or reset_seed must be provided")
         base = int(rollout_index_offset)
         for r in range(b):
-            gen = torch.Generator(device=mean.device)
-            gen.manual_seed(int(reset_seed) * 1000003 + (base + r) * 7919)
+            if rngs is None:
+                gen = torch.Generator(device=mean.device)
+                gen.manual_seed(int(reset_seed) * 1000003 + (base + r) * 7919)
+            else:
+                gen = rngs[r]
             m = mean[r : r + 1]
             ls = log_std[r : r + 1]
             std = torch.exp(ls)
