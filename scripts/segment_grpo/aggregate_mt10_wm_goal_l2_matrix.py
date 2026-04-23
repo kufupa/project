@@ -518,10 +518,14 @@ def _emit_latex_compare_run_delta(
     body.append("\\hline\n\\end{tabular}\n}\n\\end{center}\n")
     body.append(
         "\\par\\vspace{0.3em}\n"
-        "\\noindent\\small "
-        "Interpretation: each task has a VLA row and a delta row. "
-        "Negative \\(\\Delta\\) means oracle is closer than VLA in that bin, "
-        "positive means oracle is farther.\n"
+        "\\noindent\\small\\textbf{How to read this table.} "
+        "Cell values are cross-episode mean latent distances per bin. "
+        "Each task has a VLA row and a \\(\\Delta_{\\mathrm{oracle}}\\) row, where "
+        "\\(\\Delta_{\\mathrm{oracle}} = \\mathrm{oracle} - \\mathrm{VLA}\\). "
+        "A positive value means oracle is farther from the world-model goal than VLA, "
+        "and a negative value means oracle is closer. "
+        "In this representation, larger raw values mean larger latent distance, "
+        "so values closer to zero are preferable when the distance is interpreted as reconstruction error.\n"
     )
     return "".join(body)
 
@@ -768,7 +772,6 @@ def main(argv: list[str] | None = None) -> int:
             r"\item For each task, rows are shown as \textbf{VLA} and \textbf{$\Delta_{\mathrm{oracle}}$} (oracle minus VLA).",
             r"\item Task names have the \texttt{-v3} suffix removed for readability.",
             r"\end{itemize}",
-            r"\footnote{Cell values are cross-episode mean latent distances per bin. Positive $\Delta$ means oracle is farther from the world-model goal than VLA, negative $\Delta$ means oracle is closer. In all rows, larger raw values mean larger latent distance; a value closer to zero is better when distance is interpreted as reconstruction error.}",
         ]
         if args.compare_format == "wide":
             tex = _emit_latex_compare_wide(

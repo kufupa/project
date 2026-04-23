@@ -157,6 +157,7 @@ def main() -> int:
             replay_root=None,
             goal_latent_source="",
             goal_frame=goal_ref.goal_frame,
+            goal_proprio=goal_ref.goal_flat_obs,
             start_frame=goal_ref.start_frame,
             goal_frame_index=int(args.goal_frame_index),
             goal_source=str(goal_ref.goal_frame_path),

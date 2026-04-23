@@ -432,6 +432,7 @@ def main() -> int:
             replay_root=args.replay_root,
             goal_latent_source=args.goal_latent_source,
             goal_frame=(goal_reference.goal_frame if goal_reference is not None else None),
+            goal_proprio=(goal_reference.goal_flat_obs if goal_reference is not None else None),
             start_frame=(goal_reference.start_frame if goal_reference is not None else None),
             goal_frame_index=int(args.goal_frame_index),
             goal_source=(str(goal_reference.goal_frame_path) if goal_reference is not None else None),
