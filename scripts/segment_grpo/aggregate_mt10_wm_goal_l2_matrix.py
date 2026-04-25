@@ -51,8 +51,12 @@ def _discover_task_run_dirs(artifacts_root: Path) -> dict[str, Path]:
     return out
 
 
-def _expected_bin_labels() -> list[str]:
-    return [f"{lo}:{lo + 5}" for lo in range(0, 50, 5)]
+def _expected_bin_labels(*, max_env_steps: int, stride: int = 5) -> list[str]:
+    if max_env_steps < 1:
+        raise ValueError(f"max_env_steps must be >= 1, got {max_env_steps}")
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
+    return [f"{lo}:{min(lo + stride, max_env_steps)}" for lo in range(0, max_env_steps, stride)]
 
 
 # Row labels in CSV/LaTeX second column (phase08 policy vs phase09 oracle replay).
@@ -65,18 +69,49 @@ def _csv_col_for_range(label: str) -> str:
     return "r" + label.replace(":", "_")
 
 
+def _goal_bin_index(bin_labels: list[str], goal_frame_index: int | None) -> int | None:
+    if goal_frame_index is None:
+        return None
+    for i, lab in enumerate(bin_labels):
+        try:
+            lo, hi = map(int, lab.split(":"))
+        except ValueError:
+            continue
+        if lo < goal_frame_index <= hi:
+            return i
+    return None
+
+
+def _tabular_cols_with_goal_sep(prefix: str, n: int, goal_bin_index: int | None) -> str:
+    cols = [*prefix]
+    if n <= 0:
+        return "".join(cols)
+    for i in range(n):
+        if goal_bin_index is not None and i == goal_bin_index:
+            cols.append("|")
+        cols.append("r")
+        if goal_bin_index is not None and i == goal_bin_index:
+            cols.append("|")
+    return "".join(cols)
+
+
 def _aggregate_one_run(
     agg: Any,
     run_dir: Path,
     *,
     candidate_mode: str,
+    max_env_steps: int,
 ) -> dict[str, Any]:
     glob_pat = agg._infer_glob(run_dir)
     err, by_ep = agg._load_episode_maps(run_dir, glob_pat, candidate_mode=candidate_mode)
     maps = list(by_ep.values())
     stats = agg._aggregate_bins(maps) if maps else {}
     rows = agg._stats_to_rows(stats)
-    by_label = {r["range"]: r for r in rows}
+    by_label = {
+        r["range"]: r
+        for r in rows
+        if int(r.get("range_hi", 0)) <= int(max_env_steps)
+    }
     return {
         "run_dir": str(run_dir),
         "glob": glob_pat,
@@ -486,8 +521,10 @@ def _emit_latex_compare_run_delta(
     bin_labels: list[str],
     compare_rows: list[dict[str, Any]],
     intro_lines: list[str],
+    goal_frame_index: int | None = None,
 ) -> str:
-    cols = "ll" + "r" * len(bin_labels)
+    goal_bin = _goal_bin_index(bin_labels, goal_frame_index)
+    cols = _tabular_cols_with_goal_sep("ll", len(bin_labels), goal_bin)
     head_cells = " & ".join([r"\textbf{Task}", r"\textbf{Run}"] + [rf"\textbf{{{_latex_escape(lab)}}}" for lab in bin_labels])
     body: list[str] = [
         "% MT10 WM-goal latent L2 task-wise table: VLA and oracle delta per range.\n",
@@ -576,6 +613,7 @@ def build_matrix_payload(
     phase9_root: Path,
     candidate_mode_phase8: str,
     candidate_mode_phase9: str,
+    max_env_steps: int,
     strict: bool,
 ) -> dict[str, Any]:
     agg = _load_agg_module()
@@ -597,13 +635,42 @@ def build_matrix_payload(
     if strict and len(common) != 10:
         raise ValueError(f"Expected 10 paired tasks, got {len(common)}: {common}")
 
-    bin_labels = _expected_bin_labels()
+    bin_labels = _expected_bin_labels(max_env_steps=max_env_steps, stride=5)
+    goal_frame_index: int | None = None
+    for task in common:
+        m8 = json.loads((p8[task] / "segment_grpo_manifest.json").read_text(encoding="utf-8"))
+        m9 = json.loads((p9[task] / "segment_grpo_manifest.json").read_text(encoding="utf-8"))
+        g8 = m8.get("goal_frame_index")
+        g9 = m9.get("goal_frame_index")
+        if not isinstance(g8, int) or not isinstance(g9, int):
+            raise ValueError(f"Missing/invalid goal_frame_index for task={task}")
+        if g8 != g9:
+            raise ValueError(
+                f"Goal-frame mismatch for task={task}: phase8={g8}, phase9={g9}. "
+                "Re-run phase9 with MT10_PHASE9_GOAL_FRAME=25 and matching root."
+            )
+        if goal_frame_index is None:
+            goal_frame_index = g8
+        elif goal_frame_index != g8:
+            raise ValueError(
+                f"Inconsistent goal_frame_index for task={task}: expected {goal_frame_index}, got {g8}."
+            )
     per_task: dict[str, Any] = {}
     wide_rows: list[dict[str, Any]] = []
 
     for task in common:
-        s8 = _aggregate_one_run(agg, p8[task], candidate_mode=candidate_mode_phase8)
-        s9 = _aggregate_one_run(agg, p9[task], candidate_mode=candidate_mode_phase9)
+        s8 = _aggregate_one_run(
+            agg,
+            p8[task],
+            candidate_mode=candidate_mode_phase8,
+            max_env_steps=max_env_steps,
+        )
+        s9 = _aggregate_one_run(
+            agg,
+            p9[task],
+            candidate_mode=candidate_mode_phase9,
+            max_env_steps=max_env_steps,
+        )
         per_task[task] = {"phase8": s8, "phase9": s9}
         wide_rows.append(_wide_row(task, PHASE8_ROW_LABEL, s8["stats_by_range"], bin_labels))
         wide_rows.append(_wide_row(task, PHASE9_ROW_LABEL, s9["stats_by_range"], bin_labels))
@@ -630,6 +697,8 @@ def build_matrix_payload(
         "compare_csv_rows_long": compare_rows_long,
         "compare_csv_rows_summary": compare_rows_summary,
         "compare_csv_rows_run_delta": compare_rows_run_delta,
+        "max_env_steps": int(max_env_steps),
+        "goal_frame_index": goal_frame_index,
     }
 
 
@@ -695,6 +764,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Compare output shape: run-delta (task+metric rows), wide(10*3 cols), long(task+range rows), summary(11 rows).",
     )
     p.add_argument(
+        "--max-env-steps",
+        type=int,
+        default=50,
+        help="Maximum env-action steps per row/bin to include (default: 50).",
+    )
+    p.add_argument(
         "--no-strict",
         action="store_true",
         help="Allow task-set mismatch between roots (still errors on duplicate task).",
@@ -706,6 +781,7 @@ def main(argv: list[str] | None = None) -> int:
         phase9_root=args.phase9_root,
         candidate_mode_phase8=args.candidate_mode_phase8,
         candidate_mode_phase9=args.candidate_mode_phase9,
+        max_env_steps=int(args.max_env_steps),
         strict=not args.no_strict,
     )
     bin_labels = payload["bin_labels"]
@@ -756,7 +832,8 @@ def main(argv: list[str] | None = None) -> int:
             r"integer L2 in WM visual latent (artifact \texttt{d\_goal\_l2\_wm\_int}). "
             r"\textbf{VLA:} phase08 SmolVLA policy; \textbf{oracle:} phase09 oracle-action replay.",
             f"Phase8 root: \\texttt{{{_latex_escape(payload['phase8_root'])}}}; "
-            f"Phase9 root: \\texttt{{{_latex_escape(payload['phase9_root'])}}}.",
+            f"Phase9 root: \\texttt{{{_latex_escape(payload['phase9_root'])}}}; "
+            f"analysis max env steps: \\texttt{{{payload['max_env_steps']}}}.",
         ]
         tex = _emit_latex(bin_labels=bin_labels, wide_rows=wide_rows, intro_lines=intro)
         args.latex_out.parent.mkdir(parents=True, exist_ok=True)
@@ -765,10 +842,14 @@ def main(argv: list[str] | None = None) -> int:
         intro = [
             r"\noindent\textbf{Experiment setup.}",
             r"\begin{itemize}",
+            r"\setlength{\itemsep}{0.25em}",
+            r"\setlength{\parsep}{0pt}",
+            r"\setlength{\topsep}{0.25em}",
+            r"\setlength{\partopsep}{0pt}",
             r"\item Phase08 run: \textbf{SmolVLA policy} rollouts.",
             r"\item Phase09 run: \textbf{oracle-action replay} baseline.",
             r"\item Metric: world-model latent distance $d\_goal\_l2\_wm\_int$.",
-            r"\item Binning: env-action bins 0:5, 5:10, \dots, 45:50 (10 bins).",
+            r"\item Binning: env-action bins " + ", ".join(_expected_bin_labels(max_env_steps=int(payload["max_env_steps"]), stride=5)) + ".",
             r"\item For each task, rows are shown as \textbf{VLA} and \textbf{$\Delta_{\mathrm{oracle}}$} (oracle minus VLA).",
             r"\item Task names have the \texttt{-v3} suffix removed for readability.",
             r"\end{itemize}",
@@ -784,6 +865,7 @@ def main(argv: list[str] | None = None) -> int:
                 bin_labels=bin_labels,
                 compare_rows=payload["compare_csv_rows_run_delta"],
                 intro_lines=intro,
+                goal_frame_index=payload.get("goal_frame_index"),
             )
         elif args.compare_format == "summary":
             tex = _emit_latex_compare_summary(
