@@ -3,9 +3,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
+
+
+_AGENT_DEBUG_LOG_PATH = Path("/vol/bitbucket/aa6622/.cursor/debug-588128.log")
+_AGENT_DEBUG_LOG_COUNT = 0
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    global _AGENT_DEBUG_LOG_COUNT
+    if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if _AGENT_DEBUG_LOG_COUNT >= 20:
+        return
+    _AGENT_DEBUG_LOG_COUNT += 1
+    try:
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_action_profile_{os.getpid()}_{_AGENT_DEBUG_LOG_COUNT}",
+            "timestamp": int(time.time() * 1000),
+            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-bounded-wm-issue"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
 
 
 @dataclass(frozen=True)
@@ -149,6 +182,35 @@ def apply_phase12_action_profile(
         metadata["pack_factor"] = int(pack_factor)
     if packed_shape is not None:
         metadata["packed_action_shape"] = packed_shape
+
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H2,H3",
+        location="src/smolvla_grpo/phase12_actions.py:apply_phase12_action_profile",
+        message="phase12 action profile chose env and WM action tensors",
+        data={
+            "action_profile": profile,
+            "raw_shape": list(raw.shape),
+            "clipped_shape": list(clipped.shape),
+            "wm_shape": list(np.asarray(wm_actions).shape),
+            "exec_action_source": source,
+            "wm_action_source": source,
+            "clip_fraction": float(metadata["clip_fraction"]),
+            "clip_any": bool(metadata["clip_any"]),
+            "raw_min": float(metadata["raw_action_min"]),
+            "raw_max": float(metadata["raw_action_max"]),
+            "clipped_min": float(metadata["clipped_action_min"]),
+            "clipped_max": float(metadata["clipped_action_max"]),
+            "jepa_norm_min": float(metadata.get("jepa_norm_min", 0.0)),
+            "jepa_norm_max": float(metadata.get("jepa_norm_max", 0.0)),
+            "jepa_norm_max_abs": float(metadata.get("jepa_norm_max_abs", 0.0)),
+            "pack_factor": int(metadata.get("pack_factor", 0)),
+            "packed_action_shape": metadata.get("packed_action_shape"),
+            "first_raw_rows": raw[: min(5, raw.shape[0])].tolist(),
+            "first_wm_rows": np.asarray(wm_actions, dtype=np.float32)[: min(5, wm_actions.shape[0])].tolist(),
+        },
+    )
+    # endregion
 
     return Phase12ActionProfileResult(
         exec_actions_raw_postprocessed=raw.astype(np.float32, copy=False),

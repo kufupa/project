@@ -22,6 +22,40 @@ except Exception:  # pragma: no cover
     nn = None
 
 logger = logging.getLogger(__name__)
+_AGENT_DEBUG_LOG_PATH = Path("/vol/bitbucket/aa6622/.cursor/debug-588128.log")
+_AGENT_DEBUG_LOG_COUNT = 0
+
+
+def _agent_debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    global _AGENT_DEBUG_LOG_COUNT
+    if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if _AGENT_DEBUG_LOG_COUNT >= 80:
+        return
+    _AGENT_DEBUG_LOG_COUNT += 1
+    try:
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_wm_action_{os.getpid()}_{_AGENT_DEBUG_LOG_COUNT}",
+            "timestamp": int(__import__("time").time() * 1000),
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
 
 
 def _require_torch(message: str) -> None:
@@ -343,11 +377,27 @@ def _ensure_action_matrix(actions: np.ndarray, action_dim: int, length: int) -> 
 
 def _infer_env_action_dim(wm_bundle: WMBundle, chunk_actions: np.ndarray) -> int:
     """Infer executed env action width for WM scoring (Metaworld 4D vs packed WM rows)."""
+    action_width = int(chunk_actions.shape[1])
     mean = getattr(wm_bundle.preprocessor, "action_mean", None)
     if mean is not None and hasattr(mean, "numel"):
         try:
             n = int(mean.numel())
             if n > 0:
+                # region agent log
+                _agent_debug_log(
+                    run_id=os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-wm-action-pre-fix"),
+                    hypothesis_id="H1",
+                    location="src/segment_grpo_loop.py:_infer_env_action_dim",
+                    message="env_action_dim inferred from preprocessor action_mean",
+                    data={
+                        "chunk_actions_shape": list(np.asarray(chunk_actions).shape),
+                        "chunk_action_width": action_width,
+                        "preprocessor_action_mean_numel": n,
+                        "planner_action_dim": int(getattr(wm_bundle, "planner_action_dim", 0) or 0),
+                        "chosen_env_dim": n,
+                    },
+                )
+                # endregion
                 return n
         except Exception:
             pass
@@ -378,6 +428,25 @@ def _normalize_env_actions_for_wm(
     device: Any,
 ) -> np.ndarray:
     arr = _ensure_action_matrix(np.asarray(actions_2d, dtype=np.float32), env_dim, actions_2d.shape[0])
+    # region agent log
+    _agent_debug_log(
+        run_id=os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-wm-action-pre-fix"),
+        hypothesis_id="H1,H3",
+        location="src/segment_grpo_loop.py:_normalize_env_actions_for_wm",
+        message="normalizing env actions for WM",
+        data={
+            "input_shape": list(np.asarray(actions_2d).shape),
+            "ensured_shape": list(arr.shape),
+            "env_dim": int(env_dim),
+            "first_input_row": np.asarray(actions_2d, dtype=np.float32).reshape(actions_2d.shape[0], -1)[0, : min(8, np.asarray(actions_2d).shape[-1])].tolist()
+            if np.asarray(actions_2d).size
+            else [],
+            "first_ensured_row": arr[0, : min(24, arr.shape[1])].tolist() if arr.size else [],
+            "raw_min": float(np.min(arr)) if arr.size else 0.0,
+            "raw_max": float(np.max(arr)) if arr.size else 0.0,
+        },
+    )
+    # endregion
     norm_fn = getattr(preprocessor, "normalize_actions", None)
     if not callable(norm_fn):
         return arr.astype(np.float32, copy=False)
@@ -423,6 +492,25 @@ def _pack_env_actions_for_wm(
         arr = np.concatenate([arr, pad], axis=0)
     n_blk = int(arr.shape[0]) // factor
     packed = arr.reshape(n_blk, wm_dim)
+    # region agent log
+    _agent_debug_log(
+        run_id=os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-wm-action-pre-fix"),
+        hypothesis_id="H1,H2",
+        location="src/segment_grpo_loop.py:_pack_env_actions_for_wm",
+        message="packed normalized env actions for WM unroll",
+        data={
+            "normalized_input_shape": list(np.asarray(actions_norm_2d).shape),
+            "padded_normalized_shape": list(arr.shape),
+            "packed_shape": list(packed.shape),
+            "factor": int(factor),
+            "env_dim": int(env_dim),
+            "wm_dim": int(wm_dim),
+            "n_pad": int(n_pad),
+            "first_normalized_rows": arr[: min(5, arr.shape[0]), : min(8, arr.shape[1])].tolist() if arr.size else [],
+            "first_packed_row": packed[0, : min(24, packed.shape[1])].tolist() if packed.size else [],
+        },
+    )
+    # endregion
     return packed.astype(np.float32, copy=False)
 
 

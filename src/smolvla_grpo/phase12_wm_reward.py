@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from pathlib import Path
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -19,6 +24,64 @@ from segment_grpo_loop import (
 )
 from smolvla_grpo.phase12_objective import Phase12Score, score_progress, split_structured_latent
 
+_AGENT_DEBUG_LOG_PATH = Path("/vol/bitbucket/aa6622/.cursor/debug-588128.log")
+_AGENT_DEBUG_LOG_COUNT = 0
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    global _AGENT_DEBUG_LOG_COUNT
+    if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if _AGENT_DEBUG_LOG_COUNT >= 40:
+        return
+    _AGENT_DEBUG_LOG_COUNT += 1
+    try:
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_wm_reward_{os.getpid()}_{_AGENT_DEBUG_LOG_COUNT}",
+            "timestamp": int(time.time() * 1000),
+            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-bounded-wm-issue"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def _image_debug(image: Any) -> dict[str, Any]:
+    arr = np.asarray(image)
+    if arr.ndim == 3 and arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    arr = np.ascontiguousarray(arr)
+    return {
+        "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
+        "mean": float(np.mean(arr)) if arr.size else 0.0,
+        "sha16": hashlib.sha256(arr.tobytes()).hexdigest()[:16],
+        "hflip_sha16": hashlib.sha256(np.ascontiguousarray(np.flip(arr, 1)).tobytes()).hexdigest()[:16]
+        if arr.ndim == 3
+        else None,
+        "vflip_sha16": hashlib.sha256(np.ascontiguousarray(np.flip(arr, 0)).tobytes()).hexdigest()[:16]
+        if arr.ndim == 3
+        else None,
+    }
+
+
+def _array_stats(name: str, value: Any) -> dict[str, Any]:
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    return {
+        f"{name}_shape": list(np.asarray(value).shape),
+        f"{name}_min": float(np.min(arr)) if arr.size else 0.0,
+        f"{name}_max": float(np.max(arr)) if arr.size else 0.0,
+        f"{name}_mean": float(np.mean(arr)) if arr.size else 0.0,
+        f"{name}_std": float(np.std(arr)) if arr.size else 0.0,
+    }
+
 
 def _encode_structured(
     wm_bundle: Any,
@@ -31,6 +94,22 @@ def _encode_structured(
         "visual": _to_wm_visual(image, wm_bundle.device),
         "proprio": _to_wm_proprio(proprio, int(wm_bundle.proprio_dim), wm_bundle.device),
     }
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H3,H4",
+        location="src/smolvla_grpo/phase12_wm_reward.py:_encode_structured",
+        message="Phase12 image/proprio entering JEPA-WM encode",
+        data={
+            "mode": str(mode),
+            "image": _image_debug(image),
+            **_array_stats("proprio", proprio),
+            "wm_visual_tensor_shape": [int(x) for x in obs["visual"].shape],
+            "wm_visual_min": float(obs["visual"].min().detach().cpu().item()),
+            "wm_visual_max": float(obs["visual"].max().detach().cpu().item()),
+            "wm_proprio_tensor_shape": [int(x) for x in obs["proprio"].shape],
+        },
+    )
+    # endregion
     with torch.no_grad():
         encoded = wm_bundle.model.encode(obs)
     return split_structured_latent(encoded, mode=mode)
@@ -55,6 +134,28 @@ def _final_structured_after_unroll(
     )
     packed = _pack_env_actions_for_wm(normalized, factor, env_dim, wm_dim)
     action_t = torch.from_numpy(packed).to(wm_bundle.device).float().unsqueeze(1)
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H1,H2",
+        location="src/smolvla_grpo/phase12_wm_reward.py:_final_structured_after_unroll",
+        message="Phase12 actions entering JEPA-WM unroll",
+        data={
+            "actions_shape": list(actions.shape),
+            "env_dim": int(env_dim),
+            "wm_dim": int(wm_dim),
+            "factor": int(factor),
+            "normalized_shape": list(normalized.shape),
+            "packed_shape": list(packed.shape),
+            "action_t_shape": [int(x) for x in action_t.shape],
+            **_array_stats("raw_action", actions),
+            **_array_stats("normalized_action", normalized),
+            "first_raw_rows": actions[: min(5, actions.shape[0]), : min(4, actions.shape[1])].tolist()
+            if actions.size
+            else [],
+            "first_packed_row": packed[0, : min(20, packed.shape[1])].tolist() if packed.size else [],
+        },
+    )
+    # endregion
     latent: Any = _unroll_context(start_latent, mode=mode)
     with torch.no_grad():
         for t in range(int(action_t.shape[0])):

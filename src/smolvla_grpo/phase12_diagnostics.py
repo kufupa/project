@@ -3,10 +3,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import numpy as np
+
+
+_AGENT_DEBUG_LOG_PATH = Path("/vol/bitbucket/aa6622/.cursor/debug-588128.log")
+_AGENT_DEBUG_LOG_COUNT = 0
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    global _AGENT_DEBUG_LOG_COUNT
+    if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if _AGENT_DEBUG_LOG_COUNT >= 20:
+        return
+    _AGENT_DEBUG_LOG_COUNT += 1
+    try:
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_decode_artifacts_{os.getpid()}_{_AGENT_DEBUG_LOG_COUNT}",
+            "timestamp": int(time.time() * 1000),
+            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-bounded-wm-issue"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
 
 
 @dataclass(frozen=True)
@@ -106,15 +138,34 @@ def build_decode_artifacts(
             carry = max(0, int(carried_steps if carried_steps is not None else len(real_frames) - 1))
             aligned_real: list[np.ndarray] = []
             aligned_pred: list[np.ndarray] = []
+            aligned_indices: list[int] = []
             for k, pred in enumerate(pred_frames):
                 ridx = min((k + 1) * factor, carry)
                 if ridx < len(real_frames):
                     aligned_real.append(real_frames[ridx])
                     aligned_pred.append(pred)
+                    aligned_indices.append(int(ridx))
             if aligned_real and aligned_pred:
                 real_vs_pred_path = segment_dir / "wm_real_vs_pred_selected_strip.png"
                 _write_real_vs_pred(real_vs_pred_path, aligned_real, aligned_pred)
                 paths["wm_real_vs_pred_selected_strip_path"] = real_vs_pred_path
+            # region agent log
+            _agent_debug_log(
+                hypothesis_id="H4",
+                location="src/smolvla_grpo/phase12_diagnostics.py:build_decode_artifacts",
+                message="phase12 aligned real frames with decoded WM prediction frames",
+                data={
+                    "real_frame_count": int(len(real_frames)),
+                    "pred_frame_count": int(len(pred_frames)),
+                    "env_steps_per_wm_step": int(factor),
+                    "carried_steps": int(carry),
+                    "aligned_real_indices": aligned_indices,
+                    "aligned_pair_count": int(len(aligned_indices)),
+                    "selected_candidate_index": int(selected_candidate_index),
+                    "segment_index": int(segment_index),
+                },
+            )
+            # endregion
 
         metadata["decode_status"] = "ok"
         metadata["decoded_frame_count"] = int(len(pred_frames))
