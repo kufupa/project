@@ -22,6 +22,8 @@ def test_phase12_cli_defaults() -> None:
     assert args.proprio_alpha == 0.1
     assert args.reward_key == "wm_latent_progress"
     assert args.ratio_mode == "chunk"
+    assert args.logprob_backward_mode == "stack"
+    assert args.old_policy_inference_mode is True
     assert args.action_transform == "no_tanh"
     assert args.reset_mismatch == "fail"
     assert args.decode_candidates == "selected"
@@ -64,6 +66,8 @@ def test_manifest_records_phase12_contract(tmp_path) -> None:
     assert manifest["action_profile"] == "official_jepa_mirror"
     assert manifest["uses_cem"] is False
     assert manifest["chunk_len"] == 25
+    assert manifest["logprob_backward_mode"] == "stack"
+    assert manifest["old_policy_inference_mode"] is True
     assert json.dumps(manifest)
 
 

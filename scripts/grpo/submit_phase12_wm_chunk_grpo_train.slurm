@@ -31,19 +31,26 @@ ACTION_PROFILE="${1:-${PHASE12_ACTION_PROFILE:-official_jepa_mirror}}"
 UPDATES="${2:-${PHASE12_NUM_UPDATES:-100}}"
 NUM_EPISODES="${PHASE12_NUM_EPISODES:-${UPDATES}}"
 GROUP_SIZE="${PHASE12_GROUP_SIZE:-4}"
-SAVE_EVERY="${PHASE12_SAVE_EVERY:-5}"
+SAVE_EVERY="${PHASE12_SAVE_EVERY:-10}"
 MAX_STEPS="${PHASE12_MAX_STEPS:-120}"
 SEED_BASE="${PHASE12_SEED_BASE:-2000}"
 LR="${PHASE12_LR:-1e-5}"
 INIT_LOG_STD="${PHASE12_INIT_LOG_STD:--2.0}"
 EULER_NOISE="${PHASE12_EULER_NOISE:-0.2}"
 ACTION_TRANSFORM="${PHASE12_ACTION_TRANSFORM:-no_tanh}"
+BACKWARD_MODE="${PHASE12_BACKWARD_MODE:-microbatch}"
+OLD_POLICY_INFERENCE="${PHASE12_OLD_POLICY_INFERENCE:-1}"
 
 OUT="${3:-${PHASE12_OUT:-${PROJECT_ROOT}/artifacts/phase12_wm_chunk_grpo_train/push-v3/g${GROUP_SIZE}_u${UPDATES}_seed${SEED_BASE}_${ACTION_PROFILE}}}"
 RESUME="${4:-${PHASE12_RESUME:-}}"
 EXTRA=()
 if [[ -n "${RESUME}" ]]; then
   EXTRA+=(--resume "${RESUME}")
+fi
+if [[ "${OLD_POLICY_INFERENCE}" == "1" ]]; then
+  EXTRA+=(--old-policy-inference-mode)
+else
+  EXTRA+=(--no-old-policy-inference-mode)
 fi
 
 STRICT_DECODE=()
@@ -58,6 +65,9 @@ echo "[phase12-train] action_profile=${ACTION_PROFILE}"
 echo "[phase12-train] updates=${UPDATES}"
 echo "[phase12-train] out=${OUT}"
 echo "[phase12-train] resume=${RESUME:-<none>}"
+echo "[phase12-train] save_every=${SAVE_EVERY}"
+echo "[phase12-train] logprob_backward_mode=${BACKWARD_MODE}"
+echo "[phase12-train] old_policy_inference=${OLD_POLICY_INFERENCE}"
 echo "[phase12-train] HF_HUB_OFFLINE=${HF_HUB_OFFLINE}"
 echo "[phase12-train] TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE}"
 echo "[phase12-train] JEPA_WM_DISABLE_IMAGE_HEAD=${JEPA_WM_DISABLE_IMAGE_HEAD}"
@@ -83,6 +93,7 @@ echo "[phase12-train] JEPA_WM_DISABLE_IMAGE_HEAD=${JEPA_WM_DISABLE_IMAGE_HEAD}"
   --proprio-alpha 0.1 \
   --reward-key wm_latent_progress \
   --ratio-mode chunk \
+  --logprob-backward-mode "${BACKWARD_MODE}" \
   --action-transform "${ACTION_TRANSFORM}" \
   --reset-mismatch fail \
   --decode-candidates selected \
