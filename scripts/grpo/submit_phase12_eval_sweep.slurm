@@ -32,6 +32,14 @@ STRIDE="${5:-${PHASE12_STRIDE:-10}}"
 EPISODES="${6:-${PHASE12_EVAL_EPISODES:-10}}"
 EVAL_SEED_START="${7:-${PHASE12_EVAL_SEED_START:-1000}}"
 TASK="${PHASE12_TASK:-push-v3}"
+EXECUTION_MODE="${PHASE12_EVAL_EXECUTION_MODE:-subprocess}"
+N_ENVS="${PHASE12_EVAL_N_ENVS:-1}"
+ROLLOUT_EXECUTION="${PHASE12_EVAL_ROLLOUT_EXECUTION:-serial}"
+MAX_STEPS="${PHASE12_EVAL_MAX_STEPS:-}"
+if [[ $# -ge 8 && -n "${8:-}" ]]; then EXECUTION_MODE="${8}"; fi
+if [[ $# -ge 9 && -n "${9:-}" ]]; then N_ENVS="${9}"; fi
+if [[ $# -ge 10 && -n "${10:-}" ]]; then ROLLOUT_EXECUTION="${10}"; fi
+if [[ $# -ge 11 && -n "${11:-}" ]]; then MAX_STEPS="${11}"; fi
 
 if [[ -z "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
   echo "error: RUN_DIR missing or not a directory: ${RUN_DIR}" >&2
@@ -46,6 +54,19 @@ echo "[phase12-eval-sweep] max_update=${MAX_UPDATE}"
 echo "[phase12-eval-sweep] stride=${STRIDE}"
 echo "[phase12-eval-sweep] episodes=${EPISODES}"
 echo "[phase12-eval-sweep] eval_seed_start=${EVAL_SEED_START}"
+echo "[phase12-eval-sweep] execution_mode=${EXECUTION_MODE}"
+echo "[phase12-eval-sweep] n_envs=${N_ENVS}"
+echo "[phase12-eval-sweep] rollout_execution=${ROLLOUT_EXECUTION}"
+echo "[phase12-eval-sweep] max_steps=${MAX_STEPS:-<default>}"
+
+EXTRA_ARGS=(
+  --execution-mode "${EXECUTION_MODE}"
+  --n-envs "${N_ENVS}"
+  --rollout-execution "${ROLLOUT_EXECUTION}"
+)
+if [[ -n "${MAX_STEPS}" ]]; then
+  EXTRA_ARGS+=(--max-steps "${MAX_STEPS}")
+fi
 
 "${GRPO_PYTHON}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
   --base-checkpoint "${BASE_CKPT}" \
@@ -56,7 +77,8 @@ echo "[phase12-eval-sweep] eval_seed_start=${EVAL_SEED_START}"
   --sweep-name "${SWEEP_NAME}" \
   --min-update "${MIN_UPDATE}" \
   --max-update "${MAX_UPDATE}" \
-  --stride "${STRIDE}"
+  --stride "${STRIDE}" \
+  "${EXTRA_ARGS[@]}"
 
 test -f "${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
 echo "PHASE12_EVAL_SWEEP_DONE run_dir=${RUN_DIR} sweep=${SWEEP_NAME}"

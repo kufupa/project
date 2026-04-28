@@ -52,3 +52,23 @@ def test_train_slurm_contracts() -> None:
     assert 'expected final reset_seed' in text
     assert "sbatch" not in _body_without_sbatch_header(text)
 
+
+def test_eval_sweep_slurm_supports_one_gpu_vector_mode() -> None:
+    text = _read("submit_phase12_eval_sweep.slurm")
+
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --export=NIL" in text
+    assert 'slurm_resolve_project_root "scripts/grpo/eval_phase12_checkpoint_sweep.py"' in text
+    assert 'slurm_export_hf_torch_cache "phase12-eval-sweep"' in text
+    assert 'EXECUTION_MODE="${PHASE12_EVAL_EXECUTION_MODE:-subprocess}"' in text
+    assert 'N_ENVS="${PHASE12_EVAL_N_ENVS:-1}"' in text
+    assert 'ROLLOUT_EXECUTION="${PHASE12_EVAL_ROLLOUT_EXECUTION:-serial}"' in text
+    assert 'if [[ $# -ge 8 && -n "${8:-}" ]]; then EXECUTION_MODE="${8}"; fi' in text
+    assert 'if [[ $# -ge 9 && -n "${9:-}" ]]; then N_ENVS="${9}"; fi' in text
+    assert 'if [[ $# -ge 10 && -n "${10:-}" ]]; then ROLLOUT_EXECUTION="${10}"; fi' in text
+    assert 'if [[ $# -ge 11 && -n "${11:-}" ]]; then MAX_STEPS="${11}"; fi' in text
+    assert '--execution-mode "${EXECUTION_MODE}"' in text
+    assert '--n-envs "${N_ENVS}"' in text
+    assert '--rollout-execution "${ROLLOUT_EXECUTION}"' in text
+    assert "PHASE12_EVAL_SWEEP_DONE" in text
+    assert "sbatch" not in _body_without_sbatch_header(text)
