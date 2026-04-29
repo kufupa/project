@@ -14,13 +14,15 @@ if str(SRC_ROOT) not in sys.path:
 
 def test_render_jepa_rgb_shape_push_v3() -> None:
     pytest.importorskip("metaworld")
+    from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process
     from metaworld_jepa_render import build_jepa_metaworld_env, render_jepa_rgb
 
     size = 224
     env, train_tasks = build_jepa_metaworld_env("push-v3", img_size=size, seed=0)
+    seed_metaworld_process(0)
     if train_tasks:
         env.set_task(train_tasks[0])
-    env.reset(seed=0)
+    gymnasium_reset_strict(env, 0)
     img = render_jepa_rgb(env)
     assert img.ndim == 3
     assert img.shape[2] == 3
