@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
+import time
 from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Protocol, Sequence
 
 from smolvla_obs_state import flatten_obs_state as _flatten_obs_state
+
+from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process
 
 try:
     import matplotlib.pyplot as plt  # type: ignore
@@ -112,6 +115,15 @@ class EvalBackend(Protocol):
 
 
 BackendFactory = Callable[..., EvalBackend]
+
+
+def _smolvla_eval_log(message: str) -> None:
+    print(message, flush=True)
+
+
+def _progress_jsonl_enabled() -> bool:
+    raw = os.environ.get("SMOLVLA_EVAL_PROGRESS_JSONL", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _as_bool(raw: str | bool) -> bool:
@@ -751,7 +763,7 @@ class _LeRobotMetaWorldBackend:
         )
 
     def _reset(self, reset_seed: int) -> tuple[Any, dict[str, Any]]:
-        reset_out = self._env.reset(seed=int(reset_seed))
+        reset_out = gymnasium_reset_strict(self._env, int(reset_seed))
         if isinstance(reset_out, tuple) and len(reset_out) >= 2:
             return reset_out[0], reset_out[1] if isinstance(reset_out[1], dict) else {}
         return reset_out, {}
@@ -807,6 +819,7 @@ class _LeRobotMetaWorldBackend:
         )
 
     def rollout_episode(self, *, episode_index: int, reset_seed: int) -> EpisodeRollout:
+        seed_metaworld_process(int(reset_seed))
         if self._tasks:
             task_episode_index = (
                 int(self._target_episode_index_override)
@@ -899,13 +912,27 @@ def run_smolvla_eval(
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc).isoformat()
+    progress_path = output_dir / "progress.jsonl"
+    _smolvla_eval_log(
+        "smolvla_eval: start "
+        f"task={task!r} episodes={episodes} checkpoint={checkpoint!r} "
+        f"checkpoint_resolved={checkpoint_resolved!r} max_steps={resolved_max_steps} "
+        f"save_frames={resolved_save_frames} "
+        f"HF_HOME={os.environ.get('HF_HOME', '')!r} "
+        f"HUGGINGFACE_HUB_CACHE={os.environ.get('HUGGINGFACE_HUB_CACHE', '')!r} "
+        f"output_dir={output_dir}"
+    )
 
     factory = backend_factory or _create_lerobot_metaworld_backend
+    t_backend = time.perf_counter()
     backend = factory(
         task=task,
         checkpoint=checkpoint_resolved,
         seed=seed,
         max_steps=resolved_max_steps,
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: backend_ready elapsed_s={time.perf_counter() - t_backend:.2f}"
     )
 
     episode_rows: list[dict[str, Any]] = []
@@ -923,7 +950,17 @@ def run_smolvla_eval(
                 else int(seed + episode_index)
             )
             episode_dir = output_dir / "episodes" / f"episode_{episode_index:04d}"
+            _smolvla_eval_log(
+                f"smolvla_eval: episode_begin {episode_index + 1}/{episodes} "
+                f"episode_index={episode_index} reset_seed={reset_seed}"
+            )
+            t_roll = time.perf_counter()
             rollout = backend.rollout_episode(episode_index=episode_index, reset_seed=reset_seed)
+            roll_s = time.perf_counter() - t_roll
+            _smolvla_eval_log(
+                f"smolvla_eval: episode_rollout_done {episode_index + 1}/{episodes} "
+                f"steps={len(rollout.rewards)} elapsed_s={roll_s:.2f}"
+            )
             if not (
                 len(rollout.actions) == len(rollout.rewards) == len(rollout.successes)
             ):
@@ -931,6 +968,7 @@ def run_smolvla_eval(
                     "Backend returned mismatched rollout lengths for actions/rewards/successes."
                 )
 
+            t_artifacts = time.perf_counter()
             artifact_paths = write_episode_artifacts(
                 episode_dir=episode_dir,
                 actions=rollout.actions,
@@ -954,6 +992,7 @@ def run_smolvla_eval(
                 fps=fps,
             )
             video_paths.append(str(video_path))
+            art_s = time.perf_counter() - t_artifacts
 
             sum_reward = float(sum(rollout.rewards))
             max_reward = float(max(rollout.rewards) if rollout.rewards else 0.0)
@@ -993,6 +1032,27 @@ def run_smolvla_eval(
                 json.dumps(episode_meta, indent=2), encoding="utf-8"
             )
             episode_rows.append(episode_meta)
+            _smolvla_eval_log(
+                f"smolvla_eval: episode_artifacts_done {episode_index + 1}/{episodes} "
+                f"success={episode_success} sum_reward={sum_reward:.4f} "
+                f"elapsed_artifacts_s={art_s:.2f}"
+            )
+            if _progress_jsonl_enabled():
+                progress_row = {
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "episode_index": int(episode_index),
+                    "episodes_total": int(episodes),
+                    "reset_seed": int(reset_seed),
+                    "n_steps": int(len(rollout.rewards)),
+                    "success": bool(episode_success),
+                    "sum_reward": float(sum_reward),
+                    "max_reward": float(max_reward),
+                    "elapsed_rollout_s": round(roll_s, 4),
+                    "elapsed_artifacts_s": round(art_s, 4),
+                    "video": str(video_path.relative_to(output_dir)),
+                }
+                with progress_path.open("a", encoding="utf-8") as fp:
+                    fp.write(json.dumps(progress_row) + "\n")
     finally:
         backend.close()
 
@@ -1041,5 +1101,9 @@ def run_smolvla_eval(
     }
     (output_dir / "run_manifest.json").write_text(
         json.dumps(run_manifest, indent=2), encoding="utf-8"
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: run_manifest_written episodes={len(episode_rows)} "
+        f"output_dir={output_dir}"
     )
     return {"output_dir": str(output_dir), "eval_info": eval_info, "run_manifest": run_manifest}

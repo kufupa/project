@@ -139,6 +139,17 @@ def test_run_smolvla_eval_writes_real_flow_contract(tmp_path: Path, monkeypatch:
     assert video_path.is_file()
     assert video_path.stat().st_size > 0
 
+    progress_lines = [
+        line
+        for line in (output_dir / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(progress_lines) == 1
+    progress_row = json.loads(progress_lines[0])
+    assert progress_row["episode_index"] == 0
+    assert progress_row["episodes_total"] == 1
+    assert progress_row["success"] is True
+
 
 def test_run_smolvla_eval_passes_explicit_max_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -346,3 +357,57 @@ def test_run_smolvla_eval_respects_fixed_reset_seed_env(
         (tmp_path / "run_fixed_seed" / "run_manifest.json").read_text(encoding="utf-8")
     )
     assert [int(ep["reset_seed"]) for ep in run_manifest["episodes"]] == [4242, 4242, 4242]
+
+
+def test_lerobot_backend_seeds_before_set_task_then_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeEnv:
+        def set_task(self, task: object) -> None:
+            calls.append(("set_task", task))
+
+    backend = evaluator._LeRobotMetaWorldBackend.__new__(evaluator._LeRobotMetaWorldBackend)
+    backend._env = FakeEnv()
+    backend._tasks = ["task0"]
+    backend._target_episode_index_override = None
+    backend._max_steps = 0
+    backend._np = np
+
+    def fake_seed(seed: int) -> None:
+        calls.append(("seed", int(seed)))
+
+    def fake_reset(self: object, reset_seed: int) -> tuple[dict[str, bool], dict[str, bool]]:
+        calls.append(("reset", int(reset_seed)))
+        return ({"ok": True}, {"info": True})
+
+    monkeypatch.setattr(evaluator, "seed_metaworld_process", fake_seed)
+    monkeypatch.setattr(evaluator._LeRobotMetaWorldBackend, "_reset", fake_reset)
+    monkeypatch.setattr(evaluator._LeRobotMetaWorldBackend, "_render_frame", lambda self: None)
+
+    rollout = backend.rollout_episode(episode_index=0, reset_seed=7)
+
+    assert calls == [("seed", 7), ("set_task", "task0"), ("reset", 7)]
+    assert rollout.actions == []
+    assert rollout.rewards == []
+
+
+def test_lerobot_backend_reset_delegates_to_gymnasium_reset_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = object()
+    calls: list[tuple[int, int]] = []
+
+    backend = evaluator._LeRobotMetaWorldBackend.__new__(evaluator._LeRobotMetaWorldBackend)
+    backend._env = env
+
+    def fake_strict(seen_env: object, seed: int) -> tuple[dict[str, int], dict[str, bool]]:
+        calls.append((id(seen_env), int(seed)))
+        return ({"obs": 1}, {"ok": True})
+
+    monkeypatch.setattr(evaluator, "gymnasium_reset_strict", fake_strict)
+
+    obs, info = backend._reset(11)
+
+    assert calls == [(id(env), 11)]
+    assert obs == {"obs": 1}
+    assert info == {"ok": True}
