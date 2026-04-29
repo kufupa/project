@@ -246,6 +246,8 @@ def _candidate_from_sample(
     old_logprob_steps = _optional_field(sample, "old_logprob_steps", None)
     raw = _optional_field(sample, "exec_actions_raw_postprocessed", None)
     if raw is None:
+        raw = _optional_field(sample, "raw_postprocessed_action_np", None)
+    if raw is None:
         raw = _optional_field(sample, "exec_action_np", None)
     if raw is None:
         raw = _optional_field(sample, "exec_actions_for_env", None)

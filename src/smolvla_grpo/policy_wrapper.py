@@ -26,6 +26,7 @@ class SampledStep:
     """One env step: exec action for MetaWorld + tensors for GRPO."""
 
     exec_action_np: np.ndarray
+    raw_postprocessed_action_np: np.ndarray
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
@@ -38,6 +39,7 @@ class SampledBatchStep:
     """Batched env step: actions aligned with vector env rows."""
 
     exec_action_np: np.ndarray
+    raw_postprocessed_action_np: np.ndarray
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
@@ -48,6 +50,7 @@ class SampledBatchStep:
 @dataclass
 class SampledActionChunk:
     exec_action_np: np.ndarray
+    raw_postprocessed_action_np: np.ndarray
     policy_tensor: torch.Tensor
     unsquashed_chunk: torch.Tensor
     log_prob_steps: torch.Tensor
@@ -151,7 +154,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         var = std * std
         return -0.5 * (((sample - mean) ** 2) / var + 2 * log_std + math.log(2 * math.pi)).sum(dim=-1)
 
-    def _postprocess_and_clip(self, policy_tensor: torch.Tensor) -> tuple[np.ndarray, float, bool]:
+    def _postprocess_action(self, policy_tensor: torch.Tensor) -> tuple[np.ndarray, np.ndarray, float, bool]:
         out = self.bundle.postprocessor(policy_tensor)
         if hasattr(out, "detach"):
             raw_np = out.detach().float().cpu().numpy().reshape(-1)
@@ -164,7 +167,12 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
         clipped = np.clip(raw_np, self.action_low, self.action_high).astype(np.float32, copy=False)
         changed = np.not_equal(clipped, raw_np)
-        return clipped, float(np.mean(changed)), bool(np.any(changed))
+        return raw_np.astype(np.float32, copy=False), clipped, float(np.mean(changed)), bool(np.any(changed))
+
+    def _postprocess_and_clip(self, policy_tensor: torch.Tensor) -> tuple[np.ndarray, float, bool]:
+        """Legacy helper: env-executable clipped action plus clip telemetry."""
+        _raw_np, clipped, clip_fraction, clip_any = self._postprocess_action(policy_tensor)
+        return clipped, clip_fraction, clip_any
 
     def _get_distr_params_chunk(
         self,
@@ -267,9 +275,10 @@ class MetaWorldSmolVLAGRPOPolicy:
         else:
             policy_tensor = unsquashed
             log_prob = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
-        exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
+        raw_np, exec_np, clip_fraction, clip_any = self._postprocess_action(policy_tensor)
         return SampledStep(
             exec_action_np=exec_np,
+            raw_postprocessed_action_np=raw_np,
             policy_tensor=policy_tensor.detach(),
             unsquashed=unsquashed.detach(),
             log_prob=log_prob.detach(),
@@ -303,6 +312,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         if rngs is None and reset_seed is None:
             raise ValueError("Either rngs or reset_seed must be provided")
         base = int(rollout_index_offset)
+        raw_rows: list[np.ndarray] = []
         for r in range(b):
             if rngs is None:
                 gen = torch.Generator(device=mean.device)
@@ -320,7 +330,8 @@ class MetaWorldSmolVLAGRPOPolicy:
             else:
                 policy_tensor = unsquashed
                 log_prob = self.calculate_gaussian_log_prob(m, ls, unsquashed)
-            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
+            raw_np, exec_np, clip_fraction, clip_any = self._postprocess_action(policy_tensor)
+            raw_rows.append(np.asarray(raw_np, dtype=np.float32))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             policy_rows.append(policy_tensor.detach())
             unsq_rows.append(unsquashed.detach())
@@ -329,6 +340,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             clip_any_rows.append(clip_any)
         return SampledBatchStep(
             exec_action_np=np.stack(exec_rows, axis=0),
+            raw_postprocessed_action_np=np.stack(raw_rows, axis=0),
             policy_tensor=torch.cat(policy_rows, dim=0),
             unsquashed=torch.cat(unsq_rows, dim=0),
             log_prob=torch.cat(lp_rows, dim=0).reshape(b),
@@ -359,17 +371,21 @@ class MetaWorldSmolVLAGRPOPolicy:
             log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
 
         exec_rows: list[np.ndarray] = []
+        raw_rows: list[np.ndarray] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
         for row in policy_tensor:
-            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(row.reshape(1, -1))
+            raw_np, exec_np, clip_fraction, clip_any = self._postprocess_action(row.reshape(1, -1))
+            raw_rows.append(np.asarray(raw_np, dtype=np.float32))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
 
         exec_action_np = np.stack(exec_rows, axis=0)
+        raw_postprocessed_action_np = np.stack(raw_rows, axis=0)
         return SampledActionChunk(
             exec_action_np=exec_action_np,
+            raw_postprocessed_action_np=raw_postprocessed_action_np,
             policy_tensor=policy_tensor.detach(),
             unsquashed_chunk=unsquashed.detach(),
             log_prob_steps=log_prob_steps.detach().reshape(int(chunk_len)),

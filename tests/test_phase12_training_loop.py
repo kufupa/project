@@ -427,3 +427,22 @@ def test_phase12_old_policy_sampling_uses_inference_mode_when_enabled() -> None:
     assert sample.unique_action_rows == 1
     assert seen == {"grad_enabled": False, "inference_mode": True}
 
+
+def test_phase12_sample_candidate_dict_uses_raw_postprocessed_actions() -> None:
+    sample = SimpleNamespace(
+        raw_postprocessed_action_np=np.array([[2.0, -2.0, 0.0, 1.5]], dtype=np.float32),
+        exec_action_np=np.array([[1.0, -1.0, 0.0, 1.0]], dtype=np.float32),
+        unsquashed_chunk=torch.zeros(1, 4),
+        log_prob_steps=torch.zeros(1),
+        log_prob_sum=torch.tensor(0.0),
+        action_clip_fraction=np.array([0.75]),
+        action_clip_any=np.array([True]),
+        unique_action_rows=1,
+    )
+
+    row = trainer._phase12_sample_to_candidate_dict(sample, candidate_index=3)
+
+    np.testing.assert_allclose(row["exec_actions_raw_postprocessed"], sample.raw_postprocessed_action_np)
+    np.testing.assert_allclose(row["exec_actions_clipped"], sample.exec_action_np)
+    assert row["candidate_index"] == 3
+

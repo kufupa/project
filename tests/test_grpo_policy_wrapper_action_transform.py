@@ -61,6 +61,7 @@ def test_no_tanh_passes_normalized_sample_to_postprocessor_and_clips_env_action(
     step = wrapper.sample_action_from_proc({"x": torch.zeros(1, 1)})
 
     np.testing.assert_allclose(bundle.postprocessor.last.numpy(), np.full((1, 4), 2.0), atol=1e-4)
+    np.testing.assert_allclose(step.raw_postprocessed_action_np, np.full((4,), 2.0), atol=1e-4)
     np.testing.assert_allclose(step.exec_action_np, np.ones((4,), dtype=np.float32), atol=1e-6)
     assert step.action_clip_fraction == 1.0
     assert step.action_clip_any is True
@@ -72,6 +73,7 @@ def test_tanh_norm_ablation_preserves_old_pre_postprocessor_tanh() -> None:
 
     expected = np.tanh(np.full((1, 4), 2.0, dtype=np.float32))
     np.testing.assert_allclose(bundle.postprocessor.last.numpy(), expected, atol=1e-4)
+    np.testing.assert_allclose(step.raw_postprocessed_action_np, expected.reshape(4), atol=1e-4)
     np.testing.assert_allclose(step.exec_action_np, expected.reshape(4), atol=1e-4)
     assert step.action_clip_fraction == 0.0
     assert step.action_clip_any is False
