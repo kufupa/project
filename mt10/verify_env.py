@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Smoke-test Meta-World MT1 (push-v3) + Gymnasium vec MT10. No project src imports."""
+"""Smoke-test Meta-World MT1 (push-v3) + Gymnasium vec MT10 with project determinism helpers."""
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+PROJECT_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+
+from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process  # noqa: E402
 
 
 def _print_versions() -> None:
@@ -30,9 +37,10 @@ def _mt1_push_v3_smoke() -> None:
         raise RuntimeError(f"push-v3 missing from MT1.train_classes keys={sorted(mt1.train_classes)!r}")
     env = mt1.train_classes["push-v3"]()
     train_tasks = list(getattr(mt1, "train_tasks", []) or [])
+    seed_metaworld_process(0)
     if train_tasks:
         env.set_task(train_tasks[0])
-    env.reset(seed=0)
+    gymnasium_reset_strict(env, 0)
     env.close()
 
 
@@ -41,7 +49,8 @@ def _mt10_vec_smoke() -> None:
 
     envs = gym.make_vec("Meta-World/MT10", vector_strategy="sync", seed=0)
     try:
-        envs.reset(seed=0)
+        seed_metaworld_process(0)
+        gymnasium_reset_strict(envs, 0)
         actions = envs.action_space.sample()
         envs.step(actions)
     finally:

@@ -38,6 +38,12 @@ SCHEMA_VERSION = "cem_paired_push_v3_v0"
 EXPORT_MODE = "cem_paired_push_v3"
 _EXECUTION_POLICIES = ("cem_primary", "smolvla_primary")
 
+_PROJECT_SRC = Path(__file__).resolve().parents[2] / "src"
+if str(_PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_SRC))
+
+from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process  # noqa: E402
+
 
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -827,10 +833,8 @@ def rollout_episode(
     episode_index: int | None = None,
 ) -> dict[str, Any]:
     seed = int(rng.integers(0, 2**31 - 1))
-    try:
-        out = env.reset(seed=seed)
-    except TypeError:
-        out = env.reset()
+    seed_metaworld_process(seed)
+    out = gymnasium_reset_strict(env, seed)
     if isinstance(out, tuple):
         obs = out[0]
         info = out[1] if len(out) > 1 and isinstance(out[1], dict) else {}
@@ -1121,6 +1125,7 @@ def main() -> int:
     except Exception:
         pass
     tasks = getattr(mt1, "train_tasks", None)
+    seed_metaworld_process(int(args.seed))
     if tasks:
         env.set_task(tasks[0])
 
