@@ -11,7 +11,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("MUJOCO_GL", "osmesa")
+os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
 import numpy as np
 import gymnasium as gym
@@ -72,6 +73,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         camera_name: str = "corner2",
         observation_width: int = 480,
         observation_height: int = 480,
+        reset_randomization_mode: str | None = None,
     ) -> None:
         from gymnasium import spaces
         from lerobot.envs import metaworld as lr_mw
@@ -82,6 +84,13 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self.camera_name = str(camera_name)
         self.observation_width = int(observation_width)
         self.observation_height = int(observation_height)
+        self.reset_randomization_mode = str(
+            reset_randomization_mode or os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded")
+        )
+        if self.reset_randomization_mode not in {"fixed", "random_seeded", "random_unseeded", "lerobot_default"}:
+            raise ValueError(
+                "reset_randomization_mode must be fixed, random_seeded, random_unseeded, or lerobot_default"
+            )
         self._env: Any | None = None
         self._last_raw_obs: np.ndarray | None = None
         self._max_episode_steps = 500
@@ -125,8 +134,10 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         env.set_task(mt1.train_tasks[0])
         if self.camera_name == "corner2":
             env.model.cam_pos[2] = [0.75, 0.075, 0.7]
+        env._freeze_rand_vec = self.reset_randomization_mode == "fixed"
+        if self.reset_randomization_mode == "lerobot_default":
+            env._freeze_rand_vec = False
         env.reset()
-        env._freeze_rand_vec = False
         self._env = env
         self._max_episode_steps = int(env.max_path_length)
 
@@ -167,10 +178,15 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
     def reset(self, seed: int | None = None, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self._ensure_env()
         super().reset(seed=seed)
-        if seed is not None:
+        self._env._freeze_rand_vec = self.reset_randomization_mode == "fixed"
+        if self.reset_randomization_mode == "lerobot_default":
+            self._env._freeze_rand_vec = False
+        if self.reset_randomization_mode == "random_seeded" and seed is not None:
             self._env.seed(int(seed))
             if hasattr(self._env, "seeded_rand_vec"):
                 self._env.seeded_rand_vec = True
+        elif hasattr(self._env, "seeded_rand_vec"):
+            self._env.seeded_rand_vec = False
         raw_obs, _info = self._env.reset(seed=seed)
         self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         return self._format_raw_obs(raw_obs), {"is_success": False}
@@ -397,10 +413,9 @@ class OfficialLeRobotMetaWorldGRPORollout:
         use_async_envs: bool = False,
         async_start_method: str = "forkserver",
         enable_expert_oracle: bool = False,
+        reset_randomization_mode: str | None = None,
     ) -> None:
         from lerobot.envs.configs import MetaworldEnv
-        from lerobot.envs.factory import make_env
-        from lerobot.envs.metaworld import create_metaworld_envs
 
         self.task_group = task
         self.task_id = 0
@@ -410,8 +425,31 @@ class OfficialLeRobotMetaWorldGRPORollout:
         self.use_async_envs = bool(use_async_envs)
         self.async_start_method = str(async_start_method)
         self.enable_expert_oracle = bool(enable_expert_oracle)
+        self.reset_randomization_mode = str(
+            reset_randomization_mode or os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded")
+        )
+        if self.reset_randomization_mode not in {"fixed", "random_seeded", "random_unseeded", "lerobot_default"}:
+            raise ValueError(
+                "reset_randomization_mode must be fixed, random_seeded, random_unseeded, or lerobot_default"
+            )
 
         self.env_cfg = MetaworldEnv(task=task, obs_type=obs_type)
+
+        if self.reset_randomization_mode == "lerobot_default" and not self.enable_expert_oracle:
+            from lerobot.envs.factory import make_env
+
+            envs = make_env(
+                self.env_cfg,
+                n_envs=self.n_envs,
+                use_async_envs=bool(self.use_async_envs),
+                trust_remote_code=False,
+            )
+        else:
+            gym_kwargs = dict(self.env_cfg.gym_kwargs)
+            mode_for_deferred = (
+                "random_unseeded" if self.reset_randomization_mode == "lerobot_default" else self.reset_randomization_mode
+            )
+            gym_kwargs["reset_randomization_mode"] = mode_for_deferred
 
         if self.enable_expert_oracle:
             if self.n_envs != 1:
@@ -421,18 +459,11 @@ class OfficialLeRobotMetaWorldGRPORollout:
             envs = {
                 task: {
                     0: SyncVectorEnv(
-                        [lambda tn=task: DeferredLeRobotMetaworldEnv(task=tn, **self.env_cfg.gym_kwargs)]
+                        [lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs)]
                     )
                 }
             }
-        elif self.n_envs == 1:
-            envs = make_env(
-                self.env_cfg,
-                n_envs=1,
-                use_async_envs=False,
-                trust_remote_code=False,
-            )
-        elif self.use_async_envs:
+        elif self.reset_randomization_mode != "lerobot_default" and self.use_async_envs:
             mp_ctx = self.async_start_method
             cached_obs_space: Any | None = None
             cached_act_space: Any | None = None
@@ -454,17 +485,23 @@ class OfficialLeRobotMetaWorldGRPORollout:
                 return lazy
 
             fns = [
-                (lambda tn=task: DeferredLeRobotMetaworldEnv(task=tn, **self.env_cfg.gym_kwargs))
+                (lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs))
                 for _ in range(self.n_envs)
             ]
             envs = {task: {0: _env_cls(fns)}}
-        else:
-            envs = make_env(
-                self.env_cfg,
-                n_envs=self.n_envs,
-                use_async_envs=False,
-                trust_remote_code=False,
-            )
+        elif self.reset_randomization_mode != "lerobot_default":
+            from gymnasium.vector import SyncVectorEnv
+
+            envs = {
+                task: {
+                    0: SyncVectorEnv(
+                        [
+                            (lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs))
+                            for _ in range(self.n_envs)
+                        ]
+                    )
+                }
+            }
 
         try:
             self.vec_env = envs[task][0]
