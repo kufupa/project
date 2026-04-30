@@ -116,6 +116,8 @@ def test_write_eval_artifacts_preserves_schema(tmp_path, monkeypatch) -> None:
     assert [row["reset_seed"] for row in rows] == [1000, 1001]
     assert (tmp_path / "eval_summary.json").exists()
     assert (tmp_path / "eval_info.json").exists()
+    info = json.loads((tmp_path / "eval_info.json").read_text(encoding="utf-8"))
+    assert "reset_randomization_mode" in info
     assert calls[0][0] == "episode_0000"
 
 
@@ -225,4 +227,116 @@ def test_phase12_vector_sweep_uses_resident_eval(tmp_path, monkeypatch) -> None:
     assert len(result["rows"]) == 1
     assert calls[0]["n_envs"] == 2
     assert calls[0]["rollout_execution"] == "vector_sync"
+
+
+def test_vector_eval_uses_queue_free_action_when_active_rows_shrink(tmp_path, monkeypatch):
+    import sys
+    import types
+    from collections import deque
+    from types import SimpleNamespace
+
+    import torch
+
+    from smolvla_grpo.phase12_vector_eval import evaluate_loaded_policy_vectorized
+
+    class FakePolicy:
+        def __init__(self):
+            self.reset_calls = 0
+            self.select_action_calls = 0
+            self.queue_free_calls = []
+            self._queues = {"action": deque(maxlen=50)}
+
+        def reset(self):
+            self.reset_calls += 1
+            self._queues["action"].clear()
+
+        def select_action(self, proc):
+            self.select_action_calls += 1
+            batch = int(proc["observation.state"].shape[0])
+            if not self._queues["action"]:
+                for _ in range(50):
+                    self._queues["action"].append(torch.zeros(batch, 4))
+            return self._queues["action"].popleft()
+
+    class FakeBundle:
+        base_checkpoint = "base"
+        grpo_checkpoint = None
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.policy = FakePolicy()
+
+        def postprocessor(self, action):
+            return action
+
+    class FakeEnv:
+        action_dim = 4
+
+        def __init__(self, *, task, n_envs=1):
+            del task
+            assert n_envs == 1
+            self.seed = None
+            self.steps = 0
+
+        def reset(self, seed):
+            self.seed = int(seed)
+            self.steps = 0
+            return {"state": np.array([float(seed), 0.0, 0.0, 0.0], dtype=np.float32)}
+
+        def build_proc(self, obs, *, bundle):
+            del bundle
+            return {
+                "observation.state": torch.tensor([[obs["state"][0], 0.0, 0.0, 0.0]], dtype=torch.float32),
+                "task": [f"seed-{self.seed}"],
+            }
+
+        def step(self, action):
+            self.steps += 1
+            success = self.seed == 1001 and self.steps == 1
+            return SimpleNamespace(
+                observation={"state": np.array([float(self.seed), float(self.steps), 0.0, 0.0], dtype=np.float32)},
+                reward=1.0,
+                success=success,
+                terminated=False,
+                truncated=False,
+            )
+
+        def close(self):
+            return None
+
+    def fake_write_episode_artifacts(*, episode_dir, actions, rewards, successes, overlay_mode):
+        del actions, rewards, successes, overlay_mode
+        episode_dir.mkdir(parents=True, exist_ok=True)
+
+    fake_adapter = types.ModuleType("smolvla_grpo.lerobot_metaworld_adapter")
+    fake_adapter.OfficialLeRobotMetaWorldGRPORollout = FakeEnv
+    fake_adapter.resolve_lerobot_horizon = lambda env, max_steps: int(max_steps)
+    monkeypatch.setitem(sys.modules, "smolvla_grpo.lerobot_metaworld_adapter", fake_adapter)
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval._resolve_action_dim", lambda task: 4)
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval.write_episode_artifacts", fake_write_episode_artifacts)
+
+    def fake_queue_free(policy, proc):
+        batch = int(proc["observation.state"].shape[0])
+        policy.queue_free_calls.append(batch)
+        return torch.zeros(batch, 4)
+
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval.select_eval_action_queue_free", fake_queue_free)
+
+    bundle = FakeBundle()
+    summary = evaluate_loaded_policy_vectorized(
+        bundle=bundle,
+        base_checkpoint="base",
+        grpo_checkpoint=None,
+        output_dir=tmp_path,
+        task="push-v3",
+        episodes=3,
+        eval_seed_start=1000,
+        n_envs=3,
+        rollout_execution="vector_sync",
+        max_steps=3,
+    )
+
+    assert summary["episodes"] == 3
+    assert bundle.policy.select_action_calls == 0
+    assert bundle.policy.queue_free_calls == [3, 2, 2]
 
