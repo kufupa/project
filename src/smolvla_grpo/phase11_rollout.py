@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# Slurm GPU nodes: no X11; MuJoCo must use EGL (same as segment_grpo / mt10).
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 import copy
 from dataclasses import dataclass, field
 from typing import Any

@@ -27,6 +27,8 @@ mkdir -p logs
 slurm_export_pythonpath
 slurm_export_hf_torch_cache "grpo_api_gate"
 
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+
 GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 
