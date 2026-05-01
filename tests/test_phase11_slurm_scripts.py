@@ -14,6 +14,8 @@ def test_submit_phase11_grpo_uses_explicit_python_and_rollout_smoke() -> None:
     assert 'exec "${GRPO_PYTHON}"' in text
     assert "rollout-smoke" in text
     assert "smoke_phase11_rollout.py" in text
+    assert "_PHASE11_PROJECT_FALLBACK" in text
+    assert "scripts/slurm/common_env.sh" in text
 
 
 def test_submit_phase11_chain_uses_chdir() -> None:
