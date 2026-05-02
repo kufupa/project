@@ -26,6 +26,7 @@ from smolvla_grpo.phase12_logging import (
     write_jsonl_row,
     write_manifest,
 )
+from smolvla_grpo.phase12_decode_compare import decode_phase12_prediction_frames
 from smolvla_grpo.phase12_diagnostics import build_decode_artifacts, write_phase12_episode_video
 from smolvla_grpo.phase12_pixels import policy_rgb_from_obs, wm_rgb_from_policy_rgb_corner2
 
@@ -317,23 +318,6 @@ def _field(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
-def _structured_field(value: Any, key: str) -> Any:
-    try:
-        if key in value:
-            return value[key]
-    except Exception:
-        pass
-    if hasattr(value, "get"):
-        try:
-            return value.get(key)
-        except Exception:
-            pass
-    try:
-        return value[key]
-    except Exception:
-        return None
-
-
 def _phase12_sample_to_candidate_dict(sample: Any, *, candidate_index: int) -> dict[str, Any]:
     import numpy as np
 
@@ -395,7 +379,7 @@ def _build_phase12_selected_decode_artifacts(
         return
     real_frames = list(getattr(rollout_env, "wm_frames", rollout_env.frames))
     decode_result = build_decode_artifacts(
-        decode_fn=lambda: _decode_phase12_prediction_frames(
+        decode_fn=lambda: decode_phase12_prediction_frames(
             wm_bundle,
             image=decode_input["image"],
             proprio=decode_input["proprio"],
@@ -948,137 +932,6 @@ class _Phase12SelectedRolloutEnv:
         info = dict(step.info)
         info["success"] = bool(step.success)
         return self._root(), float(step.reward), bool(step.terminated), bool(step.truncated), info
-
-
-def _decode_phase12_prediction_frames(
-    wm_bundle: Any,
-    *,
-    image: Any,
-    proprio: Any,
-    actions: Any,
-    mode: str,
-) -> list[Any]:
-    import numpy as np
-    import torch
-    from segment_grpo_loop import (
-        DecodeTrace,
-        _decode_latent_trace_to_frames,
-        _infer_env_action_dim,
-        _infer_model_action_dim,
-        _next_latent_state_after_unroll,
-        _normalize_env_actions_for_wm,
-        _pack_env_actions_for_wm,
-        _to_wm_proprio,
-        _to_wm_visual,
-        _wm_action_block_factor,
-    )
-
-    obs = {
-        "visual": _to_wm_visual(image, wm_bundle.device),
-        "proprio": _to_wm_proprio(proprio, int(wm_bundle.proprio_dim), wm_bundle.device),
-    }
-    actions_np = np.asarray(actions, dtype=np.float32)
-    env_dim = _infer_env_action_dim(wm_bundle, actions_np)
-    model_action_dim = _infer_model_action_dim(wm_bundle.model)
-    wm_dim = int(model_action_dim) if model_action_dim else int(wm_bundle.planner_action_dim)
-    factor = _wm_action_block_factor(env_dim, wm_dim)
-    normalized = _normalize_env_actions_for_wm(
-        wm_bundle.preprocessor,
-        actions_np[:, :env_dim],
-        env_dim,
-        wm_bundle.device,
-    )
-    packed = _pack_env_actions_for_wm(normalized, factor, env_dim, wm_dim)
-    action_t = torch.from_numpy(packed).to(wm_bundle.device).float().unsqueeze(1)
-    with torch.no_grad():
-        latent = wm_bundle.model.encode(obs)
-        if isinstance(latent, dict) and mode == "visual_proprio":
-            try:
-                from tensordict import TensorDict
-
-                latent = TensorDict(
-                    {"visual": latent["visual"], "proprio": latent["proprio"]},
-                    batch_size=[],
-                )
-            except Exception:
-                pass
-        elif isinstance(latent, dict) and mode == "visual_only_ablation":
-            latent = latent["visual"]
-        visual_latents: list[Any] = []
-        proprio_latents: list[Any] = []
-        decode_step_shapes: list[dict[str, Any]] = []
-        for t in range(int(action_t.shape[0])):
-            unroll_out = wm_bundle.model.unroll(latent, act_suffix=action_t[t : t + 1], debug=False)
-            latent = _next_latent_state_after_unroll(unroll_out)
-            visual = _structured_field(latent, "visual")
-            proprio_latent = _structured_field(latent, "proprio")
-            if visual is not None:
-                visual_latents.append(visual)
-                if mode == "visual_proprio":
-                    proprio_latents.append(proprio_latent)
-            else:
-                visual_latents.append(latent)
-            if isinstance(latent, dict) and mode == "visual_proprio":
-                try:
-                    from tensordict import TensorDict
-
-                    latent = TensorDict(
-                        {"visual": latent["visual"], "proprio": latent["proprio"]},
-                        batch_size=[],
-                    )
-                except Exception:
-                    pass
-            elif isinstance(latent, dict) and mode == "visual_only_ablation":
-                latent = latent["visual"]
-            if len(decode_step_shapes) < 8:
-                decode_step_shapes.append(
-                    {
-                        "step": int(t),
-                        "act_suffix_shape": [int(x) for x in action_t[t : t + 1].shape],
-                        "visual_shape": [int(x) for x in visual.shape] if hasattr(visual, "shape") else None,
-                        "proprio_shape": [int(x) for x in proprio_latent.shape] if hasattr(proprio_latent, "shape") else None,
-                    }
-                )
-        # region agent log
-        try:
-            import json as _json
-            import os as _os
-            import time as _time
-
-            if _os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() in {"1", "true", "yes"}:
-                payload = {
-                    "sessionId": "588128",
-                    "id": f"phase12_decode_{_os.getpid()}_{int(_time.time() * 1000)}",
-                    "timestamp": int(_time.time() * 1000),
-                    "runId": _os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-decode-post-fix"),
-                    "hypothesisId": "H2",
-                    "location": "scripts/grpo/train_phase12_wm_chunk_grpo.py:_decode_phase12_prediction_frames",
-                    "message": "phase12 decode final latent trace built",
-                    "data": {
-                        "actions_shape": list(actions_np.shape),
-                        "normalized_shape": list(normalized.shape),
-                        "packed_shape": list(packed.shape),
-                        "action_t_shape": [int(x) for x in action_t.shape],
-                        "env_dim": int(env_dim),
-                        "wm_dim": int(wm_dim),
-                        "factor": int(factor),
-                        "visual_latent_count": int(len(visual_latents)),
-                        "proprio_latent_count": int(len(proprio_latents)),
-                        "decode_step_shapes": decode_step_shapes,
-                    },
-                }
-                with open("/vol/bitbucket/aa6622/.cursor/debug-588128.log", "a", encoding="utf-8") as _f:
-                    _f.write(_json.dumps(payload, sort_keys=True) + "\n")
-        except Exception:
-            pass
-        # endregion
-    frames, failure = _decode_latent_trace_to_frames(
-        wm_bundle,
-        DecodeTrace(visual_latents=visual_latents, proprio_latents=proprio_latents),
-    )
-    if failure is not None:
-        raise RuntimeError(failure)
-    return frames
 
 
 def _ensure_checkpointable_policy_state(policy: Any) -> dict:
