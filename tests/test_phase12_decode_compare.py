@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 
 def test_build_action_variants_executes_raw_and_decodes_raw_vs_clipped() -> None:
@@ -55,6 +56,70 @@ def test_three_row_strip_aligns_real_to_wm_steps(tmp_path: Path) -> None:
         env_steps_per_wm_step=5,
         carried_steps=10,
     )
+    assert out.exists()
+
+
+def test_aligned_real_indices_clamps_final_partial_chunk() -> None:
+    from smolvla_grpo.phase12_decode_compare import aligned_real_indices
+
+    assert aligned_real_indices(pred_count=2, env_steps_per_wm_step=5, carried_steps=10, real_frame_count=12) == [
+        5,
+        10,
+    ]
+    assert aligned_real_indices(pred_count=2, env_steps_per_wm_step=5, carried_steps=6, real_frame_count=7) == [5, 6]
+
+
+def test_latent_l2_uses_vector_norm_not_mse() -> None:
+    from smolvla_grpo.phase12_decode_compare import latent_l2_distance
+
+    pred = {"visual": torch.tensor([[[3.0, 4.0]]]), "proprio": torch.tensor([[0.0, 12.0]])}
+    real = {"visual": torch.tensor([[[0.0, 0.0]]]), "proprio": torch.tensor([[0.0, 0.0]])}
+
+    got = latent_l2_distance(pred, real, mode="visual_proprio", proprio_alpha=1.0)
+
+    assert got["visual_l2"] == pytest.approx(5.0)
+    assert got["proprio_l2"] == pytest.approx(12.0)
+    assert got["combined_l2"] == pytest.approx(13.0)
+
+
+def test_compute_raw_bounded_l2_metrics_records_winners() -> None:
+    from smolvla_grpo.phase12_decode_compare import compute_raw_bounded_l2_metrics
+
+    real = [{"visual": torch.tensor([0.0, 0.0]), "proprio": torch.tensor([0.0])}]
+    raw = [{"visual": torch.tensor([3.0, 4.0]), "proprio": torch.tensor([0.0])}]
+    bounded = [{"visual": torch.tensor([6.0, 8.0]), "proprio": torch.tensor([0.0])}]
+
+    got = compute_raw_bounded_l2_metrics(
+        raw_pred_latents=raw,
+        bounded_pred_latents=bounded,
+        real_latents=real,
+        mode="visual_proprio",
+    )
+
+    assert got["raw"]["combined_l2"] == [pytest.approx(5.0)]
+    assert got["bounded"]["combined_l2"] == [pytest.approx(10.0)]
+    assert got["winner_by_column"] == ["raw"]
+    assert got["winner_counts"] == {"raw": 1, "bounded": 0, "tie": 0}
+
+
+def test_three_row_strip_with_l2_adds_label_bands(tmp_path: Path) -> None:
+    from smolvla_grpo.phase12_decode_compare import write_three_row_decode_strip_with_l2
+
+    real = [np.full((2, 2, 3), i, dtype=np.uint8) for i in range(6)]
+    raw = [np.full((2, 2, 3), 100, dtype=np.uint8)]
+    bounded = [np.full((2, 2, 3), 200, dtype=np.uint8)]
+
+    out = write_three_row_decode_strip_with_l2(
+        tmp_path / "real_raw_bounded_decode_strip_l2.png",
+        real_frames=real,
+        raw_pred_frames=raw,
+        bounded_pred_frames=bounded,
+        env_steps_per_wm_step=5,
+        carried_steps=5,
+        raw_combined_l2=[12.34],
+        bounded_combined_l2=[56.78],
+    )
+
     assert out.exists()
 
 

@@ -54,6 +54,14 @@ class _DummyPolicy:
         return None
 
 
+class _DummyBatchChunkPolicy(_DummyPolicy):
+    def _get_distr_params_chunk(self, proc):
+        b = int(proc["x"].shape[0])
+        t = int(getattr(self, "configured_chunk_len", 3))
+        base = torch.arange(b * t * self.action_dim, dtype=torch.float32).reshape(b, t, self.action_dim)
+        return base / 100.0, torch.full_like(base, -0.5)
+
+
 class _DummyEnv:
     def __init__(self, *, task: str) -> None:
         self.inner = self
@@ -70,6 +78,24 @@ class _DummyEnv:
 def _wrapper() -> tuple[MetaWorldSmolVLAGRPOPolicy, _DummyPolicy, _DummyBundle]:
     bundle = _DummyBundle()
     policy = _DummyPolicy(action_dim=4)
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        action_transform="no_tanh",
+        action_low=np.full((4,), -10.0, dtype=np.float32),
+        action_high=np.full((4,), 10.0, dtype=np.float32),
+    )
+    return wrapper, policy, bundle
+
+
+def _batch_wrapper() -> tuple[MetaWorldSmolVLAGRPOPolicy, _DummyBatchChunkPolicy, _DummyBundle]:
+    bundle = _DummyBundle()
+    policy = _DummyBatchChunkPolicy(action_dim=4)
     wrapper = MetaWorldSmolVLAGRPOPolicy(
         bundle,
         task="push-v3",
@@ -144,7 +170,7 @@ def test_sample_action_chunk_preserves_raw_postprocessed_actions_before_clip() -
 
     assert chunk.raw_postprocessed_action_np.shape == (25, 4)
     assert chunk.exec_action_np.shape == (25, 4)
-    assert np.max(chunk.raw_postprocessed_action_np) > 1.0
+    assert np.max(np.abs(chunk.raw_postprocessed_action_np)) > 1.0
     assert np.max(chunk.exec_action_np) <= 1.0
     assert np.any(chunk.raw_postprocessed_action_np != chunk.exec_action_np)
 
@@ -192,3 +218,52 @@ def test_two_chunks_from_same_root_can_differ_without_action_queue() -> None:
     )
 
     assert not torch.allclose(first.unsquashed_chunk, second.unsquashed_chunk)
+
+
+def test_sample_action_chunk_batch_from_proc_returns_batch_shapes() -> None:
+    wrapper, _policy, _bundle = _batch_wrapper()
+
+    chunk = wrapper.sample_action_chunk_batch_from_proc(
+        {"x": torch.zeros(2, 1)},
+        n_envs=2,
+        chunk_len=3,
+        reset_seed=123,
+    )
+
+    assert chunk.exec_action_np.shape == (2, 3, 4)
+    assert chunk.raw_postprocessed_action_np.shape == (2, 3, 4)
+    assert chunk.policy_tensor.shape == (2, 3, 4)
+    assert chunk.unsquashed_chunk.shape == (2, 3, 4)
+    assert chunk.log_prob_steps.shape == (2, 3)
+    assert chunk.log_prob_sum.shape == (2,)
+    assert chunk.action_clip_fraction.shape == (2, 3)
+    assert chunk.action_clip_any.shape == (2, 3)
+
+
+def test_sample_action_chunk_batch_is_seed_deterministic_per_row() -> None:
+    wrapper, _policy, _bundle = _batch_wrapper()
+    proc = {"x": torch.zeros(2, 1)}
+
+    first = wrapper.sample_action_chunk_batch_from_proc(proc, n_envs=2, chunk_len=3, reset_seed=123)
+    second = wrapper.sample_action_chunk_batch_from_proc(proc, n_envs=2, chunk_len=3, reset_seed=123)
+    third = wrapper.sample_action_chunk_batch_from_proc(proc, n_envs=2, chunk_len=3, reset_seed=124)
+
+    torch.testing.assert_close(first.unsquashed_chunk, second.unsquashed_chunk)
+    assert not torch.allclose(first.unsquashed_chunk, third.unsquashed_chunk)
+
+
+def test_sample_action_chunk_batch_preserves_raw_before_clip() -> None:
+    wrapper, _policy, _bundle = _batch_wrapper()
+    wrapper.action_low = np.full((4,), -1.0, dtype=np.float32)
+    wrapper.action_high = np.full((4,), 1.0, dtype=np.float32)
+
+    chunk = wrapper.sample_action_chunk_batch_from_proc(
+        {"x": torch.zeros(2, 1)},
+        n_envs=2,
+        chunk_len=3,
+        reset_seed=123,
+    )
+
+    assert np.max(np.abs(chunk.raw_postprocessed_action_np)) > 1.0
+    assert np.max(chunk.exec_action_np) <= 1.0
+    assert np.any(chunk.raw_postprocessed_action_np != chunk.exec_action_np)
