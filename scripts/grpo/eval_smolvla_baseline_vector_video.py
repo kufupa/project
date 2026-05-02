@@ -19,7 +19,9 @@ from smolvla_grpo.phase12_logging import utc_now_iso
 from smolvla_grpo.phase12_vector_eval import (
     build_episode_waves,
     coerce_exec_action_batch,
+    coerce_exec_action_chunk_batch,
     concatenate_proc_rows,
+    select_eval_action_chunk_queue_free,
     select_eval_action_queue_free,
 )
 
@@ -53,7 +55,7 @@ def _frame_from_obs(obs: dict[str, Any]) -> np.ndarray | None:
     return np.ascontiguousarray(frame)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=str, default=BASE_CHECKPOINT)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -62,8 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-seed-start", type=int, default=1000)
     parser.add_argument("--n-envs", type=int, default=3)
     parser.add_argument("--max-steps", type=int, default=120)
+    parser.add_argument("--chunk-len", type=int, default=1)
     parser.add_argument("--fps", type=int, default=20)
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if int(args.chunk_len) < 1:
+        parser.error("--chunk-len must be >= 1")
+    return args
 
 
 def main() -> int:
@@ -74,7 +80,7 @@ def main() -> int:
         args.checkpoint,
         task=args.task,
         env_backend="official_lerobot",
-        n_action_steps=1,
+        n_action_steps=int(args.chunk_len),
     )
     bundle.policy.eval()
 
@@ -104,33 +110,53 @@ def main() -> int:
                     frame = envs[row].render_frame()
                 frames[row].append(frame)
 
-            for _step in range(int(resolved_steps)):
+            step_count = 0
+            while step_count < int(resolved_steps):
                 if not bool(np.any(active)):
                     break
                 active_rows = [idx for idx in range(wave_n) if bool(active[idx])]
                 proc = concatenate_proc_rows(
                     [envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows]
                 )
+                effective_chunk = min(int(args.chunk_len), int(resolved_steps) - int(step_count))
                 with torch.inference_mode():
-                    action = select_eval_action_queue_free(bundle.policy, proc)
-                    post = bundle.postprocessor(action)
-                exec_action_np = coerce_exec_action_batch(
-                    post,
-                    action_dim=int(envs[0].action_dim),
-                    n_envs=len(active_rows),
-                )
-                for batch_row, row in enumerate(active_rows):
-                    step = envs[row].step(exec_action_np[batch_row : batch_row + 1])
-                    obs_by_row[row] = step.observation
-                    actions[row].append(exec_action_np[batch_row].reshape(-1).tolist())
-                    rewards[row].append(float(step.reward))
-                    successes[row].append(bool(step.success))
-                    frame = _frame_from_obs(step.observation)
-                    if frame is None:
-                        frame = envs[row].render_frame()
-                    frames[row].append(frame)
-                    if step.success or step.terminated or step.truncated:
-                        active[row] = False
+                    if int(args.chunk_len) == 1:
+                        action = select_eval_action_queue_free(bundle.policy, proc)
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_batch(
+                            post,
+                            action_dim=int(envs[0].action_dim),
+                            n_envs=len(active_rows),
+                        )[:, None, :]
+                    else:
+                        action = select_eval_action_chunk_queue_free(bundle.policy, proc, chunk_len=effective_chunk)
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_chunk_batch(
+                            post,
+                            action_dim=int(envs[0].action_dim),
+                            n_envs=len(active_rows),
+                            chunk_len=effective_chunk,
+                        )
+                for chunk_step in range(effective_chunk):
+                    if not bool(np.any(active)):
+                        break
+                    for batch_row, row in enumerate(active_rows):
+                        if not bool(active[row]):
+                            continue
+                        step = envs[row].step(exec_action_np[batch_row, chunk_step : chunk_step + 1])
+                        obs_by_row[row] = step.observation
+                        actions[row].append(exec_action_np[batch_row, chunk_step].reshape(-1).tolist())
+                        rewards[row].append(float(step.reward))
+                        successes[row].append(bool(step.success))
+                        frame = _frame_from_obs(step.observation)
+                        if frame is None:
+                            frame = envs[row].render_frame()
+                        frames[row].append(frame)
+                        if step.success or step.terminated or step.truncated:
+                            active[row] = False
+                    step_count += 1
+                    if step_count >= int(resolved_steps):
+                        break
 
             for row, (episode_index, reset_seed) in enumerate(wave):
                 episode_dir = output_dir / f"episode_{int(episode_index):04d}_seed_{int(reset_seed)}"
@@ -170,6 +196,8 @@ def main() -> int:
         "eval_seed_end": int(args.eval_seed_start) + int(args.episodes) - 1,
         "n_envs": int(args.n_envs),
         "max_steps": int(args.max_steps),
+        "chunk_len": int(args.chunk_len),
+        "rollout_execution": "chunk_open_loop" if int(args.chunk_len) > 1 else "one_step_queue_free",
         "pc_success": 100.0 * float(success_count) / max(len(rows), 1),
         "avg_sum_reward": float(np.mean([row["sum_reward"] for row in rows])) if rows else 0.0,
         "avg_max_reward": float(np.mean([row["max_reward"] for row in rows])) if rows else 0.0,

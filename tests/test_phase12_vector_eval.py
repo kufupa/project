@@ -132,6 +132,24 @@ def test_coerce_exec_action_batch_preserves_rows() -> None:
     np.testing.assert_allclose(out[1], np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
 
 
+def test_coerce_exec_action_chunk_batch_preserves_chunk_rows() -> None:
+    from smolvla_grpo.phase12_vector_eval import coerce_exec_action_chunk_batch
+
+    action = np.array(
+        [
+            [[2.0, 0.5, -0.5, -2.0], [0.1, 0.2, 0.3, 0.4]],
+            [[-3.0, 0.0, 3.0, 0.5], [0.9, -0.9, 0.8, -0.8]],
+        ],
+        dtype=np.float32,
+    )
+
+    out = coerce_exec_action_chunk_batch(action, action_dim=4, n_envs=2, chunk_len=2)
+
+    assert out.shape == (2, 2, 4)
+    np.testing.assert_allclose(out[0, 0], np.array([1.0, 0.5, -0.5, -1.0], dtype=np.float32))
+    np.testing.assert_allclose(out[1, 0], np.array([-1.0, 0.0, 1.0, 0.5], dtype=np.float32))
+
+
 def test_concatenate_proc_rows_preserves_batch_order() -> None:
     import torch
 
@@ -156,6 +174,58 @@ def test_concatenate_proc_rows_preserves_batch_order() -> None:
     np.testing.assert_allclose(out["observation.state"].numpy(), np.array([[1.0, 2.0], [3.0, 4.0]]))
     assert out["observation.image"].shape == (2, 3, 2, 2)
     assert out["task"] == ["seed1000", "seed1001"]
+
+
+def test_select_eval_action_chunk_queue_free_uses_model_sample_actions() -> None:
+    import torch
+    from types import SimpleNamespace
+
+    from smolvla_grpo.phase12_vector_eval import select_eval_action_chunk_queue_free
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None):
+            del images, img_masks, lang_tokens, lang_masks, state, noise
+            self.calls += 1
+            return torch.arange(2 * 5 * 4, dtype=torch.float32).reshape(2, 5, 4)
+
+    class FakePolicy:
+        def __init__(self) -> None:
+            self.model = FakeModel()
+            self.config = SimpleNamespace(action_feature=SimpleNamespace(shape=(4,)))
+            self.select_action_calls = 0
+
+        def _prepare_batch(self, proc):
+            return proc
+
+        def prepare_images(self, batch):
+            return batch["images"], batch["img_masks"]
+
+        def prepare_state(self, batch):
+            return batch["state"]
+
+        def select_action(self, proc):
+            del proc
+            self.select_action_calls += 1
+            return torch.zeros(2, 4)
+
+    proc = {
+        "images": torch.zeros(2, 3, 8, 8),
+        "img_masks": torch.ones(2, 1),
+        "state": torch.zeros(2, 8),
+        "observation.language.tokens": torch.zeros(2, 4, dtype=torch.long),
+        "observation.language.attention_mask": torch.ones(2, 4, dtype=torch.long),
+    }
+    policy = FakePolicy()
+
+    got = select_eval_action_chunk_queue_free(policy, proc, chunk_len=3)
+
+    assert got.shape == (2, 3, 4)
+    assert policy.model.calls == 1
+    assert policy.select_action_calls == 0
+    torch.testing.assert_close(got, torch.arange(2 * 5 * 4, dtype=torch.float32).reshape(2, 5, 4)[:, :3, :])
 
 
 def _load_phase12_sweep_module():
@@ -339,4 +409,164 @@ def test_vector_eval_uses_queue_free_action_when_active_rows_shrink(tmp_path, mo
     assert summary["episodes"] == 3
     assert bundle.policy.select_action_calls == 0
     assert bundle.policy.queue_free_calls == [3, 2, 2]
+
+
+def test_vector_eval_chunked_execution_samples_once_per_chunk(tmp_path, monkeypatch):
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    import torch
+
+    from smolvla_grpo.phase12_vector_eval import evaluate_loaded_policy_vectorized
+
+    class FakePolicy:
+        def __init__(self):
+            self.reset_calls = 0
+            self.chunk_calls = []
+
+        def reset(self):
+            self.reset_calls += 1
+
+    class FakeBundle:
+        base_checkpoint = "base"
+        grpo_checkpoint = None
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.policy = FakePolicy()
+
+        def postprocessor(self, action):
+            return action
+
+    class FakeEnv:
+        action_dim = 4
+
+        def __init__(self, *, task, n_envs=1):
+            del task
+            assert n_envs == 1
+            self.seed = None
+            self.steps = 0
+
+        def reset(self, seed):
+            self.seed = int(seed)
+            self.steps = 0
+            return {"state": np.array([float(seed), 0.0, 0.0, 0.0], dtype=np.float32)}
+
+        def build_proc(self, obs, *, bundle):
+            del bundle
+            return {
+                "observation.state": torch.tensor([[obs["state"][0], obs["state"][1], 0.0, 0.0]], dtype=torch.float32),
+                "task": [f"seed-{self.seed}"],
+            }
+
+        def step(self, action):
+            self.steps += 1
+            return SimpleNamespace(
+                observation={"state": np.array([float(self.seed), float(self.steps), 0.0, 0.0], dtype=np.float32)},
+                reward=float(np.asarray(action).reshape(-1)[0]),
+                success=False,
+                terminated=False,
+                truncated=False,
+            )
+
+        def close(self):
+            return None
+
+    fake_adapter = types.ModuleType("smolvla_grpo.lerobot_metaworld_adapter")
+    fake_adapter.OfficialLeRobotMetaWorldGRPORollout = FakeEnv
+    fake_adapter.resolve_lerobot_horizon = lambda env, max_steps: int(max_steps)
+    monkeypatch.setitem(sys.modules, "smolvla_grpo.lerobot_metaworld_adapter", fake_adapter)
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval._resolve_action_dim", lambda task: 4)
+
+    def fake_write_episode_artifacts(*, episode_dir, actions, rewards, successes, overlay_mode):
+        del actions, rewards, successes, overlay_mode
+        episode_dir.mkdir(parents=True, exist_ok=True)
+
+    def fake_chunk(policy, proc, *, chunk_len):
+        policy.chunk_calls.append((int(proc["observation.state"].shape[0]), int(chunk_len)))
+        batch = int(proc["observation.state"].shape[0])
+        return torch.ones(batch, int(chunk_len), 4)
+
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval.write_episode_artifacts", fake_write_episode_artifacts)
+    monkeypatch.setattr("smolvla_grpo.phase12_vector_eval.select_eval_action_chunk_queue_free", fake_chunk)
+
+    bundle = FakeBundle()
+    summary = evaluate_loaded_policy_vectorized(
+        bundle=bundle,
+        base_checkpoint="base",
+        grpo_checkpoint=None,
+        output_dir=tmp_path,
+        task="push-v3",
+        episodes=3,
+        eval_seed_start=1000,
+        n_envs=3,
+        rollout_execution="vector_sync",
+        max_steps=5,
+        chunk_len=2,
+    )
+
+    assert summary["episodes"] == 3
+    assert summary["chunk_len"] == 2
+    assert bundle.policy.chunk_calls == [(3, 2), (3, 2), (3, 1)]
+
+
+def test_baseline_vector_video_parse_accepts_chunk_len(tmp_path):
+    from scripts.grpo.eval_smolvla_baseline_vector_video import parse_args
+
+    args = parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--task",
+            "push-v3",
+            "--episodes",
+            "25",
+            "--eval-seed-start",
+            "1000",
+            "--n-envs",
+            "3",
+            "--max-steps",
+            "180",
+            "--chunk-len",
+            "20",
+        ]
+    )
+
+    assert args.task == "push-v3"
+    assert args.episodes == 25
+    assert args.eval_seed_start == 1000
+    assert args.n_envs == 3
+    assert args.max_steps == 180
+    assert args.chunk_len == 20
+
+
+def test_vector_eval_rejects_invalid_chunk_len(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from smolvla_grpo.phase12_vector_eval import evaluate_loaded_policy_vectorized
+
+    bundle = SimpleNamespace(policy=SimpleNamespace(), postprocessor=lambda action: action)
+
+    with pytest.raises(ValueError, match="chunk_len must be >= 1"):
+        evaluate_loaded_policy_vectorized(
+            bundle=bundle,
+            base_checkpoint="base",
+            grpo_checkpoint=None,
+            output_dir=tmp_path,
+            task="push-v3",
+            episodes=1,
+            eval_seed_start=1000,
+            n_envs=1,
+            rollout_execution="vector_sync",
+            max_steps=1,
+            chunk_len=0,
+        )
+
+
+def test_baseline_vector_video_parse_rejects_invalid_chunk_len(tmp_path) -> None:
+    from scripts.grpo.eval_smolvla_baseline_vector_video import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--output-dir", str(tmp_path), "--chunk-len", "0"])
 

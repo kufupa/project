@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# PBS (CX3): Push-v3 SmolVLA baseline chunk-length sweep, one chunk length per GPU job.
+# Submit from repo root, usually through submit_smolvla_baseline_pushv3_chunk_sweep_all5.sh.
+#PBS -N p58pushc
+#PBS -l select=1:ncpus=8:mem=32gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/smolvla_pushv3_chunk_sweep.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+source "${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+slurm_resolve_project_root "scripts/grpo/eval_smolvla_baseline_vector_video.py"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase58-pushv3-chunk-sweep"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: no usable PYTHON_BIN=${PYTHON_BIN}" >&2
+  exit 2
+fi
+
+TASK="${PHASE58_TASK:-push-v3}"
+SEED_START="${PHASE58_EVAL_SEED_START:-1000}"
+EPISODES="${PHASE58_EPISODES:-25}"
+N_ENVS="${PHASE58_N_ENVS:-3}"
+MAX_STEPS="${PHASE58_MAX_STEPS:-180}"
+CHUNK_LEN="${PHASE58_CHUNK_LEN:-2}"
+FPS="${PHASE58_FPS:-20}"
+SWEEP_ROOT="${PHASE58_OUT_ROOT:-${PROJECT_ROOT}/artifacts/phase58_smolvla_baseline_pushv3_chunk_sweep_25ep_s1000_max180_5x1gpu}"
+OUT="${PHASE58_OUT:-${SWEEP_ROOT}/chunk_len_$(printf "%02d" "${CHUNK_LEN}")}"
+BASE_CKPT="${PHASE58_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+GPU_TELEMETRY_INTERVAL="${PHASE58_GPU_TELEMETRY_INTERVAL:-5}"
+GPU_TELEMETRY_DIR="${OUT}/gpu_telemetry"
+NVIDIA_SMI_PID=""
+NVIDIA_PMON_PID=""
+DCGMI_PID=""
+
+stop_gpu_telemetry() {
+  local status=$?
+  set +e
+  for pid in "${NVIDIA_SMI_PID}" "${NVIDIA_PMON_PID}" "${DCGMI_PID}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi > "${GPU_TELEMETRY_DIR}/nvidia_smi_end.txt" 2>&1 || true
+  fi
+  if [[ -n "${PBS_JOBID:-}" ]] && command -v qstat >/dev/null 2>&1; then
+    qstat -fx "${PBS_JOBID}" > "${GPU_TELEMETRY_DIR}/pbs_resource_snapshot.txt" 2>&1 || true
+  fi
+  if [[ -f "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" ]]; then
+    "${PYTHON_BIN}" scripts/grpo/summarize_phase58_gpu_telemetry.py \
+      --csv "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" \
+      --output "${GPU_TELEMETRY_DIR}/gpu_telemetry_summary.json" || true
+  fi
+  exit "${status}"
+}
+
+start_gpu_telemetry() {
+  mkdir -p "${GPU_TELEMETRY_DIR}"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi > "${GPU_TELEMETRY_DIR}/nvidia_smi_start.txt" 2>&1 || true
+    nvidia-smi \
+      --query-gpu=timestamp,index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
+      --format=csv,nounits \
+      -l "${GPU_TELEMETRY_INTERVAL}" \
+      > "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" \
+      2> "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.err" &
+    NVIDIA_SMI_PID=$!
+    nvidia-smi pmon -s um -d "${GPU_TELEMETRY_INTERVAL}" -o DT \
+      > "${GPU_TELEMETRY_DIR}/nvidia_smi_pmon.txt" \
+      2> "${GPU_TELEMETRY_DIR}/nvidia_smi_pmon.err" &
+    NVIDIA_PMON_PID=$!
+  else
+    echo "nvidia-smi not found on PATH" > "${GPU_TELEMETRY_DIR}/nvidia_smi_start.txt"
+  fi
+  if command -v dcgmi >/dev/null 2>&1; then
+    dcgmi dmon -d "${GPU_TELEMETRY_INTERVAL}" \
+      > "${GPU_TELEMETRY_DIR}/dcgmi_dmon.txt" \
+      2> "${GPU_TELEMETRY_DIR}/dcgmi_dmon.err" &
+    DCGMI_PID=$!
+  fi
+}
+
+mkdir -p "${OUT}" "${GPU_TELEMETRY_DIR}" logs/pbs/grpo
+echo "[phase58] job=${PBS_JOBID:-local} task=${TASK} episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max_steps=${MAX_STEPS} out=${OUT}"
+trap stop_gpu_telemetry EXIT
+start_gpu_telemetry
+
+"${PYTHON_BIN}" scripts/grpo/eval_smolvla_baseline_vector_video.py \
+  --checkpoint "${BASE_CKPT}" \
+  --output-dir "${OUT}" \
+  --task "${TASK}" \
+  --episodes "${EPISODES}" \
+  --eval-seed-start "${SEED_START}" \
+  --n-envs "${N_ENVS}" \
+  --max-steps "${MAX_STEPS}" \
+  --chunk-len "${CHUNK_LEN}" \
+  --fps "${FPS}"
+
+test -f "${OUT}/eval_summary.json"
+echo "SMOLVLA_PUSHV3_CHUNK_SWEEP_DONE out=${OUT}"
