@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
 from statistics import mean
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,64 @@ class EpisodeResult:
     successes: list[bool]
     terminated: bool
     truncated: bool
+
+
+TIMING_SECOND_FIELDS = (
+    "load_bundle_seconds",
+    "rollout_seconds",
+    "reset_seconds",
+    "proc_build_seconds",
+    "policy_prepare_seconds",
+    "policy_forward_seconds",
+    "postprocess_seconds",
+    "action_coerce_seconds",
+    "metaworld_step_seconds_including_obs_render",
+    "metaworld_step_batch_seconds_including_obs_render",
+    "frame_extract_seconds",
+    "video_write_seconds",
+    "close_seconds",
+)
+
+TIMING_COUNT_FIELDS = ("n_policy_calls", "n_env_steps", "n_env_batch_steps", "n_video_frames")
+
+
+@dataclass
+class TimingAccumulator:
+    seconds: dict[str, float] = field(default_factory=lambda: {key: 0.0 for key in TIMING_SECOND_FIELDS})
+    counts: dict[str, int] = field(default_factory=lambda: {key: 0 for key in TIMING_COUNT_FIELDS})
+    cuda_sync_requested: bool = True
+    cuda_synchronized_forward_timing: bool = False
+
+    def add(self, key: str, value: float) -> None:
+        if key not in self.seconds:
+            raise KeyError(f"unknown timing seconds field: {key}")
+        self.seconds[key] += float(value)
+
+    def incr(self, key: str, value: int = 1) -> None:
+        if key not in self.counts:
+            raise KeyError(f"unknown timing count field: {key}")
+        self.counts[key] += int(value)
+
+    def summary(self) -> dict[str, Any]:
+        policy_calls = max(int(self.counts["n_policy_calls"]), 1)
+        env_steps = max(int(self.counts["n_env_steps"]), 1)
+        env_batch_steps = max(int(self.counts["n_env_batch_steps"]), 1)
+        video_frames = max(int(self.counts["n_video_frames"]), 1)
+        return {
+            "schema_version": "phase58_timing_v1",
+            **{key: float(self.seconds.get(key, 0.0)) for key in TIMING_SECOND_FIELDS},
+            **{key: int(self.counts.get(key, 0)) for key in TIMING_COUNT_FIELDS},
+            "mean_policy_forward_ms_per_call": float(1000.0 * self.seconds["policy_forward_seconds"] / policy_calls),
+            "mean_metaworld_step_ms_per_env_step": float(
+                1000.0 * self.seconds["metaworld_step_seconds_including_obs_render"] / env_steps
+            ),
+            "mean_metaworld_step_batch_ms": float(
+                1000.0 * self.seconds["metaworld_step_batch_seconds_including_obs_render"] / env_batch_steps
+            ),
+            "mean_video_write_ms_per_frame": float(1000.0 * self.seconds["video_write_seconds"] / video_frames),
+            "cuda_sync_requested": bool(self.cuda_sync_requested),
+            "cuda_synchronized_forward_timing": bool(self.cuda_synchronized_forward_timing),
+        }
 
 
 def build_episode_waves(*, episodes: int, eval_seed_start: int, n_envs: int) -> list[list[tuple[int, int]]]:
@@ -229,34 +288,87 @@ def _reset_policy(policy: Any) -> None:
         reset()
 
 
-def select_eval_action_queue_free(policy: Any, proc: dict[str, Any]) -> torch.Tensor:
+def _sync_cuda_for_timing(policy: Any, timings: TimingAccumulator | None) -> None:
+    if timings is not None and not timings.cuda_sync_requested:
+        return
+    if not torch.cuda.is_available():
+        return
+    device = getattr(policy, "device", None)
+    try:
+        torch.cuda.synchronize(device=device)
+    except Exception:
+        torch.cuda.synchronize()
+    if timings is not None:
+        timings.cuda_synchronized_forward_timing = True
+
+
+def _timed_sample_actions(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    timings: TimingAccumulator | None,
+) -> tuple[torch.Tensor, int]:
+    prepare_t0 = perf_counter()
+    batch = policy._prepare_batch(proc)
+    images, img_masks = policy.prepare_images(batch)
+    state = policy.prepare_state(batch)
+    lang_tokens = batch["observation.language.tokens"]
+    lang_masks = batch["observation.language.attention_mask"]
+    if timings is not None:
+        timings.add("policy_prepare_seconds", perf_counter() - prepare_t0)
+
+    _sync_cuda_for_timing(policy, timings)
+    forward_t0 = perf_counter()
+    actions = policy.model.sample_actions(
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+    )
+    _sync_cuda_for_timing(policy, timings)
+    if timings is not None:
+        timings.add("policy_forward_seconds", perf_counter() - forward_t0)
+        timings.incr("n_policy_calls")
+
+    if not torch.is_tensor(actions):
+        raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
+    return actions, int(policy.config.action_feature.shape[0])
+
+
+def select_eval_action_queue_free_timed(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    timings: TimingAccumulator | None,
+) -> torch.Tensor:
     """Return first eval action without using SmolVLA's cross-step action queue."""
 
     if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
         getattr(policy, "model", None), "sample_actions"
     ):
-        batch = policy._prepare_batch(proc)
-        images, img_masks = policy.prepare_images(batch)
-        state = policy.prepare_state(batch)
-        lang_tokens = batch["observation.language.tokens"]
-        lang_masks = batch["observation.language.attention_mask"]
-        actions = policy.model.sample_actions(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            state,
-            noise=None,
-        )
-        if not torch.is_tensor(actions):
-            raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
-        action_dim = int(policy.config.action_feature.shape[0])
+        actions, action_dim = _timed_sample_actions(policy, proc, timings=timings)
         return actions[:, 0, :action_dim]
 
+    if timings is not None:
+        timings.incr("n_policy_calls")
     return policy.select_action(proc)
 
 
-def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, chunk_len: int) -> torch.Tensor:
+def select_eval_action_queue_free(policy: Any, proc: dict[str, Any]) -> torch.Tensor:
+    """Return first eval action without using SmolVLA's cross-step action queue."""
+
+    return select_eval_action_queue_free_timed(policy, proc, timings=None)
+
+
+def select_eval_action_chunk_queue_free_timed(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    chunk_len: int,
+    timings: TimingAccumulator | None,
+) -> torch.Tensor:
     """Return an eval action chunk without using SmolVLA's cross-step action queue."""
 
     if int(chunk_len) < 1:
@@ -264,22 +376,7 @@ def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, ch
     if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
         getattr(policy, "model", None), "sample_actions"
     ):
-        batch = policy._prepare_batch(proc)
-        images, img_masks = policy.prepare_images(batch)
-        state = policy.prepare_state(batch)
-        lang_tokens = batch["observation.language.tokens"]
-        lang_masks = batch["observation.language.attention_mask"]
-        actions = policy.model.sample_actions(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            state,
-            noise=None,
-        )
-        if not torch.is_tensor(actions):
-            raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
-        action_dim = int(policy.config.action_feature.shape[0])
+        actions, action_dim = _timed_sample_actions(policy, proc, timings=timings)
         actions = actions[:, :, :action_dim] if actions.ndim == 3 else actions.reshape(actions.shape[0], -1, action_dim)
         if int(actions.shape[1]) < int(chunk_len):
             raise RuntimeError(f"SmolVLA returned {int(actions.shape[1])} actions, requested chunk_len={int(chunk_len)}")
@@ -289,6 +386,12 @@ def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, ch
     if int(chunk_len) != 1:
         raise RuntimeError("Chunked baseline eval requires SmolVLA model.sample_actions when chunk_len > 1")
     return first.unsqueeze(1)
+
+
+def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, chunk_len: int) -> torch.Tensor:
+    """Return an eval action chunk without using SmolVLA's cross-step action queue."""
+
+    return select_eval_action_chunk_queue_free_timed(policy, proc, chunk_len=chunk_len, timings=None)
 
 
 def _resolve_action_dim(task: str) -> int:

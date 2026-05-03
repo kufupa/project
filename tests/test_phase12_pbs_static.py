@@ -89,6 +89,46 @@ def test_phase57_mt50_decode_pbs_contract() -> None:
     assert "for shard in 0 1 2 3 4" in all5
 
 
+def test_phase57_raw_boundary_goal_bugfix_pbs_contract() -> None:
+    text = _read("submit_phase57_raw_boundary_check_goal_bugfix.pbs")
+
+    assert "#SBATCH" not in text
+    assert "PBS_O_WORKDIR" in text
+    assert "#PBS -l select=1:ncpus=32:mem=128gb:ngpus=1:gpu_type=RTX6000" in text
+    assert "#PBS -l walltime=04:00:00" in text
+    assert 'slurm_resolve_project_root "scripts/grpo/phase57_mt50_raw_vs_bounded_decode.py"' in text
+    assert 'export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"' in text
+    assert "phase57-raw-boundary-check-goal-bugfix" in text
+    assert "RAW_BOUNDARY_TASKS_DEFAULT=" in text
+    assert text.count("-v3") == 18
+    assert "coffee-pull-v3" in text
+    assert "stick-push-v3" in text
+    assert 'EPISODES="${PHASE57_RAW_BOUNDARY_EPISODES:-25}"' in text
+    assert 'N_ENVS="${PHASE57_RAW_BOUNDARY_N_ENVS:-25}"' in text
+    assert 'CHUNK_LEN="${PHASE57_RAW_BOUNDARY_CHUNK_LEN:-50}"' in text
+    assert 'MAX_STEPS="${PHASE57_RAW_BOUNDARY_MAX_STEPS:-180}"' in text
+    assert 'GPU_TELEMETRY_DIR="${OUT}/gpu_telemetry"' in text
+    assert 'GPU_TELEMETRY_INTERVAL="${PHASE57_RAW_BOUNDARY_GPU_TELEMETRY_INTERVAL:-5}"' in text
+    assert "nvidia_smi_samples.csv" in text
+    assert "nvidia_smi_pmon.txt" in text
+    assert "nvidia_smi_start.txt" in text
+    assert "nvidia_smi_end.txt" in text
+    assert "pbs_resource_snapshot.txt" in text
+    assert "summarize_phase58_gpu_telemetry.py" in text
+    assert "gpu_telemetry_summary.json" in text
+    assert "command -v nvidia-smi" in text
+    assert "command -v dcgmi" in text
+    assert "stop_gpu_telemetry" in text
+    assert "trap stop_gpu_telemetry EXIT" in text
+    assert "exit \"${status}\"" in text
+    assert "--n-envs \"${N_ENVS}\"" in text
+    assert "--episodes \"${EPISODES}\"" in text
+    assert "--chunk-len \"${CHUNK_LEN}\"" in text
+    assert "--max-steps \"${MAX_STEPS}\"" in text
+    assert "phase57_raw_boundary_check_goal_bugfix_18tasks_25ep_s1000_max180_nenv25_1xgpu" in text
+    assert "PHASE57_RAW_BOUNDARY_CHECK_GOAL_BUGFIX_DONE" in text
+
+
 def test_smolvla_pushv3_chunk_sweep_pbs_contract() -> None:
     text = _read("submit_smolvla_baseline_pushv3_chunk_sweep.pbs")
     all5 = _read("submit_smolvla_baseline_pushv3_chunk_sweep_all5.sh")
@@ -113,6 +153,8 @@ def test_smolvla_pushv3_chunk_sweep_pbs_contract() -> None:
     assert "pbs_resource_snapshot.txt" in text
     assert "summarize_phase58_gpu_telemetry.py" in text
     assert "gpu_telemetry_summary.json" in text
+    assert 'test -f "${OUT}/timing_summary.json"' in text
+    assert "timing_summary.json" in text
     assert "command -v nvidia-smi" in text
     assert "command -v dcgmi" in text
     assert "stop_gpu_telemetry" in text
@@ -123,3 +165,23 @@ def test_smolvla_pushv3_chunk_sweep_pbs_contract() -> None:
     assert "chunks=(2 5 10 15 20)" in all5
     assert "qsub" in all5
     assert "PHASE58_CHUNK_LEN=${chunk}" in all5
+
+
+def test_smolvla_true_parallel_pushv3_chunk5_pbs_contract() -> None:
+    text = _read("submit_smolvla_true_parallel_pushv3_chunk5.pbs")
+
+    assert "#SBATCH" not in text
+    assert "PBS_O_WORKDIR" in text
+    assert "#PBS -l select=1:ncpus=16:mem=64gb:ngpus=1:gpu_type=RTX6000" in text
+    assert "#PBS -l walltime=02:00:00" in text
+    assert 'EPISODES="${PHASE61_EPISODES:-8}"' in text
+    assert 'N_ENVS="${PHASE61_N_ENVS:-8}"' in text
+    assert 'SEED_START="${PHASE61_EVAL_SEED_START:-1000}"' in text
+    assert 'CHUNK_LEN="${PHASE61_CHUNK_LEN:-5}"' in text
+    assert 'ENV_VECTOR_MODE="${PHASE61_ENV_VECTOR_MODE:-async}"' in text
+    assert "--output-dir \"${OUT}\"" in text
+    assert "--env-vector-mode \"${ENV_VECTOR_MODE}\"" in text
+    assert "OMP_NUM_THREADS" in text
+    assert "SMOLVLA_GRPO_ASYNC_MP_CONTEXT" in text
+    assert "gpu_telemetry_summary.json" in text
+    assert "timing_summary.json" in text
