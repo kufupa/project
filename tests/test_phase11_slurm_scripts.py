@@ -100,8 +100,8 @@ def test_submit_phase111_single_task_grpo_is_official_backend() -> None:
     assert 'manifest["action_transform"]' in text
     assert 'manifest["run_label"]' in text
     assert 'manifest["async_start_method"] == "forkserver"' in text
-    assert 'len(rows) == num_updates' in text
-    assert 'update_0100.pt' in text
+    assert 'len(rows) == end_update' in text
+    assert 'f"update_{end_update:04d}.pt"' in text
     assert '"rollout_seconds" in row' in text
     assert '"optimize_seconds" in row' in text
     assert '"update_seconds" in row' in text
@@ -115,6 +115,9 @@ def test_phase111_eval_sweep_runs_eval_from_repo_root() -> None:
     assert "_REPO = Path(__file__).resolve().parents[2]" in text
     assert 'subprocess.run(cmd, check=True, cwd=str(_REPO))' in text
     assert "--sweep-name" in text
+    assert "--execution-mode" in text
+    assert "inprocess_vector" in text
+    assert "vector_async" in text
     assert 'sweep_dir = run_dir / sweep_name' in text
 
 
@@ -126,6 +129,49 @@ def test_submit_phase111_eval_sweep_uses_common_env_and_sweep_name() -> None:
     assert 'RUN_DIR="${1:-}"' in text
     assert 'BASE_CKPT="${2:-}"' in text
     assert 'SWEEP_NAME="${8:-eval_sweep_current}"' in text
+    assert 'EXECUTION_MODE="${PHASE111_EVAL_EXECUTION_MODE:-inprocess_vector}"' in text
+    assert 'ROLLOUT_EXECUTION="${PHASE111_EVAL_ROLLOUT_EXECUTION:-vector_async}"' in text
     assert "--sweep-name" in text
+    assert "--execution-mode" in text
+    assert "--rollout-execution" in text
     assert "PHASE111_EVAL_SWEEP_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_phase11_pop128_smoke_pbs_has_rollout_policy_batch_size() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "phase11_pop128_rolloutpbs32_smoke_u1.pbs"
+    text = path.read_text(encoding="utf-8")
+    assert "--rollout-policy-batch-size 32" in text
+    assert "--group-size 128" in text
+    assert "--logprob-batch-size 32" in text
+    assert "PHASE11_POP128_ROLLOUTPBS32_SMOKE_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_phase11_pop128_train_scripts_have_microbatch_cap() -> None:
+    for name in (
+        "phase11_P128A_lr2e6_clip005_train_0001_0050.pbs",
+        "phase11_P128B_lr5e6_clip01_train_0001_0050.pbs",
+        "phase11_P128C_lr5e6_clip01_lownoise_train_0001_0050.pbs",
+    ):
+        path = _REPO_ROOT / "scripts" / "grpo" / name
+        text = path.read_text(encoding="utf-8")
+        assert "--group-size 128" in text
+        assert "--rollout-policy-batch-size 32" in text
+        assert "--logprob-batch-size 32" in text
+        subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_phase11_batched_logprob_smoke_pbs_defaults_to_batched_bs16() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "phase11_batched_logprob_smoke_u2.pbs"
+    text = path.read_text(encoding="utf-8")
+    assert "#PBS -l walltime=00:30:00" in text
+    assert "#PBS -l select=1:ncpus=48:mem=64gb:ngpus=1:gpu_type=RTX6000" in text
+    assert 'RUN_DIR="artifacts/phase11_pushv3_batched_logprob_smoke_u2"' in text
+    assert 'SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"' in text
+    assert "--num-updates 2" in text
+    assert "--group-size 32" in text
+    assert "--logprob-recompute-mode batched" in text
+    assert "--logprob-batch-size 16" in text
+    assert "PHASE11_BATCHED_LOGPROB_SMOKE_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))

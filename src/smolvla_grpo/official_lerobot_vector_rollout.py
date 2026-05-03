@@ -19,7 +19,11 @@ from smolvla_grpo.phase11_rollout import (
     _validate_action_chunk_size,
     detach_proc_snapshot,
 )
-from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
+from smolvla_grpo.policy_wrapper import (
+    MetaWorldSmolVLAGRPOPolicy,
+    SampledActionChunkBatch,
+    SampledBatchStep,
+)
 from smolvla_pipeline.evaluator import (
     _SmolVLABundle,
     _resolve_camera_name,
@@ -45,6 +49,50 @@ def slice_proc_row(proc: dict[str, Any], row: int) -> dict[str, Any]:
     return out
 
 
+def iter_compact_row_slices(n_active: int, policy_batch_size: int) -> list[tuple[int, int]]:
+    if n_active <= 0:
+        return []
+    bs = max(1, min(int(policy_batch_size), int(n_active)))
+    return [(start, min(start + bs, n_active)) for start in range(0, n_active, bs)]
+
+
+def concat_sampled_action_batches(parts: list[SampledBatchStep]) -> SampledBatchStep:
+    if not parts:
+        raise ValueError("parts must be non-empty")
+    return SampledBatchStep(
+        exec_action_np=np.concatenate([p.exec_action_np for p in parts], axis=0),
+        raw_postprocessed_action_np=np.concatenate(
+            [p.raw_postprocessed_action_np for p in parts], axis=0
+        ),
+        policy_tensor=torch.cat([p.policy_tensor for p in parts], dim=0),
+        unsquashed=torch.cat([p.unsquashed for p in parts], dim=0),
+        log_prob=torch.cat([p.log_prob.reshape(-1) for p in parts], dim=0),
+        action_clip_fraction=np.concatenate(
+            [np.asarray(p.action_clip_fraction).reshape(-1) for p in parts], axis=0
+        ),
+        action_clip_any=np.concatenate(
+            [np.asarray(p.action_clip_any).reshape(-1) for p in parts], axis=0
+        ),
+    )
+
+
+def concat_sampled_action_chunk_batches(parts: list[SampledActionChunkBatch]) -> SampledActionChunkBatch:
+    if not parts:
+        raise ValueError("parts must be non-empty")
+    return SampledActionChunkBatch(
+        exec_action_np=np.concatenate([p.exec_action_np for p in parts], axis=0),
+        raw_postprocessed_action_np=np.concatenate(
+            [p.raw_postprocessed_action_np for p in parts], axis=0
+        ),
+        policy_tensor=torch.cat([p.policy_tensor for p in parts], dim=0),
+        unsquashed_chunk=torch.cat([p.unsquashed_chunk for p in parts], dim=0),
+        log_prob_steps=torch.cat([p.log_prob_steps for p in parts], dim=0),
+        log_prob_sum=torch.cat([p.log_prob_sum.reshape(-1) for p in parts], dim=0),
+        action_clip_fraction=np.concatenate([p.action_clip_fraction for p in parts], axis=0),
+        action_clip_any=np.concatenate([p.action_clip_any for p in parts], axis=0),
+    )
+
+
 def select_proc_rows(proc: dict[str, Any], rows: list[int], *, batch_size: int) -> dict[str, Any]:
     """Compact full vector preprocessor output down to active rows."""
     if not rows:
@@ -60,6 +108,68 @@ def select_proc_rows(proc: dict[str, Any], rows: list[int], *, batch_size: int) 
         else:
             out[key] = copy.deepcopy(value)
     return out
+
+
+def _sample_policy_for_active_rows(
+    old_wrapper: MetaWorldSmolVLAGRPOPolicy,
+    proc: dict[str, Any],
+    *,
+    active_rows: list[int],
+    rngs: list[torch.Generator],
+    action_chunk_size: int,
+    effective_chunk: int,
+    rollout_policy_batch_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n_active = len(active_rows)
+    slices = iter_compact_row_slices(n_active, rollout_policy_batch_size)
+    if action_chunk_size == 1:
+        parts = []
+        for start, end in slices:
+            sub_rows = list(range(start, end))
+            proc_sub = select_proc_rows(proc, sub_rows, batch_size=n_active)
+            parts.append(
+                old_wrapper.sample_action_batch_from_proc(
+                    proc_sub,
+                    n_envs=end - start,
+                    rngs=[rngs[active_rows[row]] for row in sub_rows],
+                )
+            )
+        batch = concat_sampled_action_batches(parts)
+        chunk_exec_actions = batch.exec_action_np[:, None, :].astype(np.float32, copy=False)
+        chunk_unsquashed = batch.unsquashed.detach().cpu().reshape(n_active, 1, -1)
+        chunk_log_probs = batch.log_prob.detach().cpu().reshape(n_active, 1)
+        chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
+            n_active, 1
+        )
+        chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(n_active, 1)
+    else:
+        parts = []
+        for start, end in slices:
+            sub_rows = list(range(start, end))
+            proc_sub = select_proc_rows(proc, sub_rows, batch_size=n_active)
+            parts.append(
+                old_wrapper.sample_action_chunk_batch_from_proc(
+                    proc_sub,
+                    n_envs=end - start,
+                    chunk_len=effective_chunk,
+                    rngs=[rngs[active_rows[row]] for row in sub_rows],
+                )
+            )
+        batch = concat_sampled_action_chunk_batches(parts)
+        chunk_exec_actions = batch.exec_action_np.astype(np.float32, copy=False).reshape(
+            n_active, effective_chunk, -1
+        )
+        chunk_unsquashed = batch.unsquashed_chunk.detach().cpu().reshape(
+            n_active, effective_chunk, -1
+        )
+        chunk_log_probs = batch.log_prob_steps.detach().cpu().reshape(n_active, effective_chunk)
+        chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
+            n_active, effective_chunk
+        )
+        chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(
+            n_active, effective_chunk
+        )
+    return chunk_exec_actions, chunk_unsquashed, chunk_log_probs, chunk_clip_fraction, chunk_clip_any
 
 
 def collect_official_lerobot_vector_rollout_group(
@@ -78,6 +188,7 @@ def collect_official_lerobot_vector_rollout_group(
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
     action_chunk_size: int = 1,
+    rollout_policy_batch_size: int = 32,
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` one-episode trajectories with one vector env step per timestep."""
     if rollout_execution not in ("vector_sync", "vector_async"):
@@ -128,6 +239,7 @@ def collect_official_lerobot_vector_rollout_group(
             tr.metadata["requested_max_steps"] = requested_max_steps
             tr.metadata["resolved_max_steps"] = max_steps_i
             tr.metadata["action_chunk_size"] = action_chunk_size_i
+            tr.metadata["rollout_policy_batch_size"] = int(rollout_policy_batch_size)
             tr.metadata["policy_sample_calls"] = 0
 
         obs = env_h.reset(int(reset_seed))
@@ -151,39 +263,21 @@ def collect_official_lerobot_vector_rollout_group(
             proc = select_proc_rows(proc_full, active_rows, batch_size=group_size)
             effective_chunk = min(action_chunk_size_i, int(max_steps_i) - int(step_count))
             with torch.no_grad():
-                if action_chunk_size_i == 1:
-                    batch = old_wrapper.sample_action_batch_from_proc(
-                        proc,
-                        n_envs=len(active_rows),
-                        rngs=[rngs[row] for row in active_rows],
-                    )
-                    chunk_exec_actions = batch.exec_action_np[:, None, :].astype(np.float32, copy=False)
-                    chunk_unsquashed = batch.unsquashed.detach().cpu().reshape(len(active_rows), 1, -1)
-                    chunk_log_probs = batch.log_prob.detach().cpu().reshape(len(active_rows), 1)
-                    chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
-                        len(active_rows), 1
-                    )
-                    chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(len(active_rows), 1)
-                else:
-                    batch = old_wrapper.sample_action_chunk_batch_from_proc(
-                        proc,
-                        n_envs=len(active_rows),
-                        chunk_len=effective_chunk,
-                        rngs=[rngs[row] for row in active_rows],
-                    )
-                    chunk_exec_actions = batch.exec_action_np.astype(np.float32, copy=False).reshape(
-                        len(active_rows), effective_chunk, -1
-                    )
-                    chunk_unsquashed = batch.unsquashed_chunk.detach().cpu().reshape(
-                        len(active_rows), effective_chunk, -1
-                    )
-                    chunk_log_probs = batch.log_prob_steps.detach().cpu().reshape(len(active_rows), effective_chunk)
-                    chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
-                        len(active_rows), effective_chunk
-                    )
-                    chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(
-                        len(active_rows), effective_chunk
-                    )
+                (
+                    chunk_exec_actions,
+                    chunk_unsquashed,
+                    chunk_log_probs,
+                    chunk_clip_fraction,
+                    chunk_clip_any,
+                ) = _sample_policy_for_active_rows(
+                    old_wrapper,
+                    proc,
+                    active_rows=active_rows,
+                    rngs=rngs,
+                    action_chunk_size=action_chunk_size_i,
+                    effective_chunk=effective_chunk,
+                    rollout_policy_batch_size=int(rollout_policy_batch_size),
+                )
 
             active_proc_snapshots = [
                 detach_proc_snapshot(slice_proc_row(proc, batch_row)) for batch_row in range(len(active_rows))

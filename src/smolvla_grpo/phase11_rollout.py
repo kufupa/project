@@ -192,6 +192,7 @@ def collect_rollout_group(
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
     action_chunk_size: int = 1,
+    rollout_policy_batch_size: int = 32,
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` trajectories from same seed/task (GRPO group)."""
     if rollout_execution not in ("serial", "vector_sync", "vector_async"):
@@ -217,6 +218,7 @@ def collect_rollout_group(
             async_start_method=async_start_method,
             action_transform=action_transform,
             action_chunk_size=action_chunk_size_i,
+            rollout_policy_batch_size=int(rollout_policy_batch_size),
         )
 
     requested_max_steps = int(max_steps)
