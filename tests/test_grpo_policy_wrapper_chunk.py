@@ -190,6 +190,27 @@ def test_sample_action_chunk_slices_installed_lerobot_full_chunk() -> None:
     assert policy.chunk_calls == [50]
 
 
+def test_sample_action_chunk_from_proc_supports_chunk_len_five() -> None:
+    wrapper, policy, _bundle = _wrapper()
+    policy.configured_chunk_len = 5
+
+    chunk = wrapper.sample_action_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk_len=5,
+        rng=torch.Generator(device="cpu").manual_seed(123),
+    )
+
+    assert chunk.exec_action_np.shape == (5, 4)
+    assert chunk.unsquashed_chunk.shape == (5, 4)
+    assert chunk.log_prob_steps.shape == (5,)
+    recomputed = wrapper.get_action_probs_for_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk.unsquashed_chunk,
+    )
+    torch.testing.assert_close(recomputed, chunk.log_prob_steps)
+    assert policy.chunk_calls == [5, 5]
+
+
 def test_get_action_probs_for_chunk_from_proc_recomputes_per_step_logprobs() -> None:
     wrapper, _policy, _bundle = _wrapper()
     rng = torch.Generator(device="cpu").manual_seed(123)
