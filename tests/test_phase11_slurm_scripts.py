@@ -141,7 +141,7 @@ def test_submit_phase111_eval_sweep_uses_common_env_and_sweep_name() -> None:
 def test_phase11_pop128_smoke_pbs_has_rollout_policy_batch_size() -> None:
     path = _REPO_ROOT / "scripts" / "grpo" / "phase11_pop128_rolloutpbs32_smoke_u1.pbs"
     text = path.read_text(encoding="utf-8")
-    assert "--rollout-policy-batch-size 32" in text
+    assert "--rollout-policy-batch-size 16" in text
     assert "--group-size 128" in text
     assert "--logprob-batch-size 32" in text
     assert "PHASE11_POP128_ROLLOUTPBS32_SMOKE_OK" in text
@@ -157,7 +157,7 @@ def test_phase11_pop128_train_scripts_have_microbatch_cap() -> None:
         path = _REPO_ROOT / "scripts" / "grpo" / name
         text = path.read_text(encoding="utf-8")
         assert "--group-size 128" in text
-        assert "--rollout-policy-batch-size 32" in text
+        assert "--rollout-policy-batch-size 16" in text
         assert "--logprob-batch-size 32" in text
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 

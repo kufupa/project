@@ -105,7 +105,7 @@ echo "[phase11-P128C] train pop128 lr5e-6 clip0.1 low-noise updates 1-50 job=${P
   --euler-step-noise-std 0.1 \
   --logprob-recompute-mode batched \
   --logprob-batch-size 32 \
-  --rollout-policy-batch-size 32 \
+  --rollout-policy-batch-size 16 \
   --run-label chunk5_pop128_rpbs32_lr5e6_clip01_lownoise
 
 test -f "${RUN_DIR}/train_manifest.json"

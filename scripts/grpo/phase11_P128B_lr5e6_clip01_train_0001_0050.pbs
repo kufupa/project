@@ -103,7 +103,7 @@ echo "[phase11-P128B] train pop128 lr5e-6 clip0.1 updates 1-50 job=${PBS_JOBID:-
   --clip-eps 0.1 \
   --logprob-recompute-mode batched \
   --logprob-batch-size 32 \
-  --rollout-policy-batch-size 32 \
+  --rollout-policy-batch-size 16 \
   --run-label chunk5_pop128_rpbs32_lr5e6_clip01
 
 test -f "${RUN_DIR}/train_manifest.json"
