@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+SMOLVLA_PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 ORACLE_RUN_DIR="${ORACLE_RUN_DIR:-/vol/bitbucket/aa6622/project/artifacts/phase06_oracle_baseline/run_20260411T131839Z_ep60_voracle_tpush_v3_s1000_r402093}"
 TOP_K="${TOP_K:-15}"
@@ -45,7 +46,7 @@ CAMPAIGN_DIR="${INFO[0]#campaign_dir=}"
 TARGETS_JSON="${INFO[1]#targets_json=}"
 
 TARGET_COUNT=$(
-  PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+  PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
   TARGETS_JSON="${TARGETS_JSON}" \
   "${PYTHON_BIN}" - <<'PY'
 import json
@@ -81,7 +82,7 @@ for TASK_INDEX in $(seq 0 $((TARGET_COUNT - 1))); do
     exit 2
   fi
 
-  PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+  PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
   CAMPAIGN_DIR="${CAMPAIGN_DIR}" \
   TARGETS_JSON="${TARGETS_JSON}" \
   TARGET_SUMMARY_PATH="${TARGET_SUMMARY_PATH}" \
@@ -161,6 +162,6 @@ print(f"selected {best_video_source} -> {best_video}")
 PY
 done
 
-PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
 SUMMARY_PATH="${SUMMARY_PATH}" \
 "${PYTHON_BIN}" "${SCRIPT_DIR}/print_smolvla_topk_campaign_summary.py"

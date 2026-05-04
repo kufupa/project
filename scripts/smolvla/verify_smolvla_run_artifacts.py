@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
         default="false",
         help="Require frames_dir with frame_*.png per episode (matches save_frames runs).",
     )
+    parser.add_argument(
+        "--require-actions",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Require actions.jsonl per episode; auto reads run_manifest.save_actions.",
+    )
     parser.add_argument("--min-video-bytes", type=int, default=1024)
     return parser.parse_args()
 
@@ -90,6 +96,11 @@ def main() -> int:
     require_frames = _as_bool(args.require_frames)
     min_video_bytes = int(args.min_video_bytes)
 
+    if args.require_actions == "auto":
+        require_actions = bool(run_manifest.get("save_actions", True))
+    else:
+        require_actions = _as_bool(args.require_actions)
+
     if require_frames:
         if run_manifest.get("save_frames") is not True:
             _fail("run_manifest.save_frames must be true when --require-frames true")
@@ -108,11 +119,22 @@ def main() -> int:
     for row in episodes:
         if not isinstance(row, dict):
             _fail("run_manifest episodes row is not an object")
+        success_any = row.get("success_any")
+        success_last = row.get("success_last")
+        first_success_step = row.get("first_success_step")
+        if success_any is not None and not isinstance(success_any, bool):
+            _fail("episode success_any must be boolean when present")
+        if success_last is not None and not isinstance(success_last, bool):
+            _fail("episode success_last must be boolean when present")
+        if first_success_step is not None and not isinstance(first_success_step, int):
+            _fail("episode first_success_step must be integer or null when present")
+        if isinstance(first_success_step, int) and first_success_step < 0:
+            _fail("episode first_success_step must be >= 0 when present")
         paths = row.get("paths", {})
         if not isinstance(paths, dict):
             _fail("run_manifest episode.paths must be an object")
 
-        for key in ("actions", "reward_curve_csv", "reward_curve_png"):
+        for key in ("reward_curve_csv", "reward_curve_png"):
             rel = paths.get(key)
             if not isinstance(rel, str) or not rel.strip():
                 _fail(f"episode path {key!r} missing or invalid")
@@ -120,14 +142,31 @@ def main() -> int:
             if not artifact_path.is_file():
                 _fail(f"artifact missing: {artifact_path}")
 
-        actions_rel = paths["actions"]
-        action_lines = [
-            line
-            for line in (run_dir / actions_rel).read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        if not action_lines:
-            _fail(f"actions.jsonl is empty: {run_dir / actions_rel}")
+        action_lines: list[str] = []
+        if require_actions:
+            actions_rel = paths.get("actions")
+            if not isinstance(actions_rel, str) or not actions_rel.strip():
+                _fail("episode path 'actions' missing or invalid while require_actions=true")
+            actions_path = run_dir / actions_rel
+            if not actions_path.is_file():
+                _fail(f"artifact missing: {actions_path}")
+            action_lines = [
+                line for line in actions_path.read_text(encoding="utf-8").splitlines() if line.strip()
+            ]
+            if not action_lines:
+                _fail(f"actions.jsonl is empty: {actions_path}")
+            if isinstance(first_success_step, int) and first_success_step >= len(action_lines):
+                _fail(
+                    f"episode first_success_step={first_success_step} out of range "
+                    f"for {len(action_lines)} action rows"
+                )
+        else:
+            n_steps = int(row.get("n_steps", 0))
+            if isinstance(first_success_step, int) and first_success_step >= n_steps:
+                _fail(
+                    f"episode first_success_step={first_success_step} out of range "
+                    f"for n_steps={n_steps}"
+                )
 
         video_rel = paths.get("video")
         if require_video:

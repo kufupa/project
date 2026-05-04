@@ -9,20 +9,19 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT_BY_SCRIPT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-if [[ -f "${PROJECT_ROOT_BY_SCRIPT}/scripts/smolvla/run_oracle_topk_smolvla_full.sh" ]]; then
-  PROJECT_ROOT="${PROJECT_ROOT_BY_SCRIPT}"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh" ]]; then
+  _SLURM_COMMON="${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh"
 else
-  PROJECT_ROOT="$(pwd)"
+  _SLURM_COMMON="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/../slurm/common_env.sh"
 fi
-if [[ ! -f "${PROJECT_ROOT}/scripts/smolvla/run_oracle_topk_smolvla_full.sh" ]]; then
-  echo "error: cannot locate project root from ${PROJECT_ROOT_BY_SCRIPT} or ${PROJECT_ROOT}" >&2
-  exit 2
-fi
-WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+# shellcheck source=../slurm/common_env.sh
+source "${_SLURM_COMMON}"
+slurm_resolve_project_root "scripts/smolvla/run_oracle_topk_smolvla_full.sh"
+cd "${PROJECT_ROOT}"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "smolvla-topk-full"
 
-export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 export SMOLVLA_TOPK_LAUNCH_MODE="${SMOLVLA_TOPK_LAUNCH_MODE:-dry-run}"
 export SMOLVLA_ALLOW_NESTED_SBATCH="${SMOLVLA_ALLOW_NESTED_SBATCH:-0}"
 export SMOLVLA_SAVE_FRAMES=false

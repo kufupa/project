@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+SMOLVLA_PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python}"
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
@@ -41,7 +42,7 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 RUN_DIR="$(
-  PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+  PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
   OUTPUT_ROOT="${OUTPUT_ROOT}" \
   TASK="${TASK}" \
   SEED="${SEED}" \
@@ -70,7 +71,7 @@ echo "eval mode: ${EVAL_MODE}"
 
 if command -v xvfb-run >/dev/null 2>&1; then
   xvfb-run -a -s "-screen 0 1280x1024x24" \
-    env PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+    env PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
     SMOLVLA_METAWORLD_CAMERA_NAME="${CAMERA_NAME}" \
     SMOLVLA_FLIP_CORNER2="${FLIP_CORNER2}" \
     SMOLVLA_LOAD_VLM_WEIGHTS="${LOAD_VLM_WEIGHTS}" \
@@ -85,7 +86,7 @@ if command -v xvfb-run >/dev/null 2>&1; then
       --overlay-mode "${OVERLAY_MODE}" \
       --max-steps "${MAX_STEPS}"
 else
-  PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+  PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
   SMOLVLA_METAWORLD_CAMERA_NAME="${CAMERA_NAME}" \
   SMOLVLA_FLIP_CORNER2="${FLIP_CORNER2}" \
   SMOLVLA_LOAD_VLM_WEIGHTS="${LOAD_VLM_WEIGHTS}" \
@@ -101,7 +102,7 @@ else
     --max-steps "${MAX_STEPS}"
 fi
 
-PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" \
+PYTHONPATH="${SMOLVLA_PYTHONPATH}" \
 "${PYTHON_BIN}" "${PROJECT_ROOT}/scripts/smolvla/verify_smolvla_run_artifacts.py" \
   --run-dir "${RUN_DIR}" \
   --task "${TASK}" \
