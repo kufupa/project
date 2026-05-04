@@ -99,7 +99,7 @@ echo "[phase11-pop128-smoke] train u1 g128 rpbs32 lpbs32 job=${PBS_JOBID:-local}
   --lr 5e-6 \
   --clip-eps 0.1 \
   --logprob-recompute-mode batched \
-  --logprob-batch-size 32 \
+  --logprob-batch-size 16 \
   --rollout-policy-batch-size 16 \
   --run-label pop128_rolloutpbs32_smoke_u1
 
@@ -117,7 +117,7 @@ if not rows:
 last = rows[-1]
 assert int(last["group_size"]) == 128
 assert int(last["rollout_policy_batch_size"]) == 16
-assert int(last["logprob_batch_size"]) == 32
+assert int(last["logprob_batch_size"]) == 16
 assert int(last["num_loss_units"]) > 0
 assert last.get("skipped") is not True
 for key in ("ratio_clip_fraction", "approx_kl", "ratio_max", "log_std_mean"):
