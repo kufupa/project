@@ -36,21 +36,39 @@ def test_write_episode_artifacts_outputs_logs_and_plot(tmp_path: Path):
     assert (episode_dir / "reward_curve.png").exists()
 
 
-def test_run_smolvla_eval_requires_video_enabled(tmp_path: Path):
+def test_run_smolvla_eval_video_disabled_skips_mp4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     output_dir = tmp_path / "run_video_disabled"
-    with pytest.raises(ValueError, match="video must be enabled"):
-        run_smolvla_eval(
-            task="push-v3",
-            episodes=1,
-            seed=42,
-            checkpoint="jadechoghari/smolvla_metaworld",
-            output_dir=output_dir,
-            video=False,
-            fps=30,
-            overlay_mode="cumulative_reward",
-            backend_factory=lambda **_kwargs: None,  # type: ignore[arg-type]
-        )
-    assert not output_dir.exists()
+    fake_backend = _FakeBackend()
+    called_video: list[bool] = []
+
+    def _no_video_writer(**kwargs: object) -> None:  # type: ignore[no-untyped-def]
+        called_video.append(True)
+
+    monkeypatch.setattr(evaluator, "_write_episode_video", _no_video_writer)
+
+    run_smolvla_eval(
+        task="push-v3",
+        episodes=1,
+        seed=1000,
+        checkpoint="jadechoghari/smolvla_metaworld",
+        output_dir=output_dir,
+        video=False,
+        fps=30,
+        overlay_mode="cumulative_reward",
+        save_actions=False,
+        backend_factory=lambda **_kwargs: fake_backend,
+    )
+
+    assert called_video == []
+    eval_info = json.loads((output_dir / "eval_info.json").read_text(encoding="utf-8"))
+    assert eval_info["overall"]["video_paths"] == []
+    run_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert run_manifest["video_enabled"] is False
+    assert run_manifest["save_actions"] is False
+    ep0 = run_manifest["episodes"][0]
+    assert "video" not in ep0["paths"]
+    assert (output_dir / ep0["paths"]["reward_curve_csv"]).is_file()
+    assert (output_dir / ep0["paths"]["reward_curve_png"]).is_file()
 
 
 class _FakeBackend:
@@ -107,6 +125,7 @@ def test_run_smolvla_eval_writes_real_flow_contract(tmp_path: Path, monkeypatch:
         video=True,
         fps=30,
         overlay_mode="cumulative_reward",
+        save_actions=True,
         backend_factory=lambda **_kwargs: fake_backend,
     )
 
@@ -127,6 +146,9 @@ def test_run_smolvla_eval_writes_real_flow_contract(tmp_path: Path, monkeypatch:
     episode = run_manifest["episodes"][0]
     assert episode["n_steps"] == 2
     assert episode["success"] is True
+    assert episode["success_any"] is True
+    assert episode["success_last"] is True
+    assert episode["first_success_step"] == 1
     assert episode["terminated"] is True
     assert episode["truncated"] is False
 
@@ -149,6 +171,9 @@ def test_run_smolvla_eval_writes_real_flow_contract(tmp_path: Path, monkeypatch:
     assert progress_row["episode_index"] == 0
     assert progress_row["episodes_total"] == 1
     assert progress_row["success"] is True
+    assert progress_row["success_any"] is True
+    assert progress_row["success_last"] is True
+    assert progress_row["first_success_step"] == 1
 
 
 def test_run_smolvla_eval_passes_explicit_max_steps(
@@ -300,6 +325,112 @@ def test_build_overlay_text_uses_single_primary_metric_label():
 
 def test_validate_overlay_mode_accepts_reward_delta():
     assert evaluator._validate_overlay_mode("reward_delta") == "reward_delta"
+
+
+def test_resolve_task_text_override_wins():
+    assert (
+        evaluator._resolve_task_text("reach-v3", override="Move to the goal of the light red sphere")
+        == "Move to the goal of the light red sphere"
+    )
+    assert evaluator._resolve_task_text("push-v3", override="  Custom prompt  ") == "Custom prompt"
+
+
+def test_run_smolvla_eval_task_text_override_in_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    output_dir = tmp_path / "run_custom_prompt"
+    fake_backend = _FakeBackend()
+    custom = "Move to the goal of the light red sphere"
+
+    def _fake_video_writer(
+        *,
+        video_path: Path,
+        frames: list[np.ndarray],
+        rewards: list[float],
+        successes: list[bool],
+        overlay_mode: str,
+        fps: int,
+    ) -> None:
+        _ = (rewards, successes, overlay_mode, fps)
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"FAKE_MP4_DATA")
+
+    monkeypatch.setattr(evaluator, "_write_episode_video", _fake_video_writer)
+
+    run_smolvla_eval(
+        task="reach-v3",
+        episodes=1,
+        seed=1000,
+        checkpoint="jadechoghari/smolvla_metaworld",
+        output_dir=output_dir,
+        video=True,
+        fps=30,
+        overlay_mode="cumulative_reward",
+        task_text=custom,
+        backend_factory=lambda **_kwargs: fake_backend,
+    )
+
+    run_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert run_manifest["task_text"] == custom
+    assert run_manifest["task"] == "reach-v3"
+
+
+def test_run_smolvla_eval_transient_success_uses_success_any(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class _TransientBackend:
+        def rollout_episode(self, *, episode_index: int, reset_seed: int) -> EpisodeRollout:
+            _ = (episode_index, reset_seed)
+            frame = np.zeros((8, 8, 3), dtype=np.uint8)
+            return EpisodeRollout(
+                actions=[[0.0, 0.0, 0.0, 0.0] for _ in range(4)],
+                rewards=[0.0, 1.0, 0.5, 0.1],
+                successes=[False, True, True, False],
+                frames=[frame, frame, frame, frame],
+                terminated=False,
+                truncated=False,
+            )
+
+        def close(self) -> None:
+            return None
+
+    def _fake_video_writer(
+        *,
+        video_path: Path,
+        frames: list[np.ndarray],
+        rewards: list[float],
+        successes: list[bool],
+        overlay_mode: str,
+        fps: int,
+    ) -> None:
+        _ = (frames, rewards, successes, overlay_mode, fps)
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"FAKE_MP4_DATA")
+
+    monkeypatch.setattr(evaluator, "_write_episode_video", _fake_video_writer)
+
+    output_dir = tmp_path / "run_transient_success"
+    run_smolvla_eval(
+        task="reach-v3",
+        episodes=1,
+        seed=1000,
+        checkpoint="jadechoghari/smolvla_metaworld",
+        output_dir=output_dir,
+        video=True,
+        fps=30,
+        overlay_mode="reward_delta",
+        backend_factory=lambda **_kwargs: _TransientBackend(),
+    )
+
+    eval_info = json.loads((output_dir / "eval_info.json").read_text(encoding="utf-8"))
+    assert eval_info["overall"]["pc_success"] == 100.0
+
+    run_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    episode = run_manifest["episodes"][0]
+    assert episode["success"] is True
+    assert episode["success_any"] is True
+    assert episode["success_last"] is False
+    assert episode["first_success_step"] == 1
 
 
 def test_run_smolvla_eval_respects_fixed_reset_seed_env(

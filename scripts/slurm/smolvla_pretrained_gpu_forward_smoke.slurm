@@ -20,7 +20,7 @@ else
 fi
 # shellcheck source=common_env.sh
 source "${_SLURM_COMMON}"
-slurm_resolve_project_root "scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh"
+slurm_resolve_project_root "scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh"
 cd "${PROJECT_ROOT}"
 slurm_export_pythonpath
 slurm_export_hf_torch_cache "smolvla-pretrained-gpu-forward-smoke"
