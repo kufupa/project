@@ -14,6 +14,12 @@ from smolvla_obs_state import flatten_obs_state as _flatten_obs_state
 
 from metaworld_determinism import gymnasium_reset_strict, seed_metaworld_process
 
+from smolvla_pipeline.hf_hub_local_resolve import (
+    resolve_hf_hub_repo_to_local_snapshot,
+    should_resolve_hf_hub_to_local,
+    should_strict_require_local_hf,
+)
+
 try:
     import matplotlib.pyplot as plt  # type: ignore
 except Exception:  # pragma: no cover - environment dependent import
@@ -121,6 +127,42 @@ def _smolvla_eval_log(message: str) -> None:
     print(message, flush=True)
 
 
+# #region agent log
+def _agent_debug_ndjson_enabled() -> bool:
+    raw = os.environ.get("SMOLVLA_AGENT_DEBUG_NDJSON", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _agent_debug_ndjson(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Append one NDJSON line for debug-mode analysis (Slurm-safe, no secrets)."""
+    if not _agent_debug_ndjson_enabled():
+        return
+    try:
+        row: dict[str, Any] = {
+            "sessionId": "d2f934",
+            "timestamp": int(time.time() * 1000),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+        }
+        log_path = Path("/vol/bitbucket/aa6622/.cursor/debug-d2f934.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+# #endregion
+
+
 def _progress_jsonl_enabled() -> bool:
     raw = os.environ.get("SMOLVLA_EVAL_PROGRESS_JSONL", "true").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -146,6 +188,18 @@ def _is_remote_checkpoint_id(checkpoint: str) -> bool:
     if parts[0].startswith(".") or parts[0].startswith("~"):
         return False
     return True
+
+
+def _maybe_resolve_hf_repo_id(repo_id: str, *, label: str) -> str:
+    if not should_resolve_hf_hub_to_local():
+        return repo_id
+    strict = should_strict_require_local_hf()
+    resolved = resolve_hf_hub_repo_to_local_snapshot(repo_id, strict=strict)
+    if resolved != repo_id:
+        _smolvla_eval_log(
+            f"smolvla_eval: hf_hub_local_snapshot label={label} repo_id={repo_id!r} path={resolved!r}"
+        )
+    return resolved
 
 
 def _is_local_checkpoint_like(checkpoint: str) -> bool:
@@ -228,6 +282,10 @@ def _resolve_save_frames() -> bool:
     return _as_bool(os.environ.get("SMOLVLA_SAVE_FRAMES", "false"))
 
 
+def _resolve_save_action_trace() -> bool:
+    return _as_bool(os.environ.get("SMOLVLA_SAVE_ACTIONS", "false"))
+
+
 def _resolve_optional_int_env(name: str) -> int | None:
     raw = os.environ.get(name)
     if raw is None:
@@ -241,7 +299,11 @@ def _resolve_optional_int_env(name: str) -> int | None:
         raise ValueError(f"{name} must be an integer when set; got {raw!r}.") from exc
 
 
-def _resolve_task_text(task: str) -> str:
+def _resolve_task_text(task: str, *, override: str | None = None) -> str:
+    if override is not None:
+        cleaned = str(override).strip()
+        if cleaned:
+            return cleaned
     task_clean = str(task).strip()
     try:
         from lerobot.envs.metaworld import TASK_DESCRIPTIONS  # type: ignore
@@ -477,6 +539,7 @@ def write_episode_artifacts(
     successes: Sequence[bool],
     frames_dir: Path | None = None,
     overlay_mode: str = "cumulative_reward",
+    save_actions: bool = True,
 ) -> dict[str, str]:
     if not (len(actions) == len(rewards) == len(successes)):
         raise ValueError("actions, rewards, and successes must have matching lengths.")
@@ -506,9 +569,10 @@ def write_episode_artifacts(
         )
 
     actions_path = episode_dir / "actions.jsonl"
-    with actions_path.open("w", encoding="utf-8") as action_fp:
-        for row in action_rows:
-            action_fp.write(json.dumps(row) + "\n")
+    if save_actions:
+        with actions_path.open("w", encoding="utf-8") as action_fp:
+            for row in action_rows:
+                action_fp.write(json.dumps(row) + "\n")
 
     csv_path = episode_dir / "reward_curve.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as csv_fp:
@@ -539,11 +603,13 @@ def write_episode_artifacts(
         plot_values,
         overlay_mode,
     )
-    return {
-        "actions": str(actions_path),
+    out: dict[str, str] = {
         "reward_curve_csv": str(csv_path),
         "reward_curve_png": str(png_path),
     }
+    if save_actions:
+        out["actions"] = str(actions_path)
+    return out
 
 
 def _patch_external_datasets() -> None:
@@ -590,7 +656,23 @@ def _resolve_policy_device(torch_module: Any) -> Any:
 
 
 def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
+    t0 = time.perf_counter()
+    _smolvla_eval_log(f"smolvla_eval: load_bundle_begin checkpoint={checkpoint!r}")
+    _agent_debug_ndjson(
+        hypothesis_id="H1_load_phases",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="bundle_load_begin",
+        data={
+            "checkpoint": checkpoint,
+            "HF_HOME": os.environ.get("HF_HOME", ""),
+            "elapsed_s": round(time.perf_counter() - t0, 4),
+        },
+    )
+    ckpt_load = _maybe_resolve_hf_repo_id(checkpoint, label="policy_checkpoint")
     _patch_external_datasets()
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_patch_datasets_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
     import inspect
 
     import torch
@@ -605,17 +687,31 @@ def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
     )
     from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_STATE
 
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_imports_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+
     device = _resolve_policy_device(torch)
+    vlm_raw = os.environ.get(
+        "SMOLVLA_VLM_MODEL_NAME", "HuggingFaceTB/SmolVLM2-500M-Instruct"
+    ).strip()
+    load_vlm = os.environ.get("SMOLVLA_LOAD_VLM_WEIGHTS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    vlm_resolved = (
+        _maybe_resolve_hf_repo_id(vlm_raw, label="vlm_backbone")
+        if load_vlm and vlm_raw
+        else vlm_raw
+    )
     model_kwargs: dict[str, Any] = {
         "device": str(device),
         "n_action_steps": 1,
         "expert_width_multiplier": 0.5,
         "self_attn_every_n_layers": 0,
-        "load_vlm_weights": os.environ.get("SMOLVLA_LOAD_VLM_WEIGHTS", "1").strip().lower()
-        not in ("0", "false", "no"),
-        "vlm_model_name": os.environ.get(
-            "SMOLVLA_VLM_MODEL_NAME", "HuggingFaceTB/SmolVLM2-500M-Instruct"
-        ),
+        "load_vlm_weights": load_vlm,
+        "vlm_model_name": vlm_resolved,
     }
 
     sig = inspect.signature(SmolVLAPolicy.from_pretrained)
@@ -632,35 +728,95 @@ def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
     }
     if "config" in params:
         try:
-            policy_cfg = PreTrainedConfig.from_pretrained(pretrained_name_or_path=checkpoint)
+            policy_cfg = PreTrainedConfig.from_pretrained(pretrained_name_or_path=ckpt_load)
             for key, value in model_kwargs.items():
                 if hasattr(policy_cfg, key):
                     setattr(policy_cfg, key, value)
             supported_kwargs["config"] = policy_cfg
         except Exception:
             pass
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_config_done checkpoint={ckpt_load!r} "
+        f"elapsed_s={time.perf_counter() - t0:.2f}"
+    )
 
     overrides = {"device_processor": {"device": str(device)}}
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_preprocessor_begin checkpoint={ckpt_load!r} "
+        f"elapsed_s={time.perf_counter() - t0:.2f}"
+    )
     preprocessor = PolicyProcessorPipeline.from_pretrained(
-        pretrained_model_name_or_path=checkpoint,
+        pretrained_model_name_or_path=ckpt_load,
         config_filename="policy_preprocessor.json",
         overrides=overrides,
         to_transition=batch_to_transition,
         to_output=transition_to_batch,
     )
+    _agent_debug_ndjson(
+        hypothesis_id="H1_load_phases",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="preprocessor_from_pretrained_done",
+        data={"elapsed_s": round(time.perf_counter() - t0, 4)},
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_preprocessor_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_postprocessor_begin checkpoint={ckpt_load!r} "
+        f"elapsed_s={time.perf_counter() - t0:.2f}"
+    )
     postprocessor = PolicyProcessorPipeline.from_pretrained(
-        pretrained_model_name_or_path=checkpoint,
+        pretrained_model_name_or_path=ckpt_load,
         config_filename="policy_postprocessor.json",
         overrides=overrides,
         to_transition=policy_action_to_transition,
         to_output=transition_to_policy_action,
     )
+    _agent_debug_ndjson(
+        hypothesis_id="H1_load_phases",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="postprocessor_from_pretrained_done",
+        data={"elapsed_s": round(time.perf_counter() - t0, 4)},
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_postprocessor_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_policy_begin elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+    _agent_debug_ndjson(
+        hypothesis_id="H2_policy_weights",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="before_SmolVLAPolicy_from_pretrained",
+        data={
+            "elapsed_s": round(time.perf_counter() - t0, 4),
+            "load_vlm_weights": model_kwargs.get("load_vlm_weights"),
+        },
+    )
     if pretrained_key:
-        supported_kwargs[pretrained_key] = checkpoint
+        supported_kwargs[pretrained_key] = ckpt_load
         policy = SmolVLAPolicy.from_pretrained(**supported_kwargs)
     else:
-        policy = SmolVLAPolicy.from_pretrained(checkpoint, **supported_kwargs)
+        policy = SmolVLAPolicy.from_pretrained(ckpt_load, **supported_kwargs)
+    _agent_debug_ndjson(
+        hypothesis_id="H2_policy_weights",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="after_SmolVLAPolicy_from_pretrained",
+        data={"elapsed_s": round(time.perf_counter() - t0, 4)},
+    )
     policy.eval()
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_policy_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+    _smolvla_eval_log(
+        f"smolvla_eval: load_bundle_done elapsed_s={time.perf_counter() - t0:.2f}"
+    )
+    _agent_debug_ndjson(
+        hypothesis_id="H1_load_phases",
+        location="evaluator.py:_load_smolvla_bundle",
+        message="bundle_load_done",
+        data={"elapsed_s": round(time.perf_counter() - t0, 4)},
+    )
 
     return _SmolVLABundle(
         policy=policy,
@@ -725,7 +881,17 @@ def _collect_policy_rgb(env: Any, obs: Any) -> Any:
 
 
 class _LeRobotMetaWorldBackend:
-    def __init__(self, *, task: str, checkpoint: str, seed: int, max_steps: int):
+    def __init__(
+        self,
+        *,
+        task: str,
+        checkpoint: str,
+        seed: int,
+        max_steps: int,
+        task_text: str | None = None,
+        collect_frames: bool = True,
+        bundle: _SmolVLABundle | None = None,
+    ):
         import metaworld
         import numpy as np
 
@@ -734,9 +900,14 @@ class _LeRobotMetaWorldBackend:
         self._max_steps = max_steps
         self._camera_name = _resolve_camera_name()
         self._flip_corner2 = _resolve_flip_corner2()
-        self._task_text = _resolve_task_text(task)
-        self._bundle = _load_smolvla_bundle(checkpoint)
+        self._task_text = _resolve_task_text(task, override=task_text)
+        self._bundle = bundle if bundle is not None else _load_smolvla_bundle(checkpoint)
+        try:
+            self._bundle.policy.reset()
+        except Exception:
+            pass
         self._agent_dim, self._env_dim = _smolvla_state_dims(self._bundle.policy)
+        _smolvla_eval_log(f"smolvla_eval: backend_metaworld_mt1 task={task!r}")
         self._mt1 = metaworld.MT1(task)
         if task not in self._mt1.train_classes:
             available = ", ".join(sorted(self._mt1.train_classes.keys()))
@@ -758,9 +929,13 @@ class _LeRobotMetaWorldBackend:
                 pass
         self._tasks = list(getattr(self._mt1, "train_tasks", []) or [])
         self._action_dim = int(np.prod(self._env.action_space.shape))
+        _smolvla_eval_log(
+            f"smolvla_eval: backend_env_ready task={task!r} action_dim={self._action_dim}"
+        )
         self._target_episode_index_override = _resolve_optional_int_env(
             "SMOLVLA_TARGET_EPISODE_INDEX"
         )
+        self._collect_frames = bool(collect_frames)
 
     def _reset(self, reset_seed: int) -> tuple[Any, dict[str, Any]]:
         reset_out = gymnasium_reset_strict(self._env, int(reset_seed))
@@ -828,14 +1003,19 @@ class _LeRobotMetaWorldBackend:
             )
             self._env.set_task(self._tasks[task_episode_index % len(self._tasks)])
         obs, _info = self._reset(reset_seed)
+        try:
+            self._bundle.policy.reset()
+        except Exception:
+            pass
 
         actions: list[list[float]] = []
         rewards: list[float] = []
         successes: list[bool] = []
         frames: list[Any] = []
-        first_frame = self._render_frame()
-        if first_frame is not None:
-            frames.append(first_frame)
+        if getattr(self, "_collect_frames", True):
+            first_frame = self._render_frame()
+            if first_frame is not None:
+                frames.append(first_frame)
 
         episode_terminated = False
         episode_truncated = False
@@ -845,9 +1025,10 @@ class _LeRobotMetaWorldBackend:
             actions.append(action.astype(self._np.float32).reshape(-1).tolist())
             rewards.append(float(reward))
             successes.append(_safe_success(info))
-            frame = self._render_frame()
-            if frame is not None:
-                frames.append(frame)
+            if getattr(self, "_collect_frames", True):
+                frame = self._render_frame()
+                if frame is not None:
+                    frames.append(frame)
             if terminated or truncated:
                 episode_terminated = bool(terminated)
                 episode_truncated = bool(truncated)
@@ -870,10 +1051,23 @@ class _LeRobotMetaWorldBackend:
 
 
 def _create_lerobot_metaworld_backend(
-    *, task: str, checkpoint: str, seed: int, max_steps: int
+    *,
+    task: str,
+    checkpoint: str,
+    seed: int,
+    max_steps: int,
+    task_text: str | None = None,
+    collect_frames: bool = True,
 ) -> EvalBackend:
     try:
-        return _LeRobotMetaWorldBackend(task=task, checkpoint=checkpoint, seed=seed, max_steps=max_steps)
+        return _LeRobotMetaWorldBackend(
+            task=task,
+            checkpoint=checkpoint,
+            seed=seed,
+            max_steps=max_steps,
+            task_text=task_text,
+            collect_frames=collect_frames,
+        )
     except Exception as exc:
         raise RuntimeError(
             "Failed to initialize real LeRobot + Meta-World backend. "
@@ -893,6 +1087,8 @@ def run_smolvla_eval(
     overlay_mode: str,
     max_steps: int | None = None,
     save_frames: bool | None = None,
+    save_actions: bool | None = None,
+    task_text: str | None = None,
     backend_factory: BackendFactory | None = None,
 ) -> dict[str, Any]:
     if episodes < 1:
@@ -900,14 +1096,17 @@ def run_smolvla_eval(
     if fps < 1:
         raise ValueError("fps must be >= 1")
     video_enabled = _as_bool(video)
-    if not video_enabled:
-        raise ValueError("video must be enabled for SmolVLA evaluation runs.")
     overlay_mode = _validate_overlay_mode(overlay_mode)
     checkpoint_resolved = _validate_checkpoint(checkpoint)
     resolved_max_steps = _resolve_max_steps() if max_steps is None else _validate_max_steps(max_steps)
     resolved_save_frames = (
         bool(save_frames) if save_frames is not None else _resolve_save_frames()
     )
+    resolved_save_actions = (
+        bool(save_actions) if save_actions is not None else _resolve_save_action_trace()
+    )
+    collect_episode_frames = bool(video_enabled or resolved_save_frames)
+    resolved_task_text = _resolve_task_text(task, override=task_text)
 
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -917,7 +1116,8 @@ def run_smolvla_eval(
         "smolvla_eval: start "
         f"task={task!r} episodes={episodes} checkpoint={checkpoint!r} "
         f"checkpoint_resolved={checkpoint_resolved!r} max_steps={resolved_max_steps} "
-        f"save_frames={resolved_save_frames} "
+        f"save_frames={resolved_save_frames} save_actions={resolved_save_actions} "
+        f"video_enabled={video_enabled} task_text={resolved_task_text!r} "
         f"HF_HOME={os.environ.get('HF_HOME', '')!r} "
         f"HUGGINGFACE_HUB_CACHE={os.environ.get('HUGGINGFACE_HUB_CACHE', '')!r} "
         f"output_dir={output_dir}"
@@ -930,6 +1130,8 @@ def run_smolvla_eval(
         checkpoint=checkpoint_resolved,
         seed=seed,
         max_steps=resolved_max_steps,
+        task_text=task_text,
+        collect_frames=collect_episode_frames,
     )
     _smolvla_eval_log(
         f"smolvla_eval: backend_ready elapsed_s={time.perf_counter() - t_backend:.2f}"
@@ -975,6 +1177,7 @@ def run_smolvla_eval(
                 rewards=rollout.rewards,
                 successes=rollout.successes,
                 overlay_mode=overlay_mode,
+                save_actions=resolved_save_actions,
             )
 
             frames_dir: Path | None = None
@@ -983,23 +1186,47 @@ def run_smolvla_eval(
                 _write_episode_frames_png(frames_dir=frames_dir, frames=rollout.frames)
 
             video_path = output_dir / "videos" / f"{task}_0" / f"eval_episode_{episode_index:04d}.mp4"
-            _write_episode_video(
-                video_path=video_path,
-                frames=rollout.frames,
-                rewards=rollout.rewards,
-                successes=rollout.successes,
-                overlay_mode=overlay_mode,
-                fps=fps,
-            )
-            video_paths.append(str(video_path))
+            if video_enabled:
+                _write_episode_video(
+                    video_path=video_path,
+                    frames=rollout.frames,
+                    rewards=rollout.rewards,
+                    successes=rollout.successes,
+                    overlay_mode=overlay_mode,
+                    fps=fps,
+                )
+                video_paths.append(str(video_path))
             art_s = time.perf_counter() - t_artifacts
 
             sum_reward = float(sum(rollout.rewards))
             max_reward = float(max(rollout.rewards) if rollout.rewards else 0.0)
-            episode_success = bool(rollout.successes[-1]) if rollout.successes else False
+            success_last = bool(rollout.successes[-1]) if rollout.successes else False
+            success_any = any(bool(v) for v in rollout.successes)
+            first_success_step = next(
+                (int(step_idx) for step_idx, step_success in enumerate(rollout.successes) if bool(step_success)),
+                None,
+            )
+            episode_success = bool(success_any)
             sum_rewards.append(sum_reward)
             max_rewards.append(max_reward)
             success_rows.append(episode_success)
+
+            paths_obj: dict[str, str] = {
+                "reward_curve_csv": str(
+                    Path(artifact_paths["reward_curve_csv"]).relative_to(output_dir)
+                ),
+                "reward_curve_png": str(
+                    Path(artifact_paths["reward_curve_png"]).relative_to(output_dir)
+                ),
+            }
+            if resolved_save_actions and "actions" in artifact_paths:
+                paths_obj["actions"] = str(
+                    Path(artifact_paths["actions"]).relative_to(output_dir)
+                )
+            if video_enabled:
+                paths_obj["video"] = str(video_path.relative_to(output_dir))
+            if frames_dir is not None:
+                paths_obj["frames_dir"] = str(frames_dir.relative_to(output_dir))
 
             episode_meta = {
                 "episode_index": int(episode_index),
@@ -1009,23 +1236,12 @@ def run_smolvla_eval(
                 "sum_reward": sum_reward,
                 "max_reward": max_reward,
                 "success": episode_success,
+                "success_any": bool(success_any),
+                "success_last": bool(success_last),
+                "first_success_step": first_success_step,
                 "terminated": bool(rollout.terminated),
                 "truncated": bool(rollout.truncated),
-                "paths": {
-                    "actions": str(Path(artifact_paths["actions"]).relative_to(output_dir)),
-                    "reward_curve_csv": str(
-                        Path(artifact_paths["reward_curve_csv"]).relative_to(output_dir)
-                    ),
-                    "reward_curve_png": str(
-                        Path(artifact_paths["reward_curve_png"]).relative_to(output_dir)
-                    ),
-                    "video": str(video_path.relative_to(output_dir)),
-                    **(
-                        {"frames_dir": str(frames_dir.relative_to(output_dir))}
-                        if frames_dir is not None
-                        else {}
-                    ),
-                },
+                "paths": paths_obj,
                 "reward_curve_mode": overlay_mode,
             }
             (episode_dir / "episode_meta.json").write_text(
@@ -1045,12 +1261,16 @@ def run_smolvla_eval(
                     "reset_seed": int(reset_seed),
                     "n_steps": int(len(rollout.rewards)),
                     "success": bool(episode_success),
+                    "success_any": bool(success_any),
+                    "success_last": bool(success_last),
+                    "first_success_step": first_success_step,
                     "sum_reward": float(sum_reward),
                     "max_reward": float(max_reward),
                     "elapsed_rollout_s": round(roll_s, 4),
                     "elapsed_artifacts_s": round(art_s, 4),
-                    "video": str(video_path.relative_to(output_dir)),
                 }
+                if video_enabled:
+                    progress_row["video"] = str(video_path.relative_to(output_dir))
                 with progress_path.open("a", encoding="utf-8") as fp:
                     fp.write(json.dumps(progress_row) + "\n")
     finally:
@@ -1095,8 +1315,9 @@ def run_smolvla_eval(
         "runtime_backend": "lerobot_metaworld",
         "camera_name": _resolve_camera_name(),
         "flip_corner2": _resolve_flip_corner2(),
-        "task_text": _resolve_task_text(task),
+        "task_text": resolved_task_text,
         "save_frames": bool(resolved_save_frames),
+        "save_actions": bool(resolved_save_actions),
         "episodes": episode_rows,
     }
     (output_dir / "run_manifest.json").write_text(
