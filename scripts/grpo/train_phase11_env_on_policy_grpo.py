@@ -7,7 +7,6 @@ import argparse
 import copy
 import json
 import math
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -18,6 +17,8 @@ import torch
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
+
+from smolvla_grpo.process_memory import prefixed_process_tree_memory_fields
 
 
 def _append_progress(path: Path, row: dict) -> None:
@@ -33,63 +34,8 @@ def _json_ready_args(args: argparse.Namespace) -> dict:
     }
 
 
-# region agent log
-def _debug_mem_log(*, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    if os.environ.get("AGENT_DEBUG_MEM") != "1":
-        return
-    try:
-        pid = os.getpid()
-
-        def _status_for(process_id: int) -> dict[str, int]:
-            fields: dict[str, int] = {}
-            try:
-                with open(f"/proc/{process_id}/status", "r", encoding="utf-8") as fp:
-                    for line in fp:
-                        if line.startswith(("VmRSS:", "VmHWM:", "VmSize:", "PPid:")):
-                            parts = line.split()
-                            fields[parts[0].rstrip(":")] = int(parts[1])
-            except OSError:
-                pass
-            return fields
-
-        child_rss_kb = 0
-        child_count = 0
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            status = _status_for(int(entry))
-            if status.get("PPid") == pid:
-                child_count += 1
-                child_rss_kb += int(status.get("VmRSS", 0))
-        cuda_data = {}
-        if torch.cuda.is_available():
-            cuda_data = {
-                "cuda_allocated": int(torch.cuda.memory_allocated()),
-                "cuda_reserved": int(torch.cuda.memory_reserved()),
-                "cuda_max_allocated": int(torch.cuda.max_memory_allocated()),
-                "cuda_max_reserved": int(torch.cuda.max_memory_reserved()),
-            }
-        payload = {
-            "sessionId": "1b1269",
-            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase11_mem"),
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": {
-                **data,
-                "pid": pid,
-                "self_status": _status_for(pid),
-                "child_count": child_count,
-                "child_rss_kb": child_rss_kb,
-                **cuda_data,
-            },
-            "timestamp": int(time.time() * 1000),
-        }
-        with open("/rds/general/user/aa6622/home/.cursor/debug-1b1269.log", "a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload) + "\n")
-    except Exception:
-        return
-# endregion
+def _proc_mem_fields(stage: str) -> dict[str, int]:
+    return prefixed_process_tree_memory_fields(f"proc_mem_{stage}")
 
 
 def _phase11_clipped_row_loss(
@@ -623,14 +569,7 @@ def main() -> int:
     for update in range(start_u, end_u):
         update_t0 = time.perf_counter()
         reset_seed = int(args.train_seed_base) + int(update)
-        # region agent log
-        _debug_mem_log(
-            hypothesis_id="H1_H2_H5",
-            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:249",
-            message="update_start_mem",
-            data={"update": int(update), "group_size": int(args.group_size)},
-        )
-        # endregion
+        proc_mem_update_start = _proc_mem_fields("update_start")
         rollout_t0 = time.perf_counter()
         rollouts = collect_rollout_group(
             bundle=bundle,
@@ -651,20 +590,7 @@ def main() -> int:
             rollout_policy_batch_size=int(args.rollout_policy_batch_size),
         )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
-        # region agent log
-        _debug_mem_log(
-            hypothesis_id="H1_H2_H5",
-            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:270",
-            message="after_rollout_mem",
-            data={
-                "update": int(update),
-                "rollout_seconds": rollout_seconds,
-                "rollouts": len(rollouts),
-                "action_chunks": int(sum(len(getattr(tr, "action_chunks", []) or []) for tr in rollouts)),
-                "proc_snapshots": int(sum(len(getattr(tr, "proc_snapshots", []) or []) for tr in rollouts)),
-            },
-        )
-        # endregion
+        proc_mem_after_rollout = _proc_mem_fields("after_rollout")
         returns = torch.tensor(
             [reward_backend.episode_return(tr) for tr in rollouts],
             dtype=torch.float32,
@@ -733,12 +659,16 @@ def main() -> int:
         advantages = compute_group_advantages(returns)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             update_seconds = float(time.perf_counter() - update_t0)
+            proc_mem_after_optimize = _proc_mem_fields("after_optimize")
             skipped_extra = {
                 **metrics_common,
                 "skipped": True,
                 "rollout_seconds": rollout_seconds,
                 "optimize_seconds": 0.0,
                 "update_seconds": update_seconds,
+                **proc_mem_update_start,
+                **proc_mem_after_rollout,
+                **proc_mem_after_optimize,
                 "num_logprob_forward_batches": 0,
                 "ratio_mean": None,
                 "ratio_min": None,
@@ -805,6 +735,8 @@ def main() -> int:
                 f"rollout_s={rollout_seconds:.2f}",
                 "opt_s=0.00",
                 f"update_s={update_seconds:.2f}",
+                f"rss_tree_mb={skipped_extra.get('proc_mem_after_optimize_tree_rss_kb', 0) / 1024.0:.1f}",
+                f"vmem_tree_mb={skipped_extra.get('proc_mem_after_optimize_tree_vmsize_kb', 0) / 1024.0:.1f}",
                 "skipped=zero_advantages",
                 flush=True,
             )
@@ -834,20 +766,16 @@ def main() -> int:
             optimizer.step()
         optimize_seconds = float(time.perf_counter() - optimize_t0)
         loss_telemetry_row = _finalize_loss_telemetry(loss_telemetry, clip_eps=float(args.clip_eps))
-        # region agent log
-        _debug_mem_log(
-            hypothesis_id="H2_H4",
-            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:428",
-            message="after_optimize_mem",
-            data={"update": int(update), "optimize_seconds": optimize_seconds},
-        )
-        # endregion
+        proc_mem_after_optimize = _proc_mem_fields("after_optimize")
         update_seconds = float(time.perf_counter() - update_t0)
         checkpoint_extra = {
             **metrics_common,
             "rollout_seconds": rollout_seconds,
             "optimize_seconds": optimize_seconds,
             "update_seconds": update_seconds,
+            **proc_mem_update_start,
+            **proc_mem_after_rollout,
+            **proc_mem_after_optimize,
             **loss_telemetry_row,
             **_log_std_telemetry(bundle.policy),
         }
@@ -865,14 +793,6 @@ def main() -> int:
         state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
         old_policy.load_state_dict(state)
         old_policy.eval()
-        # region agent log
-        _debug_mem_log(
-            hypothesis_id="H3_H4",
-            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:452",
-            message="after_old_policy_sync_mem",
-            data={"update": int(update), "state_tensors": len(state)},
-        )
-        # endregion
 
         save_grpo_checkpoint(
             ckpt_dir / "latest.pt",
@@ -891,14 +811,6 @@ def main() -> int:
                 args=_json_ready_args(args),
                 extra=checkpoint_extra,
             )
-        # region agent log
-        _debug_mem_log(
-            hypothesis_id="H3",
-            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:473",
-            message="after_checkpoint_mem",
-            data={"update": int(update), "save_every": int(args.save_every)},
-        )
-        # endregion
         print(
             "phase111_grpo_update",
             f"update={update}",
@@ -924,6 +836,8 @@ def main() -> int:
             f"rollout_s={rollout_seconds:.2f}",
             f"opt_s={optimize_seconds:.2f}",
             f"update_s={update_seconds:.2f}",
+            f"rss_tree_mb={checkpoint_extra.get('proc_mem_after_optimize_tree_rss_kb', 0) / 1024.0:.1f}",
+            f"vmem_tree_mb={checkpoint_extra.get('proc_mem_after_optimize_tree_vmsize_kb', 0) / 1024.0:.1f}",
             flush=True,
         )
 

@@ -833,6 +833,19 @@ def test_phase11_json_ready_args_converts_path_values():
     assert ready["chunk_size"] == 2
 
 
+def test_phase11_train_script_logs_process_memory_static():
+    script = (_REPO / "scripts" / "grpo" / "train_phase11_env_on_policy_grpo.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from smolvla_grpo.process_memory import prefixed_process_tree_memory_fields" in script
+    assert 'proc_mem_update_start' in script
+    assert 'proc_mem_after_rollout' in script
+    assert 'proc_mem_after_optimize' in script
+    assert '**proc_mem_update_start' in script
+    assert '**proc_mem_after_rollout' in script
+    assert '**proc_mem_after_optimize' in script
+
+
 def test_phase11_train_script_checkpoint_metadata_static():
     script = (_REPO / "scripts" / "grpo" / "train_phase11_env_on_policy_grpo.py").read_text(
         encoding="utf-8"
