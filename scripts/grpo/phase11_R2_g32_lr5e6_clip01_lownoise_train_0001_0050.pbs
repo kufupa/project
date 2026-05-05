@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#PBS -N p11R2tr
+#PBS -l select=1:ncpus=48:mem=64gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase11_R2_g32_lr5e6_clip01_lownoise_train_0001_0050.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+cd /rds/general/user/aa6622/home/project
+
+RUN_DIR="artifacts/phase11_pushv3_chunk5_g32_lr5e6_clip01_lownoise_u50"
+BASE_CKPT="/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900"
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+GPU_TELEMETRY_INTERVAL="${GPU_TELEMETRY_INTERVAL:-5}"
+GPU_TELEMETRY_DIR="${RUN_DIR}/gpu_telemetry/train"
+
+mkdir -p logs/pbs/grpo "${RUN_DIR}" "${GPU_TELEMETRY_DIR}"
+
+export PYTHONPATH=src
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export SMOLVLA_GRPO_ASYNC_MP_CONTEXT=forkserver
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: missing PYTHON_BIN=${PYTHON_BIN}" >&2
+  exit 2
+fi
+if [[ ! -d "${BASE_CKPT}" ]]; then
+  echo "error: missing BASE_CKPT=${BASE_CKPT}" >&2
+  exit 2
+fi
+
+NVIDIA_SMI_PID=""
+stop_gpu_telemetry() {
+  local status=$?
+  set +e
+  if [[ -n "${NVIDIA_SMI_PID}" ]] && kill -0 "${NVIDIA_SMI_PID}" >/dev/null 2>&1; then
+    kill "${NVIDIA_SMI_PID}" >/dev/null 2>&1 || true
+    wait "${NVIDIA_SMI_PID}" >/dev/null 2>&1 || true
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi > "${GPU_TELEMETRY_DIR}/nvidia_smi_end.txt" 2>&1 || true
+  fi
+  if [[ -n "${PBS_JOBID:-}" ]] && command -v qstat >/dev/null 2>&1; then
+    qstat -fx "${PBS_JOBID}" > "${GPU_TELEMETRY_DIR}/pbs_resource_snapshot.txt" 2>&1 || true
+  fi
+  if [[ -f "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" ]]; then
+    "${PYTHON_BIN}" scripts/grpo/summarize_phase58_gpu_telemetry.py \
+      --csv "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" \
+      --output "${GPU_TELEMETRY_DIR}/gpu_telemetry_summary.json" || true
+  fi
+  exit "${status}"
+}
+
+start_gpu_telemetry() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi > "${GPU_TELEMETRY_DIR}/nvidia_smi_start.txt" 2>&1 || true
+    nvidia-smi \
+      --query-gpu=timestamp,index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
+      --format=csv,nounits \
+      -l "${GPU_TELEMETRY_INTERVAL}" \
+      > "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.csv" \
+      2> "${GPU_TELEMETRY_DIR}/nvidia_smi_samples.err" &
+    NVIDIA_SMI_PID=$!
+  else
+    echo "nvidia-smi not found on PATH" > "${GPU_TELEMETRY_DIR}/nvidia_smi_start.txt"
+  fi
+}
+
+trap stop_gpu_telemetry EXIT
+start_gpu_telemetry
+
+echo "[phase11-R2] train g32 lr5e-6 clip0.1 low-noise updates 1-50 job=${PBS_JOBID:-local}"
+"${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
+  --checkpoint "${BASE_CKPT}" \
+  --output-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --env-backend official_lerobot \
+  --rollout-execution vector_async \
+  --async-start-method forkserver \
+  --group-size 32 \
+  --max-steps 120 \
+  --num-updates 50 \
+  --save-every 1 \
+  --action-chunk-size 5 \
+  --chunk-size 5 \
+  --lr 5e-6 \
+  --clip-eps 0.1 \
+  --init-log-std -2.5 \
+  --euler-step-noise-std 0.1 \
+  --logprob-recompute-mode batched \
+  --logprob-batch-size 16 \
+  --run-label chunk5_g32_lr5e6_clip01_lownoise
+
+test -f "${RUN_DIR}/train_manifest.json"
+test -f "${RUN_DIR}/progress.jsonl"
+test -f "${RUN_DIR}/checkpoints/update_0050.pt"
+echo "PHASE11_R2_TRAIN_DONE run_dir=${RUN_DIR}"
