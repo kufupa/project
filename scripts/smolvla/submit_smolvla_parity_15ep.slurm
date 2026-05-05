@@ -8,16 +8,17 @@
 
 set -euo pipefail
 
-if [[ -n "${SMOLVLA_PROJECT_ROOT:-}" ]]; then
-  PROJECT_ROOT="${SMOLVLA_PROJECT_ROOT}"
-elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-  PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh" ]]; then
+  _SLURM_COMMON="${SLURM_SUBMIT_DIR}/scripts/slurm/common_env.sh"
 else
-  SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  PROJECT_ROOT="$(cd "${SUBMIT_DIR}/../.." && pwd)"
+  _SLURM_COMMON="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/../slurm/common_env.sh"
 fi
-
+# shellcheck source=../slurm/common_env.sh
+source "${_SLURM_COMMON}"
+slurm_resolve_project_root "scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh"
 cd "${PROJECT_ROOT}"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "smolvla-parity-15ep"
 
 export SMOLVLA_PARITY_EPISODES="${SMOLVLA_PARITY_EPISODES:-15}"
 export SMOLVLA_PARITY_SEED="${SMOLVLA_PARITY_SEED:-1000}"
@@ -28,4 +29,4 @@ export SMOLVLA_METAWORLD_CAMERA_NAME="${SMOLVLA_METAWORLD_CAMERA_NAME:-corner2}"
 export SMOLVLA_FLIP_CORNER2="${SMOLVLA_FLIP_CORNER2:-true}"
 export SMOLVLA_INIT_CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 
-exec bash "${PROJECT_ROOT}/scripts/smolvla/run_pushv3_smolvla_parity_benchmark.sh"
+exec bash "${PROJECT_ROOT}/scripts/smolvla/legacy_run_pushv3_smolvla_parity_benchmark.sh"
