@@ -908,7 +908,11 @@ class _LeRobotMetaWorldBackend:
             pass
         self._agent_dim, self._env_dim = _smolvla_state_dims(self._bundle.policy)
         _smolvla_eval_log(f"smolvla_eval: backend_metaworld_mt1 task={task!r}")
-        self._mt1 = metaworld.MT1(task)
+        mt1_seed = 42
+        self._mt1 = metaworld.MT1(task, seed=mt1_seed)
+        _smolvla_eval_log(
+            f"smolvla_eval: backend_metaworld_mt1_seed task={task!r} seed={mt1_seed}"
+        )
         if task not in self._mt1.train_classes:
             available = ", ".join(sorted(self._mt1.train_classes.keys()))
             raise ValueError(f"Task {task!r} is not available in Meta-World MT1. Available: {available}")
@@ -996,12 +1000,7 @@ class _LeRobotMetaWorldBackend:
     def rollout_episode(self, *, episode_index: int, reset_seed: int) -> EpisodeRollout:
         seed_metaworld_process(int(reset_seed))
         if self._tasks:
-            task_episode_index = (
-                int(self._target_episode_index_override)
-                if self._target_episode_index_override is not None
-                else int(episode_index)
-            )
-            self._env.set_task(self._tasks[task_episode_index % len(self._tasks)])
+            self._env.set_task(self._tasks[0])
         obs, _info = self._reset(reset_seed)
         try:
             self._bundle.policy.reset()
@@ -1029,7 +1028,7 @@ class _LeRobotMetaWorldBackend:
                 frame = self._render_frame()
                 if frame is not None:
                     frames.append(frame)
-            if terminated or truncated:
+            if terminated or truncated or _safe_success(info):
                 episode_terminated = bool(terminated)
                 episode_truncated = bool(truncated)
                 break
