@@ -18,8 +18,11 @@ BASE_CKPT="/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechog
 PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
 GPU_TELEMETRY_INTERVAL="${GPU_TELEMETRY_INTERVAL:-5}"
 GPU_TELEMETRY_DIR="${RUN_DIR}/gpu_telemetry/train"
+CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
+CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train"
+source scripts/grpo/phase11_cpu_mem_telemetry.sh
 
-mkdir -p logs/pbs/grpo "${RUN_DIR}" "${GPU_TELEMETRY_DIR}"
+mkdir -p logs/pbs/grpo "${RUN_DIR}" "${GPU_TELEMETRY_DIR}" "${CPU_MEM_TELEMETRY_DIR}"
 
 export PYTHONPATH=src
 export MUJOCO_GL=egl
@@ -53,6 +56,7 @@ stop_gpu_telemetry() {
     kill "${NVIDIA_SMI_PID}" >/dev/null 2>&1 || true
     wait "${NVIDIA_SMI_PID}" >/dev/null 2>&1 || true
   fi
+  stop_cpu_mem_telemetry
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi > "${GPU_TELEMETRY_DIR}/nvidia_smi_end.txt" 2>&1 || true
   fi
@@ -86,7 +90,7 @@ trap stop_gpu_telemetry EXIT
 start_gpu_telemetry
 
 echo "[phase11-R1] train g32 lr2e-6 clip0.05 updates 1-50 job=${PBS_JOBID:-local}"
-"${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
+run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
   --checkpoint "${BASE_CKPT}" \
   --output-dir "${RUN_DIR}" \
   --task push-v3 \
