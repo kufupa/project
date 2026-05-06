@@ -106,6 +106,7 @@ def test_phase071_slurm_and_wrapper_bash_syntax() -> None:
         "scripts/mt50/submit_mt50_phase072_10ep_shard0.slurm",
         "scripts/mt50/submit_mt50_phase072_10ep_shard1.slurm",
         "scripts/mt50/submit_mt50_phase072_10ep_shard2.slurm",
+        "scripts/mt50/submit_mt50_phase072_10ep_all_shards.sh",
     ):
         subprocess.run(["bash", "-n", str(_REPO / rel)], check=True, cwd=str(_REPO))
 
