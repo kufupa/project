@@ -177,6 +177,38 @@ def test_phase11_batched_logprob_smoke_pbs_defaults_to_batched_bs16() -> None:
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
+def test_phase11_seedbatch_smoke_pbs_requests_resources() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "phase11_seedbatch_smoke_u2.pbs"
+    text = path.read_text(encoding="utf-8")
+    assert "#PBS -l walltime=00:30:00" in text
+    assert "#PBS -l select=1:ncpus=48:mem=64gb:ngpus=1:gpu_type=RTX6000" in text
+    assert 'RUN_DIR="artifacts/phase11_pushv3_seedbatch_smoke_u2"' in text
+    assert "--batch-size 2" in text
+    assert "--group-size 8" in text
+    assert "--num-updates 2" in text
+    assert "--logprob-batch-size 16" in text
+    assert "--rollout-policy-batch-size 16" in text
+    assert "phase11_cpu_mem_telemetry.sh" in text
+    assert "run_phase11_with_cpu_mem_telemetry" in text
+    assert "PHASE11_SEEDBATCH_SMOKE_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_phase11_seedbatch_prod_pbs_is_not_pop128_env_peak() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "phase11_seedbatch_b4_g32_train_0000_0050.pbs"
+    text = path.read_text(encoding="utf-8")
+    assert "#PBS -l select=1:ncpus=48:mem=128gb:ngpus=1:gpu_type=RTX6000" in text
+    assert "#PBS -l walltime=48:00:00" in text
+    assert "--batch-size 4" in text
+    assert "--group-size 32" in text
+    assert "--num-updates 50" in text
+    assert "--save-every 2" in text
+    assert "--rollout-policy-batch-size 32" in text
+    assert "--logprob-batch-size 16" in text
+    assert "PHASE11_SEEDBATCH_B4_G32_TRAIN_DONE" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
 def test_phase11_train_pbs_scripts_track_cpu_memory() -> None:
     helper = (_REPO_ROOT / "scripts" / "grpo" / "phase11_cpu_mem_telemetry.sh").read_text(
         encoding="utf-8"
@@ -204,6 +236,8 @@ def test_phase11_train_pbs_scripts_track_cpu_memory() -> None:
         "phase11_g16_lr5e6_clip02_train_0000_0010.pbs",
         "phase11_g16_lr5e6_clip02_train_0010_0020_resume.pbs",
         "phase11_batched_logprob_smoke_u2.pbs",
+        "phase11_seedbatch_smoke_u2.pbs",
+        "phase11_seedbatch_b4_g32_train_0000_0050.pbs",
     )
     for name in names:
         path = _REPO_ROOT / "scripts" / "grpo" / name
