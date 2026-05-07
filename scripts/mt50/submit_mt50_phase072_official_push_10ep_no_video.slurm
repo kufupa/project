@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Phase072: official LeRobot MT50 shard 2/3 — 16 tasks × 10 episodes, no videos by default.
+# Phase072: official LeRobot push-v3, 10 episodes, no videos.
 #
-#   sbatch --chdir=/vol/bitbucket/aa6622/project scripts/mt50/submit_mt50_phase072_10ep_shard2.slurm
+#   sbatch --chdir=/vol/bitbucket/aa6622/project --export=NIL scripts/mt50/submit_mt50_phase072_official_push_10ep_no_video.slurm
 #
-#SBATCH --job-name=mt50-p072-s2
+#SBATCH --job-name=mt50-p072-push-novid
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=1-00:00:00
-#SBATCH --output=mt50_phase072_10ep_shard2_%j.out
-#SBATCH --error=mt50_phase072_10ep_shard2_%j.err
+#SBATCH --time=04:00:00
+#SBATCH --output=mt50_phase072_push_10ep_no_video_%j.out
+#SBATCH --error=mt50_phase072_push_10ep_no_video_%j.err
 #SBATCH --export=NIL
 
 set -euo pipefail
@@ -30,12 +30,14 @@ source "${_COMMON}"
 slurm_resolve_project_root "scripts/mt50/run_official_lerobot_mt50_eval.sh"
 cd "${PROJECT_ROOT}"
 
+export MT50_PHASE071_TASK="${MT50_PHASE071_TASK:-push-v3}"
 export MT50_PHASE071_EPISODES="${MT50_PHASE071_EPISODES:-10}"
 export MT50_PHASE071_SEED="${MT50_PHASE071_SEED:-1000}"
-export MT50_PHASE071_OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_10ep/shard2}"
-export MT50_PHASE071_TASK='plate-slide-back-v3,plate-slide-side-v3,plate-slide-v3,push-back-v3,push-v3,push-wall-v3,reach-v3,reach-wall-v3,shelf-place-v3,soccer-v3,stick-pull-v3,stick-push-v3,sweep-into-v3,sweep-v3,window-open-v3,window-close-v3'
+export MT50_PHASE071_OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_push_10ep}"
 export MT50_LEROBOT_MAX_EPISODES_RENDERED="${MT50_LEROBOT_MAX_EPISODES_RENDERED:-0}"
 
-echo "[mt50-p072-s2] host=$(hostname) job=${SLURM_JOB_ID:-local} PROJECT_ROOT=${PROJECT_ROOT} tasks=16 episodes=${MT50_PHASE071_EPISODES} max_episodes_rendered=${MT50_LEROBOT_MAX_EPISODES_RENDERED}"
+echo "[mt50-p072-push-novid] host=$(hostname) job=${SLURM_JOB_ID:-local} PROJECT_ROOT=${PROJECT_ROOT}"
+echo "[mt50-p072-push-novid] task=${MT50_PHASE071_TASK} episodes=${MT50_PHASE071_EPISODES} max_episodes_rendered=${MT50_LEROBOT_MAX_EPISODES_RENDERED}"
+echo "[mt50-p072-push-novid] output_root=${MT50_PHASE071_OUTPUT_ROOT}"
 
 exec bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
