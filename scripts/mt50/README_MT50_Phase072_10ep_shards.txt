@@ -7,6 +7,7 @@ What this is
 - Each shard runs lerobot-eval with a disjoint comma-separated --env.task list (17 + 17 + 16 tasks).
 - Episodes per task: MT50_PHASE071_EPISODES=10 (set inside each shard Slurm file).
 - Outputs: artifacts/MT50_Phase072_official_lerobot_10ep/shard0|shard1|shard2/
+- Future shard reruns default to MT50_LEROBOT_MAX_EPISODES_RENDERED=0, so no videos are rendered.
 
 Why shards are embedded in Slurm (do not use sbatch --export for task lists)
 -----------------------------------------------------------------------------
@@ -22,6 +23,15 @@ Commands that were used to queue all three jobs
 
 Equivalent one-liner (see also submit_mt50_phase072_10ep_all_shards.sh):
   bash scripts/mt50/submit_mt50_phase072_10ep_all_shards.sh
+
+Push-v3 only, 10 episodes, no videos
+------------------------------------
+  cd /vol/bitbucket/aa6622/project
+  sbatch --chdir=/vol/bitbucket/aa6622/project --export=NIL \
+    scripts/mt50/submit_mt50_phase072_official_push_10ep_no_video.slurm
+
+Output:
+  artifacts/MT50_Phase072_official_lerobot_push_10ep/
 
 Shard 0 — 17 tasks (train_config.json order)
 ----------------------------------------------
@@ -65,5 +75,7 @@ Single-GPU alternative (no merge)
 
 Notes
 -----
-- LeRobot eval_main uses max_episodes_rendered=10; with n_episodes=10 you get up to 10 MP4s per task.
-- Progress while running: count *.mp4 under each shard’s videos/; eval_info.json appears when that shard exits.
+- LeRobot eval_main hardcodes max_episodes_rendered=10, but the repo wrapper can route through
+  scripts/mt50/lerobot_eval_configurable_rendering.py when MT50_LEROBOT_MAX_EPISODES_RENDERED is set.
+- Set MT50_LEROBOT_MAX_EPISODES_RENDERED=0 for no videos. In that mode, progress is best checked from
+  Slurm stdout/stderr; eval_info.json appears when that shard exits.

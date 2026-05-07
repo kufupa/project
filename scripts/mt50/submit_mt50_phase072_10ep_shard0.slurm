@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase072: official LeRobot MT50 shard 0/3 — 17 tasks × 10 episodes.
+# Phase072: official LeRobot MT50 shard 0/3 — 17 tasks × 10 episodes, no videos by default.
 # Task list is embedded (avoid sbatch --export comma split).
 #
 #   sbatch --chdir=/vol/bitbucket/aa6622/project scripts/mt50/submit_mt50_phase072_10ep_shard0.slurm
@@ -35,7 +35,8 @@ export MT50_PHASE071_EPISODES="${MT50_PHASE071_EPISODES:-10}"
 export MT50_PHASE071_SEED="${MT50_PHASE071_SEED:-1000}"
 export MT50_PHASE071_OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_10ep/shard0}"
 export MT50_PHASE071_TASK='assembly-v3,basketball-v3,bin-picking-v3,box-close-v3,button-press-topdown-v3,button-press-topdown-wall-v3,button-press-v3,button-press-wall-v3,coffee-button-v3,coffee-pull-v3,coffee-push-v3,dial-turn-v3,disassemble-v3,door-close-v3,door-lock-v3,door-open-v3,door-unlock-v3'
+export MT50_LEROBOT_MAX_EPISODES_RENDERED="${MT50_LEROBOT_MAX_EPISODES_RENDERED:-0}"
 
-echo "[mt50-p072-s0] host=$(hostname) job=${SLURM_JOB_ID:-local} PROJECT_ROOT=${PROJECT_ROOT} tasks=17 episodes=${MT50_PHASE071_EPISODES}"
+echo "[mt50-p072-s0] host=$(hostname) job=${SLURM_JOB_ID:-local} PROJECT_ROOT=${PROJECT_ROOT} tasks=17 episodes=${MT50_PHASE071_EPISODES} max_episodes_rendered=${MT50_LEROBOT_MAX_EPISODES_RENDERED}"
 
 exec bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
