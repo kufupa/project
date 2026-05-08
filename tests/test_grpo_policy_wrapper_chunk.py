@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from smolvla_grpo import phase11_rollout
-from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
+from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy, concatenate_proc_rows
 
 
 class _DummyPostprocessor:
@@ -58,7 +58,9 @@ class _DummyBatchChunkPolicy(_DummyPolicy):
     def _get_distr_params_chunk(self, proc):
         b = int(proc["x"].shape[0])
         t = int(getattr(self, "configured_chunk_len", 3))
-        base = torch.arange(b * t * self.action_dim, dtype=torch.float32).reshape(b, t, self.action_dim)
+        step_base = torch.arange(t * self.action_dim, dtype=torch.float32).reshape(1, t, self.action_dim)
+        row_offset = proc["x"].reshape(b, -1)[:, :1].reshape(b, 1, 1).float()
+        base = step_base + row_offset
         return base / 100.0, torch.full_like(base, -0.5)
 
 
@@ -131,6 +133,27 @@ def test_load_bundle_for_grpo_threads_n_action_steps(monkeypatch) -> None:
     assert bundle is not None
     assert action_dim == 4
     assert calls == [25]
+
+
+def test_load_bundle_for_grpo_default_stays_one(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_load_bundle(checkpoint: str, *, n_action_steps: int = 1):
+        calls.append(int(n_action_steps))
+        return object()
+
+    monkeypatch.setattr(phase11_rollout, "_load_smolvla_bundle", fake_load_bundle)
+    monkeypatch.setattr(phase11_rollout, "PushV3GRPOEnv", _DummyEnv)
+
+    bundle, action_dim = phase11_rollout.load_bundle_for_grpo(
+        "checkpoint",
+        task="push-v3",
+        env_backend="custom",
+    )
+
+    assert bundle is not None
+    assert action_dim == 4
+    assert calls == [1]
 
 
 def test_sample_action_chunk_from_proc_returns_full_chunk_shapes() -> None:
@@ -306,3 +329,61 @@ def test_sample_action_chunk_batch_preserves_raw_before_clip() -> None:
     assert np.max(np.abs(chunk.raw_postprocessed_action_np)) > 1.0
     assert np.max(chunk.exec_action_np) <= 1.0
     assert np.any(chunk.raw_postprocessed_action_np != chunk.exec_action_np)
+
+
+def test_concatenate_proc_rows_handles_tensor_numpy_task_and_scalars() -> None:
+    rows = [
+        {
+            "x": torch.tensor([[1.0, 2.0]]),
+            "arr": np.asarray([[1, 2]], dtype=np.int64),
+            "task": ["push"],
+            "meta": "a",
+        },
+        {
+            "x": torch.tensor([[3.0, 4.0]]),
+            "arr": np.asarray([[3, 4]], dtype=np.int64),
+            "task": ["push"],
+            "meta": "b",
+        },
+    ]
+
+    proc = concatenate_proc_rows(rows)
+
+    torch.testing.assert_close(proc["x"], torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    np.testing.assert_array_equal(proc["arr"], np.asarray([[1, 2], [3, 4]], dtype=np.int64))
+    assert proc["task"] == ["push", "push"]
+    assert proc["meta"] == ["a", "b"]
+
+
+def test_get_action_probs_for_chunk_batch_matches_loop_recompute() -> None:
+    wrapper, policy, _bundle = _batch_wrapper()
+    policy.configured_chunk_len = 3
+    proc_rows = [
+        {"x": torch.zeros(1, 1), "task": ["push"]},
+        {"x": torch.ones(1, 1), "task": ["push"]},
+    ]
+    unsquashed = torch.full((2, 3, 4), 0.25, dtype=torch.float32)
+
+    batched = wrapper.get_action_probs_for_chunk_batch_from_proc_list(proc_rows, unsquashed)
+
+    expected_policy = _DummyBatchChunkPolicy(action_dim=4)
+    expected_wrapper = MetaWorldSmolVLAGRPOPolicy(
+        _DummyBundle(),
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=expected_policy,
+        action_transform="no_tanh",
+    )
+    looped = torch.stack(
+        [
+            expected_wrapper.get_action_probs_for_chunk_from_proc(proc_rows[0], unsquashed[0]),
+            expected_wrapper.get_action_probs_for_chunk_from_proc(proc_rows[1], unsquashed[1]),
+        ],
+        dim=0,
+    )
+
+    assert batched.shape == (2, 3)
+    torch.testing.assert_close(batched, looped)
