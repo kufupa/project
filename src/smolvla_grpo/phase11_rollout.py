@@ -372,6 +372,9 @@ def collect_rollout_seed_batch(
     action_transform: str = "no_tanh",
     action_chunk_size: int = 1,
     rollout_policy_batch_size: int = 32,
+    rollout_seed_mode: str = "serial",
+    seed_wave_size: int = 1,
+    max_vector_envs: int = 32,
 ) -> list[RolloutTrajectory]:
     """Collect seed-major GRPO groups for multiple reset seeds."""
     seeds = [int(seed) for seed in reset_seeds]
@@ -379,6 +382,36 @@ def collect_rollout_seed_batch(
         raise ValueError("reset_seeds must be non-empty")
     if int(group_size) < 1:
         raise ValueError("group_size must be >= 1")
+    seed_mode = str(rollout_seed_mode)
+    if seed_mode not in {"serial", "reuse_env", "seed_wave"}:
+        raise ValueError("rollout_seed_mode must be 'serial', 'reuse_env', or 'seed_wave'")
+    if seed_mode != "serial":
+        if env_backend != "official_lerobot" or rollout_execution not in ("vector_sync", "vector_async"):
+            raise ValueError("reuse_env and seed_wave require official_lerobot vector rollout")
+        from smolvla_grpo.official_lerobot_vector_rollout import (
+            collect_official_lerobot_vector_rollout_seed_batch,
+        )
+
+        return collect_official_lerobot_vector_rollout_seed_batch(
+            bundle=bundle,
+            policy_old=policy_old,
+            task=task,
+            task_text=task_text,
+            reset_seeds=seeds,
+            episode_index=episode_index,
+            max_steps=max_steps,
+            group_size=group_size,
+            action_dim=action_dim,
+            device=device,
+            rollout_execution=rollout_execution,
+            async_start_method=async_start_method,
+            action_transform=action_transform,
+            action_chunk_size=action_chunk_size,
+            rollout_policy_batch_size=rollout_policy_batch_size,
+            rollout_seed_mode=seed_mode,
+            seed_wave_size=int(seed_wave_size),
+            max_vector_envs=int(max_vector_envs),
+        )
 
     merged: list[RolloutTrajectory] = []
     for batch_index, reset_seed in enumerate(seeds):
