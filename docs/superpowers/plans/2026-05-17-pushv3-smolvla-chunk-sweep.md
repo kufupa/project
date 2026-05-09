@@ -83,6 +83,8 @@ Per chunk:
 - `chunk_len_02/gpu_telemetry/nvidia_smi_end.txt`
 - `chunk_len_02/gpu_telemetry/pbs_resource_snapshot.txt`
 - `chunk_len_02/gpu_telemetry/gpu_telemetry_summary.json`
+- `chunk_len_02/timings.jsonl`
+- `chunk_len_02/timing_summary.json`
 - `chunk_len_05/...`
 - `chunk_len_10/...`
 - `chunk_len_15/...`
@@ -131,6 +133,29 @@ Each `eval_summary.json` must include:
   "episodes_rows": []
 }
 ```
+
+Timing summary must include:
+
+```json
+{
+  "schema_version": "phase58_timing_v1",
+  "load_bundle_seconds": 12.3,
+  "rollout_seconds": 123.4,
+  "policy_prepare_seconds": 3.1,
+  "policy_forward_seconds": 22.7,
+  "metaworld_step_seconds_including_obs_render": 54.8,
+  "video_write_seconds": 18.1,
+  "n_policy_calls": 260,
+  "n_env_steps": 2087,
+  "n_video_frames": 2112,
+  "mean_policy_forward_ms_per_call": 87.3,
+  "mean_metaworld_step_ms_per_env_step": 26.3,
+  "cuda_sync_requested": true,
+  "cuda_synchronized_forward_timing": true
+}
+```
+
+`metaworld_step_seconds_including_obs_render` intentionally includes the adapter's observation pixel render after each MetaWorld step. It is not pure MuJoCo physics time. CUDA synchronization around SmolVLA forward timing is recorded because it improves timing accuracy but can perturb throughput relative to older unsynchronized wall-clock runs.
 
 ## Task 1: Add Queue-Free Chunk Helpers
 

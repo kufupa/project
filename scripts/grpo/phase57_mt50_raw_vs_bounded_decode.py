@@ -29,7 +29,7 @@ from smolvla_grpo.phase12_decode_compare import (
 from smolvla_grpo.phase12_diagnostics import write_phase12_episode_video
 from smolvla_grpo.phase12_logging import utc_now_iso, write_jsonl_row, write_manifest
 from smolvla_grpo.phase12_pixels import policy_rgb_from_obs, wm_rgb_from_policy_rgb_corner2
-from smolvla_grpo.phase12_vector_eval import build_episode_waves, concatenate_proc_rows
+from smolvla_grpo.phase12_vector_eval import build_episode_waves, concatenate_proc_rows, select_proc_rows
 
 
 MT50_TASKS = [
@@ -116,6 +116,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--n-envs", type=int, default=3)
     p.add_argument("--chunk-len", type=int, default=50)
     p.add_argument("--max-steps", type=int, default=180)
+    p.add_argument(
+        "--env-vector-mode",
+        choices=("serial", "sync", "async"),
+        default="async",
+        help="MetaWorld env stepping mode: serial keeps legacy per-row envs; sync/async use one vector env per wave.",
+    )
     p.add_argument("--goal-latent-mode", choices=("visual_proprio", "visual_only_ablation"), default="visual_proprio")
     p.add_argument("--proprio-alpha", type=float, default=0.1)
     p.add_argument("--action-transform", choices=("no_tanh", "tanh_norm_ablation"), default="no_tanh")
@@ -141,6 +147,24 @@ def _action_bounds(env_h: Any, action_dim: int) -> tuple[np.ndarray, np.ndarray]
     if low is None or high is None:
         return np.full((action_dim,), -1.0, dtype=np.float32), np.full((action_dim,), 1.0, dtype=np.float32)
     return np.asarray(low, dtype=np.float32).reshape(action_dim), np.asarray(high, dtype=np.float32).reshape(action_dim)
+
+
+def _policy_rgb_from_vector_obs(obs: dict[str, Any], row: int) -> np.ndarray:
+    if not isinstance(obs, dict) or "pixels" not in obs:
+        raise KeyError("observation must contain 'pixels'")
+    pixels = np.asarray(obs["pixels"])
+    if pixels.ndim == 4:
+        return policy_rgb_from_obs({"pixels": pixels[int(row)]})
+    return policy_rgb_from_obs(obs)
+
+
+def _agent_pos_from_vector_obs(obs: dict[str, Any], row: int) -> np.ndarray:
+    if isinstance(obs, dict) and "agent_pos" in obs:
+        agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+        if agent_pos.ndim >= 2 and int(agent_pos.shape[0]) > int(row):
+            return np.asarray(agent_pos[int(row)], dtype=np.float32)
+        return agent_pos.reshape(-1).astype(np.float32, copy=False)
+    raise KeyError("observation must contain row-addressable 'agent_pos'")
 
 
 def _episode_row(episode: dict[str, Any]) -> dict[str, Any]:
@@ -241,6 +265,7 @@ def _task_summary(
         "eval_seed_start": int(args.eval_seed_start),
         "eval_seed_end": int(args.eval_seed_start) + int(args.episodes) - 1,
         "n_envs": int(args.n_envs),
+        "env_vector_mode": str(args.env_vector_mode),
         "chunk_len": int(args.chunk_len),
         "max_steps": int(args.max_steps),
         "env_dispatched_source": "raw_postprocessed",
@@ -307,25 +332,48 @@ def run_task(
         n_envs=int(args.n_envs),
     ):
         wave_n = len(wave)
-        envs = [OfficialLeRobotMetaWorldGRPORollout(task=task, n_envs=1) for _ in range(wave_n)]
+        use_vector_env = str(args.env_vector_mode) != "serial"
+        envs = [] if use_vector_env else [OfficialLeRobotMetaWorldGRPORollout(task=task, n_envs=1) for _ in range(wave_n)]
+        env = (
+            OfficialLeRobotMetaWorldGRPORollout(
+                task=task,
+                n_envs=wave_n,
+                use_async_envs=str(args.env_vector_mode) == "async",
+            )
+            if use_vector_env
+            else None
+        )
         try:
-            resolved_steps = min(int(args.max_steps), int(resolve_lerobot_horizon(envs[0], int(args.max_steps))))
-            obs_by_row = [env.reset(seed) for env, (_ep, seed) in zip(envs, wave, strict=True)]
+            env_for_bounds = env if env is not None else envs[0]
+            resolved_steps = min(int(args.max_steps), int(resolve_lerobot_horizon(env_for_bounds, int(args.max_steps))))
+            if env is not None:
+                obs = env.reset_many([seed for _ep, seed in wave])
+                obs_by_row: list[dict[str, Any]] = []
+            else:
+                obs = {}
+                obs_by_row = [row_env.reset(seed) for row_env, (_ep, seed) in zip(envs, wave, strict=True)]
             policy_reset = getattr(getattr(wrapper, "_policy", None), "reset", None)
             if callable(policy_reset):
                 policy_reset()
             active = np.ones((wave_n,), dtype=np.bool_)
-            low, high = _action_bounds(envs[0], action_dim)
-            policy_frames = [[policy_rgb_from_obs(obs)] for obs in obs_by_row]
+            low, high = _action_bounds(env_for_bounds, action_dim)
+            if env is not None:
+                policy_frames = [[_policy_rgb_from_vector_obs(obs, row)] for row in range(wave_n)]
+                proprios = [[_agent_pos_from_vector_obs(obs, row)] for row in range(wave_n)]
+            else:
+                policy_frames = [[policy_rgb_from_obs(row_obs)] for row_obs in obs_by_row]
+                proprios = [[np.asarray(row_env.last_agent_pos(), dtype=np.float32)] for row_env in envs]
             wm_frames = [[wm_rgb_from_policy_rgb_corner2(frames[0])] for frames in policy_frames]
-            proprios = [[np.asarray(env.last_agent_pos(), dtype=np.float32)] for env in envs]
             rewards: list[list[float]] = [[] for _ in range(wave_n)]
             successes: list[list[bool]] = [[] for _ in range(wave_n)]
             segments: list[list[dict[str, Any]]] = [[] for _ in range(wave_n)]
 
             while bool(np.any(active)):
                 active_rows = [idx for idx in range(wave_n) if bool(active[idx])]
-                proc = concatenate_proc_rows([envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows])
+                if env is not None:
+                    proc = select_proc_rows(env.build_proc(obs, bundle=bundle), active_rows, batch_size=wave_n)
+                else:
+                    proc = concatenate_proc_rows([envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows])
                 sample_seed = int(args.eval_seed_start) * 1000003 + min(ep for ep, _seed in wave) * 7919
                 sample_seed += max(len(segments[idx]) for idx in active_rows)
                 chunk = _sample_chunk_batch(
@@ -336,6 +384,7 @@ def run_task(
                     seed=sample_seed,
                     inference_mode=bool(args.old_policy_inference_mode),
                 )
+                row_context: dict[int, dict[str, Any]] = {}
                 for batch_row, row in enumerate(active_rows):
                     episode_index, reset_seed = wave[row]
                     root_image = np.asarray(wm_frames[row][-1], dtype=np.uint8).copy()
@@ -347,41 +396,92 @@ def run_task(
                         action_low=low,
                         action_high=high,
                     )
-                    executed = 0
-                    for action in variants.env_actions:
-                        if len(rewards[row]) >= resolved_steps:
-                            active[row] = False
+                    row_context[row] = {
+                        "episode_index": int(episode_index),
+                        "reset_seed": int(reset_seed),
+                        "root_image": root_image,
+                        "root_proprio": root_proprio,
+                        "start": int(start),
+                        "variants": variants,
+                        "executed": 0,
+                    }
+
+                if env is None:
+                    for row, ctx in row_context.items():
+                        variants = ctx["variants"]
+                        executed = 0
+                        for action in variants.env_actions:
+                            if len(rewards[row]) >= resolved_steps:
+                                active[row] = False
+                                break
+                            step = envs[row].step(np.asarray(action, dtype=np.float32).reshape(1, -1))
+                            obs_by_row[row] = step.observation
+                            pframe = policy_rgb_from_obs(step.observation)
+                            policy_frames[row].append(pframe)
+                            wm_frames[row].append(wm_rgb_from_policy_rgb_corner2(pframe))
+                            proprios[row].append(np.asarray(envs[row].last_agent_pos(), dtype=np.float32))
+                            rewards[row].append(float(step.reward))
+                            successes[row].append(bool(step.success))
+                            executed += 1
+                            if bool(step.success or step.terminated or step.truncated):
+                                active[row] = False
+                                break
+                        ctx["executed"] = executed
+                else:
+                    max_chunk_steps = max(len(ctx["variants"].env_actions) for ctx in row_context.values())
+                    for chunk_step in range(max_chunk_steps):
+                        if not bool(np.any(active)):
                             break
-                        step = envs[row].step(np.asarray(action, dtype=np.float32).reshape(1, -1))
-                        obs_by_row[row] = step.observation
-                        pframe = policy_rgb_from_obs(step.observation)
-                        policy_frames[row].append(pframe)
-                        wm_frames[row].append(wm_rgb_from_policy_rgb_corner2(pframe))
-                        proprios[row].append(np.asarray(envs[row].last_agent_pos(), dtype=np.float32))
-                        rewards[row].append(float(step.reward))
-                        successes[row].append(bool(step.success))
-                        executed += 1
-                        if bool(step.success or step.terminated or step.truncated):
-                            active[row] = False
+                        active_before_step = active.copy()
+                        action_matrix = np.zeros((wave_n, int(action_dim)), dtype=np.float32)
+                        rows_to_step: list[int] = []
+                        for row, ctx in row_context.items():
+                            variants = ctx["variants"]
+                            if not bool(active_before_step[row]) or len(rewards[row]) >= resolved_steps:
+                                active[row] = False
+                                continue
+                            if int(chunk_step) >= len(variants.env_actions):
+                                continue
+                            action_matrix[row] = np.asarray(variants.env_actions[chunk_step], dtype=np.float32).reshape(-1)
+                            rows_to_step.append(row)
+                        if not rows_to_step:
                             break
+                        step = env.step_batch(action_matrix)
+                        obs = step.observation
+                        for row in rows_to_step:
+                            pframe = _policy_rgb_from_vector_obs(step.observation, row)
+                            policy_frames[row].append(pframe)
+                            wm_frames[row].append(wm_rgb_from_policy_rgb_corner2(pframe))
+                            proprios[row].append(_agent_pos_from_vector_obs(step.observation, row))
+                            rewards[row].append(float(step.reward[row]))
+                            successes[row].append(bool(step.success[row]))
+                            row_context[row]["executed"] = int(row_context[row]["executed"]) + 1
+                            if bool(step.success[row] or step.terminated[row] or step.truncated[row]):
+                                active[row] = False
+                            elif len(rewards[row]) >= resolved_steps:
+                                active[row] = False
+
+                for row, ctx in row_context.items():
+                    variants = ctx["variants"]
+                    executed = int(ctx["executed"])
                     if executed < 1:
                         continue
                     raw_exec = variants.raw_wm_actions[:executed]
                     bounded_exec = variants.bounded_wm_actions[:executed]
-                    real_frames = list(wm_frames[row][start:])
-                    real_proprios = list(proprios[row][start:])
+                    real_frames = list(wm_frames[row][int(ctx["start"]) :])
+                    real_proprios = list(proprios[row][int(ctx["start"]) :])
                     raw_trace = unroll_phase12_latent_trace(
                         wm_bundle,
-                        image=root_image,
-                        proprio=root_proprio,
+                        image=ctx["root_image"],
+                        proprio=ctx["root_proprio"],
                         actions=raw_exec,
                         mode=args.goal_latent_mode,
                         decode_frames=True,
                     )
                     bounded_trace = unroll_phase12_latent_trace(
                         wm_bundle,
-                        image=root_image,
-                        proprio=root_proprio,
+                        image=ctx["root_image"],
+                        proprio=ctx["root_proprio"],
                         actions=bounded_exec,
                         mode=args.goal_latent_mode,
                         decode_frames=True,
@@ -409,7 +509,7 @@ def run_task(
                         mode=args.goal_latent_mode,
                         proprio_alpha=float(args.proprio_alpha),
                     )
-                    episode_dir = task_dir / f"episode_{int(episode_index):04d}_seed_{int(reset_seed)}"
+                    episode_dir = task_dir / f"episode_{int(ctx['episode_index']):04d}_seed_{int(ctx['reset_seed'])}"
                     segment_dir = episode_dir / f"segment_{len(segments[row]):04d}"
                     strip_path = write_three_row_decode_strip_with_l2(
                         segment_dir / "real_raw_bounded_decode_strip_l2.png",
@@ -431,8 +531,8 @@ def run_task(
                     )
                     segment_meta = {
                         "segment_index": len(segments[row]),
-                        "episode_index": int(episode_index),
-                        "reset_seed": int(reset_seed),
+                        "episode_index": int(ctx["episode_index"]),
+                        "reset_seed": int(ctx["reset_seed"]),
                         "sample_seed": int(sample_seed),
                         "executed_steps": int(executed),
                         "wm_factor": int(raw_trace.wm_factor),
@@ -481,6 +581,8 @@ def run_task(
                     },
                 )
         finally:
+            if env is not None:
+                env.close()
             for env in envs:
                 env.close()
 
@@ -504,6 +606,7 @@ def run(args: argparse.Namespace) -> int:
         "episodes": int(args.episodes),
         "eval_seed_start": int(args.eval_seed_start),
         "n_envs": int(args.n_envs),
+        "env_vector_mode": str(args.env_vector_mode),
         "chunk_len": int(args.chunk_len),
         "max_steps": int(args.max_steps),
         "env_dispatched_source": "raw_postprocessed",

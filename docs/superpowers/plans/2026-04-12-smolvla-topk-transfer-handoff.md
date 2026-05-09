@@ -18,7 +18,7 @@ These are the biggest path/env traps when cloning to another host:
   - `ORACLE_RUN_DIR` fallback is hardcoded to:
     - `/vol/bitbucket/aa6622/project/artifacts/phase06_oracle_baseline/run_20260411T131839Z_ep60_voracle_tpush_v3_s1000_r402093`
   - `SMOLVLA_LEROBOT_ENV_DIR` fallback is hardcoded to:
-    - `${WORKSPACE_ROOT}/.envs/lerobot_mw_py310`
+    - `${WORKSPACE_ROOT}/.envs/lerobot_mw_py312`
   - `SMOLVLA_TOPK_LAUNCH_MODE` defaults to `dry-run`.
 - `scripts/smolvla/run_oracle_topk_smolvla_full.sh`
   - `ORACLE_RUN_DIR` is consumed through env but not defaulted in this file.
@@ -42,7 +42,7 @@ Set these explicitly once per session before submitting:
 export REPO_ROOT="$(cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && pwd)"
 export PYTHON_BIN="/path/to/cluster/venv/bin/python"  # must be the LeRobot MW Python
 export SMOLVLA_PYTHON_BIN="${PYTHON_BIN}"
-export SMOLVLA_LEROBOT_ENV_DIR="/path/to/cluster/.envs/lerobot_mw_py310"
+export SMOLVLA_LEROBOT_ENV_DIR="/path/to/cluster/.envs/lerobot_mw_py312"
 export ORACLE_RUN_DIR="/path/to/repo/artifacts/phase06_oracle_baseline/run_20260411T131839Z_ep60_voracle_tpush_v3_s1000_r402093"
 ```
 

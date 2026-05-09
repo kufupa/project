@@ -86,6 +86,160 @@ def test_wm_grpo_train_writes_update_row_and_nonempty_checkpoint(monkeypatch, tm
     assert ckpt["optimizer_state_dict"]
 
 
+def test_wm_only_train_branch_does_not_call_selected_env_collector(monkeypatch, tmp_path) -> None:
+    chunks = [torch.full((4, 4), 0.1 * (i + 1), dtype=torch.float32) for i in range(4)]
+    episode = SimpleNamespace(
+        total_env_reward=0.0,
+        success_any=False,
+        success_last=False,
+        metadata={
+            "phase12_train_mode": "wm_only",
+            "segment_candidate_rewards": [[0.0, 1.0, 2.0, 3.0]],
+            "candidate_rewards": [0.0, 1.0, 2.0, 3.0],
+            "old_logprob_sums": [-1.0, -1.1, -1.2, -1.3],
+            "proc_root_snapshots": [{"x": torch.zeros(1, 1)} for _ in range(4)],
+            "unsquashed_chunks": chunks,
+            "rollout_validation_video": "",
+            "selected_action_rollout_video": "",
+            "oracle_baseline_video": "",
+            "oracle_baseline_video_status": "disabled",
+            "wm_decode_status": "disabled",
+        },
+    )
+
+    monkeypatch.setattr(trainer, "load_phase12_train_resources", lambda args: (_TinyBundle(), object(), 4))
+    monkeypatch.setattr(
+        trainer,
+        "collect_phase12_training_episode",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("selected-env collector called")),
+    )
+    monkeypatch.setattr(trainer, "collect_phase12_wm_only_training_episode", lambda **_kwargs: episode)
+
+    code = trainer.main(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--phase12-train-mode",
+            "wm_only",
+            "--output-dir",
+            str(tmp_path),
+            "--jepa-repo",
+            "/tmp/jepa",
+            "--jepa-ckpt",
+            "wm.pt",
+            "--num-updates",
+            "1",
+            "--num-episodes",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    rows = [json.loads(x) for x in (tmp_path / "progress.jsonl").read_text().splitlines() if x.strip()]
+    assert any(row.get("event") == "update_complete" and row.get("optimizer_step") is True for row in rows)
+
+
+def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch, tmp_path) -> None:
+    calls: list[int] = []
+
+    def fake_collect(**kwargs):
+        seed = int(kwargs["reset_seed"])
+        calls.append(seed)
+        base = float(seed - 2000)
+        chunks = [torch.full((2, 4), 0.1 * (i + 1), dtype=torch.float32) for i in range(3)]
+        return SimpleNamespace(
+            total_env_reward=base,
+            success_any=seed % 2 == 0,
+            success_last=seed % 2 == 0,
+            metadata={
+                "segment_candidate_rewards": [[base, base + 1.0, base + 2.0]],
+                "candidate_rewards": [base, base + 1.0, base + 2.0],
+                "old_logprob_sums": [-1.0, -1.1, -1.2],
+                "proc_root_snapshots": [{"x": torch.zeros(1, 1)} for _ in range(3)],
+                "unsquashed_chunks": chunks,
+                "rollout_validation_video": "",
+                "selected_action_rollout_video": "",
+                "oracle_baseline_video": "",
+                "oracle_baseline_video_status": "disabled",
+                "wm_decode_status": "disabled",
+            },
+        )
+
+    monkeypatch.setattr(trainer, "load_phase12_train_resources", lambda args: (_TinyBundle(), object(), 4))
+    monkeypatch.setattr(trainer, "collect_phase12_training_episode", fake_collect)
+
+    code = trainer.main(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--output-dir",
+            str(tmp_path),
+            "--jepa-repo",
+            "/tmp/jepa",
+            "--jepa-ckpt",
+            "wm.pt",
+            "--group-size",
+            "3",
+            "--batch-size",
+            "2",
+            "--num-updates",
+            "1",
+            "--num-episodes",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert calls == [2000, 2001]
+    rows = [json.loads(x) for x in (tmp_path / "progress.jsonl").read_text().splitlines() if x.strip()]
+    update = [row for row in rows if row.get("event") == "update_complete"][-1]
+    assert update["batch_size"] == 2
+    assert update["reset_seeds"] == [2000, 2001]
+    assert len(update["returns"]) == 6
+    assert len(update["advantages"]) == 6
+    assert update["per_seed_success_rate"] == [1.0, 0.0]
+
+
+def test_phase12_microbatch_loss_uses_explicit_group_size() -> None:
+    class Wrapper:
+        def __init__(self) -> None:
+            self.scale = torch.nn.Parameter(torch.tensor(0.0))
+
+        def get_action_probs_for_chunk_from_proc(self, proc, chunk):
+            del proc
+            return self.scale + torch.as_tensor(chunk).float().reshape(-1) * 0.0
+
+    chunks = [torch.zeros((1, 4), dtype=torch.float32) for _ in range(4)]
+    old_lp = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    advantages = torch.tensor([2.0, 1.0, 3.0, 0.0], dtype=torch.float32)
+
+    good = Wrapper()
+    trainer._backward_chunk_grpo_loss_microbatched(
+        train_wrapper=good,
+        proc_snapshots=[{} for _ in chunks],
+        unsquashed_chunks=chunks,
+        old_lp=old_lp,
+        advantages=advantages,
+        clip_eps=0.2,
+        grpo_group_size=2,
+    )
+
+    wrong = Wrapper()
+    trainer._backward_chunk_grpo_loss_microbatched(
+        train_wrapper=wrong,
+        proc_snapshots=[{} for _ in chunks],
+        unsquashed_chunks=chunks,
+        old_lp=old_lp,
+        advantages=advantages,
+        clip_eps=0.2,
+        grpo_group_size=None,
+    )
+
+    assert good.scale.grad is not None
+    assert wrong.scale.grad is not None
+    assert not torch.allclose(good.scale.grad, wrong.scale.grad)
+
+
 def test_phase12_reset_gate_tolerates_sparse_render_jitter_when_raw_state_matches() -> None:
     decision = trainer._phase12_reset_gate_decision(
         reset_metrics={

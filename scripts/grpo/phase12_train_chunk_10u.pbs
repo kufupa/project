@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#PBS -N p12tr10u
+#PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_train_chunk_10u.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+PHASE12_JOB_LOG="logs/pbs/grpo/phase12_train_chunk_10u.${PBS_JOBID:-local}.$(date -u +%Y%m%dT%H%M%SZ).log"
+exec >> "${PHASE12_JOB_LOG}" 2>&1
+
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+CHECKPOINT="${PHASE12_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+JEPA_CKPT="${PHASE12_JEPA_CKPT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--facebook--jepa-wms/snapshots/9b9c41ef249466630dbf1a20e78391865d07b3b9/jepa_wm_metaworld.pth.tar}"
+JEPA_REPO="${PHASE12_JEPA_REPO:-/rds/general/user/aa6622/home/research/RESEARCH_PAPER_CLONES/jepa-wms}"
+RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
+START_UPDATE="${PHASE12_START_UPDATE:?set PHASE12_START_UPDATE}"
+NUM_UPDATES="${PHASE12_NUM_UPDATES:-10}"
+END_UPDATE=$((START_UPDATE + NUM_UPDATES))
+SAVE_EVERY="${PHASE12_SAVE_EVERY:-2}"
+BATCH_SIZE="${PHASE12_BATCH_SIZE:-4}"
+GROUP_SIZE="${PHASE12_GROUP_SIZE:-8}"
+ACTION_PROFILE="${PHASE12_ACTION_PROFILE:-official_jepa_mirror}"
+LR="${PHASE12_LR:-1e-5}"
+CLIP_EPS="${PHASE12_CLIP_EPS:-0.2}"
+EULER_NOISE="${PHASE12_EULER_NOISE:-0.2}"
+INIT_LOG_STD="${PHASE12_INIT_LOG_STD:--2.0}"
+WM_SCORE_MODE="${PHASE12_WM_SCORE_MODE:-serial}"
+WM_SCORE_BATCH_SIZE="${PHASE12_WM_SCORE_BATCH_SIZE:-8}"
+RESUME="${PHASE12_RESUME:-}"
+
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export JEPA_WM_DISABLE_IMAGE_HEAD="${JEPA_WM_DISABLE_IMAGE_HEAD:-1}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+test -x "${PYTHON_BIN}"
+test -d "${PROJECT_ROOT}/src"
+if [[ ! -d "${CHECKPOINT}" && ! -f "${CHECKPOINT}" ]]; then echo "missing CHECKPOINT=${CHECKPOINT}" >&2; exit 2; fi
+test -f "${JEPA_CKPT}"
+test -d "${JEPA_REPO}"
+mkdir -p "${RUN_DIR}"
+
+CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
+CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train_${START_UPDATE}_${END_UPDATE}"
+source scripts/grpo/phase11_cpu_mem_telemetry.sh
+trap 'status=$?; stop_cpu_mem_telemetry; exit "${status}"' EXIT
+
+args=(
+  scripts/grpo/train_phase12_wm_chunk_grpo.py
+  --mode wm_grpo_train
+  --phase12-train-mode wm_only
+  --checkpoint "${CHECKPOINT}"
+  --jepa-ckpt "${JEPA_CKPT}"
+  --jepa-repo "${JEPA_REPO}"
+  --output-dir "${RUN_DIR}"
+  --task push-v3
+  --env-backend official_lerobot_guarded
+  --action-profile "${ACTION_PROFILE}"
+  --chunk-len 25
+  --batch-size "${BATCH_SIZE}"
+  --group-size "${GROUP_SIZE}"
+  --num-episodes "${NUM_UPDATES}"
+  --num-updates "${NUM_UPDATES}"
+  --start-update "${START_UPDATE}"
+  --max-steps 120
+  --train-seed-base "${PHASE12_SEED_BASE:-10000}"
+  --save-every "${SAVE_EVERY}"
+  --lr "${LR}"
+  --clip-eps "${CLIP_EPS}"
+  --init-log-std "${INIT_LOG_STD}"
+  --euler-step-noise-std "${EULER_NOISE}"
+  --goal-latent-mode visual_proprio
+  --proprio-alpha 0.1
+  --reward-key wm_latent_progress
+  --ratio-mode chunk
+  --logprob-backward-mode microbatch
+  --wm-score-mode "${WM_SCORE_MODE}"
+  --wm-score-batch-size "${WM_SCORE_BATCH_SIZE}"
+  --action-transform no_tanh
+  --reset-mismatch fail
+  --decode-candidates none
+  --no-save-wm-decodes
+  --disable-videos
+)
+if [[ "${PHASE12_DRY_RUN:-0}" == "1" ]]; then
+  args+=(--dry-run)
+fi
+if [[ -n "${RESUME}" ]]; then
+  test -f "${RESUME}"
+  args+=(--resume "${RESUME}")
+fi
+
+echo "[phase12-train-chunk] run=${RUN_DIR} start=${START_UPDATE} end=${END_UPDATE} b=${BATCH_SIZE} g=${GROUP_SIZE} wm=${WM_SCORE_MODE}/${WM_SCORE_BATCH_SIZE} job=${PBS_JOBID:-local}"
+run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" "${args[@]}"
+
+if [[ "${PHASE12_DRY_RUN:-0}" != "1" ]]; then
+  FINAL_CKPT="${RUN_DIR}/checkpoints/update_$(printf '%04d' "${END_UPDATE}").pt"
+  test -f "${FINAL_CKPT}"
+  "${PYTHON_BIN}" - "${RUN_DIR}" "${START_UPDATE}" "${END_UPDATE}" <<'PY'
+import json, sys
+from pathlib import Path
+run = Path(sys.argv[1]); start = int(sys.argv[2]); end = int(sys.argv[3])
+rows = [json.loads(x) for x in (run / "progress.jsonl").read_text().splitlines() if x.strip()]
+updates = [r for r in rows if r.get("event") == "update_complete" and start <= int(r.get("update_index", -1)) < end]
+if len(updates) != end - start:
+    raise SystemExit(f"expected {end - start} update_complete rows for chunk {start}-{end}, got {len(updates)}")
+last = updates[-1]
+assert int(last["update_index"]) == end - 1, last
+for key in ["update_seconds", "rollout_seconds", "optimize_seconds", "wm_score_seconds", "proc_mem_after_optimize_tree_rss_kb"]:
+    assert key in last, key
+PY
+fi
+echo "PHASE12_TRAIN_CHUNK_DONE run_dir=${RUN_DIR} end_update=${END_UPDATE}"

@@ -45,6 +45,7 @@ N_ENVS="${PHASE58_N_ENVS:-3}"
 MAX_STEPS="${PHASE58_MAX_STEPS:-180}"
 CHUNK_LEN="${PHASE58_CHUNK_LEN:-2}"
 FPS="${PHASE58_FPS:-20}"
+ENV_VECTOR_MODE="${PHASE58_ENV_VECTOR_MODE:-async}"
 SWEEP_ROOT="${PHASE58_OUT_ROOT:-${PROJECT_ROOT}/artifacts/phase58_smolvla_baseline_pushv3_chunk_sweep_25ep_s1000_max180_5x1gpu}"
 OUT="${PHASE58_OUT:-${SWEEP_ROOT}/chunk_len_$(printf "%02d" "${CHUNK_LEN}")}"
 BASE_CKPT="${PHASE58_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
@@ -104,7 +105,7 @@ start_gpu_telemetry() {
 }
 
 mkdir -p "${OUT}" "${GPU_TELEMETRY_DIR}" logs/pbs/grpo
-echo "[phase58] job=${PBS_JOBID:-local} task=${TASK} episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max_steps=${MAX_STEPS} out=${OUT}"
+echo "[phase58] job=${PBS_JOBID:-local} task=${TASK} episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max_steps=${MAX_STEPS} env_vector_mode=${ENV_VECTOR_MODE} out=${OUT}"
 trap stop_gpu_telemetry EXIT
 start_gpu_telemetry
 
@@ -117,7 +118,9 @@ start_gpu_telemetry
   --n-envs "${N_ENVS}" \
   --max-steps "${MAX_STEPS}" \
   --chunk-len "${CHUNK_LEN}" \
-  --fps "${FPS}"
+  --fps "${FPS}" \
+  --env-vector-mode "${ENV_VECTOR_MODE}"
 
 test -f "${OUT}/eval_summary.json"
+test -f "${OUT}/timing_summary.json"
 echo "SMOLVLA_PUSHV3_CHUNK_SWEEP_DONE out=${OUT}"
