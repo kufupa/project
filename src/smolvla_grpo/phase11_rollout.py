@@ -145,6 +145,8 @@ def collect_rollout_group(
         env_h = OfficialLeRobotMetaWorldGRPORollout(task=task)
         max_steps = resolve_lerobot_horizon(env_h, max_steps)
     elif env_backend == "custom":
+        if requested_max_steps <= 0:
+            raise ValueError("custom env_backend requires max_steps >= 1")
         env_h = PushV3GRPOEnv(task=task)
     else:
         raise ValueError("env_backend must be 'custom' or 'official_lerobot'")
@@ -172,14 +174,16 @@ def collect_rollout_group(
         traj.metadata["resolved_max_steps"] = int(max_steps)
         if env_backend == "official_lerobot":
             obs = env_h.reset(reset_seed)
-            try:
-                policy_old.reset()
-            except Exception:
-                pass
         else:
             seed_metaworld_process(int(reset_seed))
             env_h.set_task_for_episode(episode_index)
             obs = env_h.reset(reset_seed)
+        policy_reset = getattr(policy_old, "reset", None)
+        if callable(policy_reset):
+            try:
+                policy_reset()
+            except Exception:
+                pass
         terminated = False
         truncated = False
         for _step in range(max_steps):

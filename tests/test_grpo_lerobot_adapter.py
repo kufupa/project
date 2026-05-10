@@ -193,6 +193,8 @@ def test_phase11_rollout_exposes_official_backend_static():
     assert "resolve_lerobot_horizon" in text
     assert "env_h.build_proc" in text
     assert "step.exec_action_np.reshape(1, -1)" in text
+    assert 'raise ValueError("custom env_backend requires max_steps >= 1")' in text
+    assert 'policy_reset = getattr(policy_old, "reset", None)' in text
 
 
 def test_grpo_scripts_expose_official_lerobot_backend_and_success_logging():
