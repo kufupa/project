@@ -76,6 +76,12 @@ if [[ "${MODE}" == "train" ]]; then
   NUPD="${5:-1}"
   RESUME="${6:-}"
   EXTRA=()
+  if [[ -n "${GRPO_ENV_BACKEND:-}" ]]; then
+    EXTRA+=(--env-backend "${GRPO_ENV_BACKEND}")
+  fi
+  if [[ -n "${GRPO_MAX_STEPS:-}" ]]; then
+    EXTRA+=(--max-steps "${GRPO_MAX_STEPS}")
+  fi
   if [[ -n "${RESUME}" ]]; then
     EXTRA+=(--resume "${RESUME}")
   fi
@@ -92,22 +98,38 @@ elif [[ "${MODE}" == "eval" ]]; then
   EVAL_OUT="${3:?eval output}"
   EVAL_START="${4:-1000}"
   EPS="${5:-20}"
+  EXTRA=()
+  if [[ -n "${GRPO_ENV_BACKEND:-}" ]]; then
+    EXTRA+=(--env-backend "${GRPO_ENV_BACKEND}")
+  fi
+  if [[ -n "${GRPO_MAX_STEPS:-}" ]]; then
+    EXTRA+=(--max-steps "${GRPO_MAX_STEPS}")
+  fi
+  if [[ "${GRPO_SAVE_OFFICIAL_EVAL_INFO:-0}" == "1" ]]; then
+    EXTRA+=(--save-official-eval-info)
+  fi
   exec "${GRPO_PYTHON}" scripts/grpo/eval_phase11_checkpoints.py \
     --base-checkpoint "${BASE}" \
     --grpo-checkpoint "${GRPO_PT}" \
     --output-dir "${EVAL_OUT}" \
     --eval-seed-start "${EVAL_START}" \
-    --episodes "${EPS}"
+    --episodes "${EPS}" \
+    "${EXTRA[@]}"
 elif [[ "${MODE}" == "rollout-smoke" ]]; then
   CKPT="${1:?checkpoint}"
   GS="${2:-2}"
   MS="${3:-10}"
   SD="${4:-2000}"
+  EXTRA=()
+  if [[ -n "${GRPO_ENV_BACKEND:-}" ]]; then
+    EXTRA+=(--env-backend "${GRPO_ENV_BACKEND}")
+  fi
   exec "${GRPO_PYTHON}" scripts/grpo/smoke_phase11_rollout.py \
     --checkpoint "${CKPT}" \
     --group-size "${GS}" \
     --max-steps "${MS}" \
-    --seed "${SD}"
+    --seed "${SD}" \
+    "${EXTRA[@]}"
 else
   echo "usage: $0 train <ckpt> <out> [seed_base] [start] [n_updates] [resume_pt]" >&2
   echo "       $0 eval <base_ckpt> <grpo.pt> <eval_out> [eval_seed_start] [episodes]" >&2
