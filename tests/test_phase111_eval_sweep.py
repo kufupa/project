@@ -24,7 +24,8 @@ def test_run_sweep_collects_rows_and_topk(tmp_path, monkeypatch) -> None:
     (ckpt_dir / "update_0005.pt").write_text("x", encoding="utf-8")
     (ckpt_dir / "update_0010.pt").write_text("x", encoding="utf-8")
 
-    def fake_run(cmd, check):  # noqa: ANN001
+    def fake_run(cmd, check, cwd=None):  # noqa: ANN001
+        assert cwd == str(mod._REPO)  # noqa: SLF001
         out_dir = Path(cmd[cmd.index("--output-dir") + 1])
         ckpt = Path(cmd[cmd.index("--grpo-checkpoint") + 1]).name
         episodes = int(cmd[cmd.index("--episodes") + 1])
