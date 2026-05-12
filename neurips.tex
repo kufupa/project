@@ -155,6 +155,283 @@ Table~\ref{tab:segment-grpo-wm-l2-pilot} lists the top-15 oracle-aligned Meta-Wo
 \end{table}
 
 
+% every seed == different starting environment of same task push-v3
+% 10 different environments
+% MT10
+% 10 seeds, 50 episodes, avg latent distance
+
+% 
+
+% frameskip = 5
+% 20D action into WM
+% check if smovla no frameskip
+
+
+
+
+
+
+
+\begin{itemize}
+  \item \texttt{phase06\_oracle\_baseline/run\_20260411T131839Z\_ep60\_voracle\_tpush\_v3\_s1000\_r402093}: 
+    from queue at \texttt{13:18:39 UTC} to finish at \texttt{13:32:26.260964 UTC} (13m 47s).
+  \item \texttt{phase08\_segment\_grpo\_baseline/run\_20260416T230509Z\_all60\_f50\_k3\_s1000}: 
+    from queue at \texttt{23:05:09 UTC} to finish at \texttt{00:49:23.357243 UTC} on 2026-04-17 (1h 44m 14s).
+  \item \texttt{phase09\_oracle\_vs\_wm\_baseline/run\_20260416T223708Z\_ep60\_vphase09\_oracle\_vs\_wm\_tpush\_v3\_s1000\_r709580}: 
+    from queue at \texttt{22:37:08 UTC} to finish at \texttt{22:45:41 UTC} (8m 33s).
+\end{itemize}
+
+
+
+
+
+
+\par\smallskip
+\nopagebreak[4]
+\begin{minipage}{\linewidth}
+\raggedright
+
+% --- INTRO ---
+\noindent\textbf{Setup (policy run).} Meta-World \texttt{push-v3}; WM---goal distance is Euclidean L2 in \texttt{visual} scoring latent, integer-rounded per WM megastep (artifact \texttt{d\_goal\_l2\_wm\_int}).
+
+Run directory: \texttt{/vol/bitbucket/aa6622/project/artifacts/phase08\_segment\_grpo\_baseline/run\_20260416T230509Z\_all60\_f50\_k3\_s1000}; episodes aggregated: 60; candidate mode: \texttt{selected}.
+
+\noindent\textbf{Setup (oracle replay run).} Same WM and goal latent definition; actions come from recorded oracle \texttt{actions.jsonl} (phase09-style replay).
+
+Compare directory: \texttt{/vol/bitbucket/aa6622/project/artifacts/phase09\_oracle\_vs\_wm\_baseline/run\_20260416T223708Z\_ep60\_vphase09\_oracle\_vs\_wm\_tpush\_v3\_s1000\_r709580}; paired episodes: 60.
+
+% --- PAIRED TABLE ---
+\begin{center}
+\begin{tabular}{lrrrrrr}
+\hline
+Range & $\mu_{\mathrm{pol}}$ & SE$_{\mathrm{pol}}$ & $n_{\mathrm{pol}}$ & $\mu_{\mathrm{orc}}$ & SE$_{\mathrm{orc}}$ & $n_{\mathrm{orc}}$ \\
+\hline
+0:5 &  412.57 &  2.94 & 60 &  416.18 &  2.69 & 60 \\
+5:10 &  407.27 &  2.97 & 60 &  414.90 &  2.60 & 60 \\
+10:15 &  404.32 &  3.25 & 60 &  415.37 &  2.92 & 60 \\
+15:20 &  394.22 &  3.93 & 60 &  398.47 &  3.96 & 60 \\
+20:25 &  384.82 &  4.47 & 60 &  376.43 &  5.50 & 60 \\
+25:30 &  372.50 &  5.17 & 60 &  360.32 &  6.92 & 60 \\
+30:35 &  361.42 &  5.93 & 60 &  342.60 &  7.44 & 60 \\
+35:40 &  348.38 &  5.72 & 60 &  329.67 &  7.23 & 60 \\
+40:45 &  321.77 &  4.95 & 60 &  320.22 &  5.42 & 60 \\
+45:50 &  294.28 &  4.89 & 60 &  329.52 &  5.17 & 60 \\
+\hline
+\end{tabular}
+\end{center}
+
+% --- NOTE ---
+\medskip
+\noindent\footnotesize\textit{Note.} Table shows cross-episode mean $\pm$ SE of per-bin values; bins are half-open env action step ranges aligned to \texttt{comparison\_wm\_env\_steps\_per\_wm\_step}. Not pixel MSE to goal image.
+\noindent\footnotesize\textit{Oracle column:} WM conditioned on expert action sequence, not a second world model.
+\noindent\footnotesize\textit{Policy column:} SmolVLA-selected chunk ($K{=}3$ run) per artifact defaults.
+
+\end{minipage}
+\par\smallskip
+\nopagebreak[4]
+
+
+
+
+
+
+
+
+
+
+% MT10 WM-goal latent L2 task-wise table: VLA and oracle delta per range.
+% Requires \texttt{graphicx} for \texttt{\textbackslash resizebox}.
+% Paste fragment; add booktabs to preamble if desired.
+
+\noindent\textbf{Experiment setup.}
+\begin{itemize}
+\item Phase08 run: \textbf{SmolVLA policy} rollouts.
+\item Phase09 run: \textbf{oracle-action replay} baseline.
+\item Metric: world-model latent distance $d\_goal\_l2\_wm\_int$.
+\item Binning: env-action bins 0:5, 5:10, \dots, 45:50 (10 bins).
+\item For each task, rows are shown as \textbf{VLA} and \textbf{$\Delta_{\mathrm{oracle}}$} (oracle minus VLA).
+\item Task names have the \texttt{-v3} suffix removed for readability.
+\end{itemize}
+
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrrrr}
+\hline
+\textbf{Task} & \textbf{Run} & \textbf{0:5} & \textbf{5:10} & \textbf{10:15} & \textbf{15:20} & \textbf{20:25} & \textbf{25:30} & \textbf{30:35} & \textbf{35:40} & \textbf{40:45} & \textbf{45:50} \\
+\hline
+button-press-topdown & VLA & 570.92 & 554.47 & 524.98 & 495.37 & 458.78 & 415.63 & 381.60 & 350.32 & 330.50 & 361.93 \\
+button-press-topdown & $\Delta_{\mathrm{oracle}}$ & -0.20 & -0.12 & +1.58 & +3.43 & +1.43 & +0.28 & -2.97 & -4.25 & +1.22 & +0.60 \\
+\hline
+door-open & VLA & 473.13 & 458.22 & 453.07 & 452.80 & 450.83 & 443.75 & 431.15 & 424.08 & 437.78 & 474.72 \\
+door-open & $\Delta_{\mathrm{oracle}}$ & +0.00 & -0.80 & +1.18 & +1.80 & -0.45 & -2.98 & -10.23 & -20.53 & -20.82 & -10.25 \\
+\hline
+drawer-close & VLA & 410.33 & 407.42 & 408.95 & 416.27 & 411.33 & 394.62 & 388.43 & 387.20 & 386.02 & 390.62 \\
+drawer-close & $\Delta_{\mathrm{oracle}}$ & +1.02 & +1.35 & +1.88 & +2.15 & +2.18 & +2.05 & -1.10 & +2.93 & +7.28 & +2.75 \\
+\hline
+drawer-open & VLA & 389.43 & 377.90 & 376.12 & 376.87 & 372.62 & 363.68 & 353.70 & 348.33 & 347.32 & 350.30 \\
+drawer-open & $\Delta_{\mathrm{oracle}}$ & -1.28 & -1.93 & +0.85 & +6.57 & +15.58 & +13.70 & +7.45 & +1.37 & -3.02 & -5.13 \\
+\hline
+peg-insert-side & VLA & 465.98 & 465.92 & 467.95 & 463.37 & 456.08 & 445.95 & 434.20 & 423.33 & 416.35 & 412.68 \\
+peg-insert-side & $\Delta_{\mathrm{oracle}}$ & -1.73 & -1.58 & +0.37 & +3.45 & +1.28 & -0.37 & -2.30 & -7.97 & -20.30 & -27.35 \\
+\hline
+pick-place & VLA & 438.63 & 432.53 & 431.27 & 430.63 & 433.02 & 434.77 & 425.22 & 397.90 & 365.05 & 346.85 \\
+pick-place & $\Delta_{\mathrm{oracle}}$ & -2.08 & -3.27 & -6.45 & -6.08 & -5.43 & -5.48 & -3.37 & +0.40 & +2.58 & -1.17 \\
+\hline
+push & VLA & 415.18 & 412.08 & 411.30 & 404.22 & 394.48 & 380.77 & 366.05 & 351.73 & 330.98 & 312.40 \\
+push & $\Delta_{\mathrm{oracle}}$ & +0.52 & +2.25 & +6.10 & +9.75 & +9.07 & +12.88 & +21.62 & +28.40 & +24.70 & +18.97 \\
+\hline
+reach & VLA & 489.28 & 463.28 & 447.03 & 430.03 & 410.25 & 395.38 & 385.48 & 379.00 & 378.02 & 381.02 \\
+reach & $\Delta_{\mathrm{oracle}}$ & -0.60 & -2.42 & -7.08 & -9.58 & -10.80 & -10.47 & -10.25 & -10.15 & -9.77 & -8.57 \\
+\hline
+window-close & VLA & 576.15 & 554.33 & 523.92 & 494.13 & 471.65 & 463.00 & 467.68 & 469.35 & 471.90 & 472.45 \\
+window-close & $\Delta_{\mathrm{oracle}}$ & +0.10 & +0.15 & +0.48 & +2.33 & +9.90 & +7.12 & +6.37 & +5.23 & +1.67 & +2.53 \\
+\hline
+window-open & VLA & 482.92 & 454.50 & 414.17 & 403.37 & 405.10 & 413.02 & 415.30 & 413.80 & 410.72 & 408.42 \\
+window-open & $\Delta_{\mathrm{oracle}}$ & +0.37 & -1.58 & -2.05 & -2.82 & -0.10 & -3.35 & -6.48 & -7.00 & -5.52 & -4.25 \\
+\hline
+All tasks & VLA & 471.20 & 458.06 & 445.88 & 436.71 & 426.41 & 415.06 & 404.88 & 394.50 & 387.46 & 391.14 \\
+All tasks & $\Delta_{\mathrm{oracle}}$ & -0.39 & -0.79 & -0.31 & +1.10 & +2.27 & +1.34 & -0.13 & -1.16 & -2.20 & -3.19 \\
+\hline
+\hline
+\end{tabular}
+}
+\end{center}
+\par\vspace{0.3em}
+\noindent\small\textbf{How to read this table.} 7/10 are closer to oracle than policy, which is what we want. Cell values are cross-episode mean latent distances per bin. Each task has a VLA row and a \(\Delta_{\mathrm{oracle}}\) row, where \(\Delta_{\mathrm{oracle}} = \mathrm{oracle} - \mathrm{VLA}\). A positive value means oracle is farther from the world-model goal than VLA, and a negative value means oracle is closer. In this representation, larger raw values mean larger latent distance, so values closer to zero are preferable when the distance is interpreted as reconstruction error.
+
+
+
+
+% MT10 WM-goal latent L2 task-wise table: VLA and oracle delta per range.
+% Requires \texttt{graphicx} for \texttt{\textbackslash resizebox}.
+% Paste fragment; add booktabs to preamble if desired.
+
+\noindent\textbf{Experiment setup.}
+\begin{itemize}
+\setlength{\itemsep}{0.25em}
+\setlength{\parsep}{0pt}
+\setlength{\topsep}{0.25em}
+\setlength{\partopsep}{0pt}
+\item Phase08 run: \textbf{SmolVLA policy} rollouts.
+\item Phase09 run: \textbf{oracle-action replay} baseline.
+\item Metric: world-model latent distance $d\_goal\_l2\_wm\_int$.
+\item Binning: env-action bins 0:5, 5:10, 10:15, 15:20, 20:25.
+\item For each task, rows are shown as \textbf{VLA} and \textbf{$\Delta_{\mathrm{oracle}}$} (oracle minus VLA).
+\item Task names have the \texttt{-v3} suffix removed for readability.
+\end{itemize}
+
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrr|r|}
+\hline
+\textbf{Task} & \textbf{Run} & \textbf{0:5} & \textbf{5:10} & \textbf{10:15} & \textbf{15:20} & \textbf{20:25} \\
+\hline
+button-press-topdown & VLA & 509.30 & 480.13 & 418.32 & 350.63 & 331.17 \\
+button-press-topdown & $\Delta_{\mathrm{oracle}}$ & +0.00 & -1.63 & -4.37 & -12.73 & -11.90 \\
+\hline
+door-open & VLA & 494.55 & 441.95 & 379.55 & 333.90 & 326.77 \\
+door-open & $\Delta_{\mathrm{oracle}}$ & +0.03 & -0.42 & -4.97 & -15.70 & -28.22 \\
+\hline
+drawer-close & VLA & 434.17 & 435.65 & 437.80 & 440.60 & 441.52 \\
+drawer-close & $\Delta_{\mathrm{oracle}}$ & -0.10 & -0.17 & -0.35 & -0.22 & +3.10 \\
+\hline
+drawer-open & VLA & 407.30 & 388.75 & 368.52 & 351.77 & 343.32 \\
+drawer-open & $\Delta_{\mathrm{oracle}}$ & -2.38 & -6.43 & -12.52 & -19.52 & -26.42 \\
+\hline
+peg-insert-side & VLA & 454.18 & 434.30 & 415.48 & 405.15 & 404.77 \\
+peg-insert-side & $\Delta_{\mathrm{oracle}}$ & -2.45 & -6.90 & -18.35 & -37.37 & -45.88 \\
+\hline
+pick-place & VLA & 381.93 & 378.55 & 370.47 & 353.80 & 339.18 \\
+pick-place & $\Delta_{\mathrm{oracle}}$ & -11.68 & -23.60 & -27.32 & -26.37 & -18.92 \\
+\hline
+push & VLA & 341.73 & 337.92 & 338.53 & 333.77 & 332.22 \\
+push & $\Delta_{\mathrm{oracle}}$ & -3.80 & -5.37 & -2.85 & -1.40 & -6.60 \\
+\hline
+reach & VLA & 418.10 & 382.05 & 353.47 & 337.63 & 341.57 \\
+reach & $\Delta_{\mathrm{oracle}}$ & -0.68 & -4.50 & -12.70 & -13.33 & -9.77 \\
+\hline
+window-close & VLA & 572.08 & 544.30 & 502.33 & 435.35 & 346.00 \\
+window-close & $\Delta_{\mathrm{oracle}}$ & +0.15 & +0.18 & +0.75 & +1.12 & -1.90 \\
+\hline
+window-open & VLA & 497.23 & 470.88 & 422.18 & 390.03 & 382.68 \\
+window-open & $\Delta_{\mathrm{oracle}}$ & +0.05 & -2.33 & -8.00 & -18.13 & -16.60 \\
+\hline
+All tasks & VLA & 451.06 & 429.45 & 400.67 & 373.26 & 358.92 \\
+All tasks & $\Delta_{\mathrm{oracle}}$ & -2.09 & -5.12 & -9.07 & -14.37 & -16.31 \\
+\hline
+\hline
+\end{tabular}
+}
+
+
+
+% ensure this is a clean table and easily readable
+% 3rd row for policy distance
+
+\end{center}
+\par\vspace{0.3em}
+\noindent\small\textbf{How to read this table.} 9/10 tasks are closer to oracle rollout than the policy rollout for 25th frame, which is what we want. 
+- Only \textit{drawer-close} isn't.
+Improvement from the 7/10 on 50 frames ahead so this seems like a good action horizon.
+
+Interestingly reducing the action horizon any further wouldn't lead to any improvements, as then "window-close" becomes a negative sample.
+
+Cell values are cross-episode mean latent distances per bin. Each task has a VLA row and a \(\Delta_{\mathrm{oracle}}\) row, where \(\Delta_{\mathrm{oracle}} = \mathrm{oracle} - \mathrm{VLA}\). A positive value means oracle is farther from the world-model goal than VLA, and a negative value means oracle is closer. In this representation, larger raw values mean larger latent distance, so values closer to zero are preferable when the distance is interpreted as reconstruction error.
+
+
+
+
+
+% Check training data, ensure we use same tanh? / normalization method
+
+% VLA 0 shot - MT10 % success rate
+% check smolvla paper and reproduce results
+
+% push-v3 15%
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\subsection{GRPO}
+\begin{table}[t]
+\centering
+\begin{tabular}{l l r l r r}
+\hline
+Checkpoint & 1000--1019 eval dir & 1000--1019 success\% & 1020--1049 eval dir & 1020--1049 success\% & Overall success\% \\ 
+\hline
+update\_0001.pt & eval\_grpo\_u1\_20ep (extra) & 15.00 & eval\_update0001\_seed1020\_ep30 & 16.67 & 16.00 \\
+update\_0005.pt & eval\_grpo\_u5\_20ep (extra) & 15.00 & eval\_update0005\_seed1020\_ep30 & 13.33 & 14.00 \\
+update\_0010.pt & run\_progressive/eval\_update0010\_seed1000\_ep20 & 15.00 & eval\_update0010\_seed1020\_ep30 & 6.67 & 10.00 \\
+update\_0015.pt & run\_progressive/eval\_update0015\_seed1000\_ep20 & 25.00 & eval\_update0015\_seed1020\_ep30 & 13.33 & 18.00 \\
+update\_0020.pt & run\_progressive/eval\_update0020\_seed1000\_ep20 & 0.00 & eval\_update0020\_seed1020\_ep30 & 3.33 & 2.00 \\
+update\_0025.pt & run\_progressive/eval\_update0025\_seed1000\_ep20 & 30.00 & eval\_update0025\_seed1020\_ep30 & 0.00 & 12.00 \\
+update\_0030.pt & run\_progressive/eval\_update0030\_seed1000\_ep20 & 10.00 & eval\_update0030\_seed1020\_ep30 & 13.33 & 12.00 \\
+update\_0035.pt & run\_progressive/eval\_update0035\_seed1000\_ep20 & 15.00 & eval\_update0035\_seed1020\_ep30 & 16.67 & 16.00 \\
+update\_0040.pt & run\_progressive/eval\_update0040\_seed1000\_ep20 & 10.00 & eval\_update0040\_seed1020\_ep30 & 3.33 & 6.00 \\
+update\_0045.pt & run\_progressive/eval\_update0045\_seed1000\_ep20 & 5.00 & eval\_update0045\_seed1020\_ep30 & 10.00 & 8.00 \\
+update\_0050.pt & -- & -- & eval\_update0050\_seed1020\_ep30 & 16.67 & 16.67 \\
+update\_0055.pt & -- & -- & eval\_update0055\_seed1020\_ep30 & 20.00 & 20.00 \\
+update\_0060.pt & -- & -- & eval\_update0060\_seed1020\_ep30 & 23.33 & 23.33 \\
+update\_0065.pt & -- & -- & eval\_update0065\_seed1020\_ep30 & 16.67 & 16.67 \\
+update\_0070.pt & -- & -- & eval\_update0070\_seed1020\_ep30 & 23.33 & 23.33 \\
+update\_0075.pt & -- & -- & eval\_update0075\_seed1020\_ep30 & 16.67 & 16.67 \\
+\hline
+\end{tabular}
+\caption{Phase11 GRPO checkpoints and eval success rates.}
+\label{tab:phase11-eval-success}
+\end{table}
+
 \section{Submission of papers to NeurIPS 2024}
 
 
