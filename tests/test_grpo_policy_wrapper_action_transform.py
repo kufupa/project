@@ -75,3 +75,27 @@ def test_tanh_norm_ablation_preserves_old_pre_postprocessor_tanh() -> None:
     np.testing.assert_allclose(step.exec_action_np, expected.reshape(4), atol=1e-4)
     assert step.action_clip_fraction == 0.0
     assert step.action_clip_any is False
+
+
+def test_batch_sampling_reuses_persistent_generators_across_timesteps() -> None:
+    bundle = _DummyBundle()
+    policy = _DummyPolicy(torch.zeros(1, 4), torch.zeros(1, 4))
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        action_transform="no_tanh",
+        action_low=np.full((4,), -10.0, dtype=np.float32),
+        action_high=np.full((4,), 10.0, dtype=np.float32),
+    )
+    rngs = [torch.Generator(device="cpu").manual_seed(123), torch.Generator(device="cpu").manual_seed(456)]
+    proc = {"x": torch.zeros(2, 1)}
+
+    first = wrapper.sample_action_batch_from_proc(proc, rngs=rngs, n_envs=2)
+    second = wrapper.sample_action_batch_from_proc(proc, rngs=rngs, n_envs=2)
+
+    assert not torch.allclose(first.unsquashed, second.unsquashed)
