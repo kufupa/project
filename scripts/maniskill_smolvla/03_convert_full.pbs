@@ -28,6 +28,7 @@ log="$(msm_stage_log convert_full)"
     --repo-id "${MSM_REPO_ID}" \
     --fps "${MSM_FPS}" \
     --min-episodes 16384 \
+    --stop-after-success-count 15 \
     --manifest "${MSM_RUN_ROOT}/manifests/convert_full.json" \
     --filter-small-actions \
     --overwrite
