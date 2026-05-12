@@ -89,6 +89,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
     kept_frames = 0
     skipped_frames = 0
+    appended_completion_frames = 0
     converted_episodes = 0
     for path in files:
         episode = load_episode(path)
@@ -101,18 +102,19 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         instruction = normalize_instruction(episode["instruction"])
         success_count = 0
         frame_count = 0
+        last_frame: dict[str, Any] | None = None
         for i, keep in enumerate(mask):
             if not keep:
                 skipped_frames += 1
                 continue
-            dataset.add_frame(
-                {
-                    "observation.images.front": as_image_array(images[i]),
-                    "observation.state": states[i].astype(np.float32),
-                    "action": actions[i].astype(np.float32),
-                    "task": instruction,
-                }
-            )
+            frame = {
+                "observation.images.front": as_image_array(images[i]),
+                "observation.state": states[i].astype(np.float32),
+                "action": actions[i].astype(np.float32),
+                "task": instruction,
+            }
+            dataset.add_frame(frame)
+            last_frame = frame
             kept_frames += 1
             frame_count += 1
             if episode["info"][i]["success"]:
@@ -122,6 +124,20 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
             if args.stop_after_success_count > 0 and success_count >= args.stop_after_success_count:
                 break
         if frame_count:
+            if args.append_completion_frames > 0 and last_frame is not None:
+                completion_action = np.zeros_like(last_frame["action"], dtype=np.float32)
+                completion_action[-1] = last_frame["action"][-1]
+                for _ in range(args.append_completion_frames):
+                    dataset.add_frame(
+                        {
+                            "observation.images.front": last_frame["observation.images.front"].copy(),
+                            "observation.state": last_frame["observation.state"].copy(),
+                            "action": completion_action.copy(),
+                            "task": instruction,
+                        }
+                    )
+                    kept_frames += 1
+                    appended_completion_frames += 1
             dataset.save_episode()
             converted_episodes += 1
     dataset.finalize()
@@ -134,6 +150,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         "episodes_converted": converted_episodes,
         "frames": kept_frames,
         "skipped_frames": skipped_frames,
+        "appended_completion_frames": appended_completion_frames,
         "filter_small_actions": args.filter_small_actions,
     }
 
@@ -148,7 +165,8 @@ def main() -> None:
     parser.add_argument("--min-episodes", type=int, default=1)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--image-writer-threads", type=int, default=4)
-    parser.add_argument("--stop-after-success-count", type=int, default=15)
+    parser.add_argument("--stop-after-success-count", type=int, default=0)
+    parser.add_argument("--append-completion-frames", type=int, default=15)
     parser.add_argument("--filter-small-actions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
