@@ -1,0 +1,51 @@
+% =============================================================================
+% Do not use em dashes in running text; in LaTeX source use one ASCII hyphen (-), not three in a row.
+% Paste as one block: INTRO, TABLE, NOTE (fixed order; not a floating table).
+% If a long chapter breaks inside here, add to preamble: \usepackage{needspace}
+% and immediately before this block: \Needspace{22\baselineskip}
+% Optional: \usepackage{float}, wrap tabular in table[H] still inside minipage.
+% =============================================================================
+
+\par\smallskip
+\nopagebreak[4]
+\begin{minipage}{\linewidth}
+\raggedright
+
+% Section: INTRO
+\noindent\textbf{Setup (policy run).} Meta-World \texttt{push-v3}; WM-goal distance is Euclidean L2 in \texttt{visual} scoring latent, integer-rounded per WM megastep (artifact \texttt{d\_goal\_l2\_wm\_int}).
+
+Run directory: \texttt{/vol/bitbucket/aa6622/project/artifacts/phase08\_segment\_grpo\_baseline/run\_20260416T230509Z\_all60\_f50\_k3\_s1000}; episodes aggregated: 60; candidate mode: \texttt{selected}.
+
+\noindent\textbf{Setup (oracle replay run).} Same WM and goal latent definition; actions come from recorded oracle \texttt{actions.jsonl} (phase09-style replay).
+
+Compare directory: \texttt{/vol/bitbucket/aa6622/project/artifacts/phase09\_oracle\_vs\_wm\_baseline/run\_20260416T223708Z\_ep60\_vphase09\_oracle\_vs\_wm\_tpush\_v3\_s1000\_r709580}; paired episodes: 60.
+
+% Section: PAIRED TABLE
+\begin{center}
+\begin{tabular}{lrrrrrr}
+\hline
+Range & $\mu_{\mathrm{pol}}$ & SE$_{\mathrm{pol}}$ & $n_{\mathrm{pol}}$ & $\mu_{\mathrm{orc}}$ & SE$_{\mathrm{orc}}$ & $n_{\mathrm{orc}}$ \\
+\hline
+0:5 &  412.57 &  2.94 & 60 &  416.18 &  2.69 & 60 \\
+5:10 &  407.27 &  2.97 & 60 &  414.90 &  2.60 & 60 \\
+10:15 &  404.32 &  3.25 & 60 &  415.37 &  2.92 & 60 \\
+15:20 &  394.22 &  3.93 & 60 &  398.47 &  3.96 & 60 \\
+20:25 &  384.82 &  4.47 & 60 &  376.43 &  5.50 & 60 \\
+25:30 &  372.50 &  5.17 & 60 &  360.32 &  6.92 & 60 \\
+30:35 &  361.42 &  5.93 & 60 &  342.60 &  7.44 & 60 \\
+35:40 &  348.38 &  5.72 & 60 &  329.67 &  7.23 & 60 \\
+40:45 &  321.77 &  4.95 & 60 &  320.22 &  5.42 & 60 \\
+45:50 &  294.28 &  4.89 & 60 &  329.52 &  5.17 & 60 \\
+\hline
+\end{tabular}
+\end{center}
+
+% Section: NOTE
+\medskip
+\noindent\footnotesize\textit{Note.} Table shows cross-episode mean $\pm$ SE of per-bin values; bins are half-open env action step ranges aligned to \texttt{comparison\_wm\_env\_steps\_per\_wm\_step}. Not pixel MSE to goal image.
+\noindent\footnotesize\textit{Oracle column:} WM conditioned on expert action sequence, not a second world model.
+\noindent\footnotesize\textit{Policy column:} SmolVLA-selected chunk ($K{=}3$ run) per artifact defaults.
+
+\end{minipage}
+\par\smallskip
+\nopagebreak[4]
