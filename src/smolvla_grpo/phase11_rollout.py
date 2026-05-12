@@ -53,6 +53,8 @@ class RolloutTrajectory:
     successes: list[bool] = field(default_factory=list)
     unsquashed_actions: list[torch.Tensor] = field(default_factory=list)
     log_probs: list[torch.Tensor] = field(default_factory=list)
+    action_clip_fractions: list[float] = field(default_factory=list)
+    action_clip_any: list[bool] = field(default_factory=list)
     terminated: bool = False
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -138,8 +140,34 @@ def collect_rollout_group(
     action_dim: int,
     device: torch.device,
     env_backend: str = "custom",
+    rollout_execution: str = "serial",
+    async_start_method: str = "forkserver",
+    action_transform: str = "no_tanh",
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` trajectories from same seed/task (GRPO group)."""
+    if rollout_execution not in ("serial", "vector_sync", "vector_async"):
+        raise ValueError("rollout_execution must be 'serial', 'vector_sync', or 'vector_async'")
+    if rollout_execution != "serial" and env_backend != "official_lerobot":
+        raise ValueError("vector rollout modes require env_backend='official_lerobot'")
+    if env_backend == "official_lerobot" and rollout_execution in ("vector_sync", "vector_async"):
+        from smolvla_grpo.official_lerobot_vector_rollout import collect_official_lerobot_vector_rollout_group
+
+        return collect_official_lerobot_vector_rollout_group(
+            bundle=bundle,
+            policy_old=policy_old,
+            task=task,
+            task_text=task_text,
+            reset_seed=reset_seed,
+            episode_index=episode_index,
+            max_steps=max_steps,
+            group_size=group_size,
+            action_dim=action_dim,
+            device=device,
+            rollout_execution=rollout_execution,
+            async_start_method=async_start_method,
+            action_transform=action_transform,
+        )
+
     requested_max_steps = int(max_steps)
     if env_backend == "official_lerobot":
         env_h = OfficialLeRobotMetaWorldGRPORollout(task=task)
@@ -152,6 +180,7 @@ def collect_rollout_group(
         raise ValueError("env_backend must be 'custom' or 'official_lerobot'")
     camera_name = _resolve_camera_name()
     flip_corner2 = _resolve_flip_corner2()
+    action_low, action_high = _action_bounds(env_h)
     old_wrapper = MetaWorldSmolVLAGRPOPolicy(
         bundle,
         task=task,
@@ -160,6 +189,9 @@ def collect_rollout_group(
         flip_corner2=flip_corner2,
         action_dim=action_dim,
         policy_module=policy_old,
+        action_transform=action_transform,
+        action_low=action_low,
+        action_high=action_high,
     )
     old_wrapper.eval()
 
@@ -170,6 +202,11 @@ def collect_rollout_group(
         traj = RolloutTrajectory(reset_seed=reset_seed, rollout_index=r)
         traj.metadata["task"] = task
         traj.metadata["env_backend"] = env_backend
+        traj.metadata["rollout_execution"] = rollout_execution
+        traj.metadata["action_transform"] = action_transform
+        traj.metadata["async_start_method"] = (
+            str(async_start_method) if rollout_execution == "vector_async" else "none"
+        )
         traj.metadata["requested_max_steps"] = requested_max_steps
         traj.metadata["resolved_max_steps"] = int(max_steps)
         if env_backend == "official_lerobot":
@@ -197,6 +234,8 @@ def collect_rollout_group(
             traj.exec_actions.append(step.exec_action_np.reshape(-1).tolist())
             traj.unsquashed_actions.append(step.unsquashed.cpu())
             traj.log_probs.append(step.log_prob.cpu())
+            traj.action_clip_fractions.append(float(step.action_clip_fraction))
+            traj.action_clip_any.append(bool(step.action_clip_any))
             if env_backend == "official_lerobot":
                 action_batch = step.exec_action_np.reshape(1, -1).astype(np.float32)
                 env_step = env_h.step(action_batch)
@@ -217,6 +256,29 @@ def collect_rollout_group(
         rollouts.append(traj)
     env_h.close()
     return rollouts
+
+
+def _action_bounds(env_h: Any) -> tuple[np.ndarray, np.ndarray]:
+    space = None
+    inner = getattr(env_h, "inner", env_h)
+    if hasattr(inner, "single_action_space"):
+        space = inner.single_action_space
+    elif hasattr(inner, "action_space"):
+        space = inner.action_space
+    elif hasattr(env_h, "inner") and hasattr(env_h.inner, "action_space"):
+        space = env_h.inner.action_space
+    if space is None or not hasattr(space, "low") or not hasattr(space, "high"):
+        adim = int(getattr(env_h, "action_dim", 0) or np.prod(env_h.inner.action_space.shape))
+        return np.full((adim,), -1.0, dtype=np.float32), np.full((adim,), 1.0, dtype=np.float32)
+    low = np.asarray(space.low, dtype=np.float32).reshape(-1)
+    high = np.asarray(space.high, dtype=np.float32).reshape(-1)
+    adim = int(getattr(env_h, "action_dim", low.size))
+    if low.size != adim and low.size % max(adim, 1) == 0:
+        low = low.reshape(-1, adim)[0]
+        high = high.reshape(-1, adim)[0]
+    if low.size != high.size:
+        raise ValueError("action_space low/high shape mismatch")
+    return low, high
 
 
 def load_bundle_for_grpo(

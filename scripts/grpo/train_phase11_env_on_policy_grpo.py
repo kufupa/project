@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +45,19 @@ def main() -> int:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--task", type=str, default="push-v3")
     p.add_argument("--env-backend", choices=("custom", "official_lerobot"), default="custom")
+    p.add_argument(
+        "--rollout-execution",
+        choices=("serial", "vector_sync", "vector_async"),
+        default="serial",
+        help="official_lerobot only: serial loops vs batched SyncVectorEnv vs batched async (forkserver)",
+    )
+    p.add_argument(
+        "--async-start-method",
+        type=str,
+        default="forkserver",
+        choices=("forkserver", "spawn"),
+        help="multiprocessing context for vector_async (override with SMOLVLA_GRPO_ASYNC_MP_CONTEXT)",
+    )
     p.add_argument("--train-seed-base", type=int, default=2000)
     p.add_argument("--start-update", type=int, default=0)
     p.add_argument("--num-updates", type=int, default=1, help="Number of updates to run from start-update")
@@ -57,6 +71,13 @@ def main() -> int:
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--init-log-std", type=float, default=-2.0)
     p.add_argument("--euler-step-noise-std", type=float, default=0.2)
+    p.add_argument(
+        "--action-transform",
+        choices=("no_tanh", "tanh_norm_ablation"),
+        default="no_tanh",
+        help="GRPO sampling transform before LeRobot postprocessor; tanh path is explicit ablation only.",
+    )
+    p.add_argument("--run-label", type=str, default="no_tanh_main")
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--grad-clip", type=float, default=1.0)
     args = p.parse_args()
@@ -85,6 +106,7 @@ def main() -> int:
         camera_name=camera_name,
         flip_corner2=flip_corner2,
         action_dim=action_dim,
+        action_transform=args.action_transform,
     )
     train_wrapper.assert_grpo_api()
     train_wrapper.set_log_std(args.init_log_std)
@@ -112,6 +134,10 @@ def main() -> int:
         "checkpoint": str(args.checkpoint),
         "task": args.task,
         "env_backend": args.env_backend,
+        "rollout_execution": args.rollout_execution,
+        "async_start_method": (
+            args.async_start_method if args.rollout_execution == "vector_async" else None
+        ),
         "requested_max_steps": args.max_steps,
         "train_seed_base": args.train_seed_base,
         "start_update": start_u,
@@ -120,11 +146,15 @@ def main() -> int:
         "group_size": args.group_size,
         "clip_eps": args.clip_eps,
         "lr": args.lr,
+        "action_transform": args.action_transform,
+        "run_label": args.run_label,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     for update in range(start_u, end_u):
+        update_t0 = time.perf_counter()
         reset_seed = int(args.train_seed_base) + int(update)
+        rollout_t0 = time.perf_counter()
         rollouts = collect_rollout_group(
             bundle=bundle,
             policy_old=old_policy,
@@ -137,7 +167,11 @@ def main() -> int:
             action_dim=action_dim,
             device=device,
             env_backend=args.env_backend,
+            rollout_execution=args.rollout_execution,
+            async_start_method=args.async_start_method,
+            action_transform=args.action_transform,
         )
+        rollout_seconds = float(time.perf_counter() - rollout_t0)
         returns = torch.tensor(
             [reward_backend.episode_return(tr) for tr in rollouts],
             dtype=torch.float32,
@@ -147,8 +181,15 @@ def main() -> int:
         success_rate = float(sum(1 for s in successes if s) / max(len(successes), 1))
         avg_ret = float(returns.mean().item())
         episode_lengths = [len(tr.rewards) for tr in rollouts]
+        num_env_steps = int(sum(episode_lengths))
         terminated_flags = [bool(tr.terminated) for tr in rollouts]
         truncated_flags = [bool(tr.truncated) for tr in rollouts]
+        clip_values = [float(v) for tr in rollouts for v in tr.action_clip_fractions]
+        clip_any_values = [bool(v) for tr in rollouts for v in tr.action_clip_any]
+        action_clip_fraction = float(sum(clip_values) / max(len(clip_values), 1))
+        action_clip_any_fraction = float(
+            sum(1 for v in clip_any_values if v) / max(len(clip_any_values), 1)
+        )
         resolved_max_steps = int(args.max_steps)
         if rollouts:
             resolved_max_steps = int(
@@ -156,6 +197,7 @@ def main() -> int:
             )
         advantages = compute_group_advantages(returns)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
+            update_seconds = float(time.perf_counter() - update_t0)
             _append_progress(
                 progress_path,
                 {
@@ -164,6 +206,12 @@ def main() -> int:
                     "reason": "zero_advantages",
                     "reset_seed": reset_seed,
                     "env_backend": args.env_backend,
+                    "rollout_execution": args.rollout_execution,
+                    "action_transform": args.action_transform,
+                    "run_label": args.run_label,
+                    "async_start_method": (
+                        args.async_start_method if args.rollout_execution == "vector_async" else None
+                    ),
                     "max_steps": args.max_steps,
                     "resolved_max_steps": resolved_max_steps,
                     "avg_return": avg_ret,
@@ -171,6 +219,12 @@ def main() -> int:
                     "successes": successes,
                     "success_rate": success_rate,
                     "episode_lengths": episode_lengths,
+                    "num_env_steps": num_env_steps,
+                    "action_clip_fraction": action_clip_fraction,
+                    "action_clip_any_fraction": action_clip_any_fraction,
+                    "rollout_seconds": rollout_seconds,
+                    "optimize_seconds": 0.0,
+                    "update_seconds": update_seconds,
                     "terminated": terminated_flags,
                     "truncated": truncated_flags,
                 },
@@ -185,6 +239,12 @@ def main() -> int:
                 "skipped": True,
                 "resolved_max_steps": resolved_max_steps,
                 "episode_lengths": episode_lengths,
+                "num_env_steps": num_env_steps,
+                "action_clip_fraction": action_clip_fraction,
+                "action_clip_any_fraction": action_clip_any_fraction,
+                "rollout_seconds": rollout_seconds,
+                "optimize_seconds": 0.0,
+                "update_seconds": update_seconds,
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
             }
@@ -205,9 +265,29 @@ def main() -> int:
                     args=vars(args),
                     extra=skipped_extra,
                 )
+            print(
+                "phase111_grpo_update",
+                f"update={update}",
+                f"mode={args.rollout_execution}",
+                f"label={args.run_label}",
+                f"action_transform={args.action_transform}",
+                f"seed={reset_seed}",
+                f"avg_return={avg_ret:.6g}",
+                f"success_rate={success_rate:.3f}",
+                f"episode_lengths={episode_lengths}",
+                f"env_steps={num_env_steps}",
+                f"clip_frac={action_clip_fraction:.4f}",
+                f"clip_any_frac={action_clip_any_fraction:.4f}",
+                f"rollout_s={rollout_seconds:.2f}",
+                "opt_s=0.00",
+                f"update_s={update_seconds:.2f}",
+                "skipped=zero_advantages",
+                flush=True,
+            )
             continue
 
         bundle.policy.train()
+        optimize_t0 = time.perf_counter()
         for _epoch in range(args.update_epochs):
             optimizer.zero_grad()
             for gi, traj in enumerate(rollouts):
@@ -231,6 +311,8 @@ def main() -> int:
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
             optimizer.step()
+        optimize_seconds = float(time.perf_counter() - optimize_t0)
+        update_seconds = float(time.perf_counter() - update_t0)
 
         _append_progress(
             progress_path,
@@ -238,6 +320,12 @@ def main() -> int:
                 "update": update,
                 "reset_seed": reset_seed,
                 "env_backend": args.env_backend,
+                "rollout_execution": args.rollout_execution,
+                "action_transform": args.action_transform,
+                "run_label": args.run_label,
+                "async_start_method": (
+                    args.async_start_method if args.rollout_execution == "vector_async" else None
+                ),
                 "max_steps": args.max_steps,
                 "resolved_max_steps": resolved_max_steps,
                 "avg_return": avg_ret,
@@ -246,6 +334,12 @@ def main() -> int:
                 "success_rate": success_rate,
                 "advantages": advantages.detach().cpu().tolist(),
                 "episode_lengths": episode_lengths,
+                "num_env_steps": num_env_steps,
+                "action_clip_fraction": action_clip_fraction,
+                "action_clip_any_fraction": action_clip_any_fraction,
+                "rollout_seconds": rollout_seconds,
+                "optimize_seconds": optimize_seconds,
+                "update_seconds": update_seconds,
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
             },
@@ -266,6 +360,9 @@ def main() -> int:
                 "successes": successes,
                 "resolved_max_steps": resolved_max_steps,
                 "episode_lengths": episode_lengths,
+                "num_env_steps": num_env_steps,
+                "action_clip_fraction": action_clip_fraction,
+                "action_clip_any_fraction": action_clip_any_fraction,
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
             },
@@ -285,8 +382,28 @@ def main() -> int:
                     "episode_lengths": episode_lengths,
                     "terminated": terminated_flags,
                     "truncated": truncated_flags,
+                    "action_clip_fraction": action_clip_fraction,
+                    "action_clip_any_fraction": action_clip_any_fraction,
                 },
             )
+        print(
+            "phase111_grpo_update",
+            f"update={update}",
+            f"mode={args.rollout_execution}",
+            f"label={args.run_label}",
+            f"action_transform={args.action_transform}",
+            f"seed={reset_seed}",
+            f"avg_return={avg_ret:.6g}",
+            f"success_rate={success_rate:.3f}",
+            f"episode_lengths={episode_lengths}",
+            f"env_steps={num_env_steps}",
+            f"clip_frac={action_clip_fraction:.4f}",
+            f"clip_any_frac={action_clip_any_fraction:.4f}",
+            f"rollout_s={rollout_seconds:.2f}",
+            f"opt_s={optimize_seconds:.2f}",
+            f"update_s={update_seconds:.2f}",
+            flush=True,
+        )
 
     print(f"Done. Artifacts under {out}")
     return 0

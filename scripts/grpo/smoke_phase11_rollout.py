@@ -22,6 +22,17 @@ def main() -> int:
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--task", type=str, default="push-v3")
     p.add_argument("--env-backend", choices=("custom", "official_lerobot"), default="custom")
+    p.add_argument(
+        "--rollout-execution",
+        choices=("serial", "vector_sync", "vector_async"),
+        default="serial",
+    )
+    p.add_argument(
+        "--async-start-method",
+        type=str,
+        default="forkserver",
+        choices=("forkserver", "spawn"),
+    )
     p.add_argument("--group-size", type=int, default=2)
     p.add_argument("--max-steps", type=int, default=10)
     p.add_argument("--seed", type=int, default=2000, help="reset_seed base for the group")
@@ -44,6 +55,8 @@ def main() -> int:
         action_dim=action_dim,
         device=device,
         env_backend=args.env_backend,
+        rollout_execution=args.rollout_execution,
+        async_start_method=args.async_start_method,
     )
 
     if len(rollouts) != int(args.group_size):
@@ -62,6 +75,7 @@ def main() -> int:
     print(
         "phase11_rollout_smoke_ok",
         f"env_backend={args.env_backend}",
+        f"rollout_execution={args.rollout_execution}",
         f"group_size={len(rollouts)}",
         f"steps={[len(t.rewards) for t in rollouts]}",
         f"successes={[any(bool(s) for s in t.successes) for t in rollouts]}",
