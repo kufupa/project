@@ -64,13 +64,14 @@ def run_sweep(
     eval_seed_start: int,
     top_k: int = 0,
     top_k_episodes: int = 50,
+    sweep_name: str = "eval_sweep",
 ) -> dict[str, Any]:
     checkpoints_dir = run_dir / "checkpoints"
     ckpts = sorted(checkpoints_dir.glob("update_*.pt"), key=_checkpoint_update)
     if not ckpts:
         raise ValueError(f"no checkpoints found under {checkpoints_dir}")
 
-    sweep_dir = run_dir / "eval_sweep"
+    sweep_dir = run_dir / sweep_name
     sweep_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for ckpt in ckpts:
@@ -102,6 +103,7 @@ def run_sweep(
         "task": task,
         "episodes": episodes,
         "eval_seed_start": eval_seed_start,
+        "sweep_name": sweep_name,
         "rows": rows_sorted,
     }
 
@@ -154,6 +156,7 @@ def main() -> int:
     parser.add_argument("--eval-seed-start", type=int, default=1000)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-k-episodes", type=int, default=50)
+    parser.add_argument("--sweep-name", type=str, default="eval_sweep")
     args = parser.parse_args()
 
     result = run_sweep(
@@ -164,6 +167,7 @@ def main() -> int:
         eval_seed_start=args.eval_seed_start,
         top_k=args.top_k,
         top_k_episodes=args.top_k_episodes,
+        sweep_name=args.sweep_name,
     )
     print(
         "phase111_eval_sweep_ok",
