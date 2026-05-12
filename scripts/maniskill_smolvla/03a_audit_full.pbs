@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#PBS -N msm_audit
+#PBS -q v1_small24
+#PBS -l select=1:ncpus=4:mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_audit.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_DATA_PYTHON}"
+
+export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_FULL_DATA_DIR="${MSM_FULL_DATA_DIR:-${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data}"
+
+log="$(msm_stage_log audit_full)"
+(
+  "${MSM_DATA_PYTHON}" "${MSM_SCRIPT_ROOT}/audit_npz_contract.py" \
+    --root "${MSM_FULL_DATA_DIR}" \
+    --min-episodes 16384 \
+    --manifest "${MSM_RUN_ROOT}/manifests/audit_full.json"
+  echo "MSM_AUDIT_FULL_DONE data_dir=${MSM_FULL_DATA_DIR}"
+) 2>&1 | tee "${log}"

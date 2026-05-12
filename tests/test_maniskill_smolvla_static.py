@@ -14,6 +14,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         "00_build_envs.pbs",
         "01_data_probe.pbs",
         "02_data_full.pbs",
+        "03a_audit_full.pbs",
         "03_convert_full.pbs",
         "04_sft_smoke.pbs",
         "05_sft_train.pbs",
@@ -67,14 +68,30 @@ def test_converter_uses_lerobot_7d_contract() -> None:
     assert "dataset.finalize()" in converter
     assert "--append-completion-frames" in converter
     assert "appended_completion_frames" in converter
-    assert "--append-completion-frames 15" in _read("03_convert_full.pbs")
+    assert "--state-gripper-mode" in converter
+    assert 'default="previous-action"' in converter
+    assert "default=0" in converter
+    assert "--append-completion-frames 0" in _read("03_convert_full.pbs")
+    assert "--state-gripper-mode previous-action" in _read("03_convert_full.pbs")
+    assert "--no-filter-small-actions" in _read("03_convert_full.pbs")
 
 
-def test_sft_keeps_pretrained_padding_dims() -> None:
+def test_sft_uses_explicit_one_camera_7d_policy_contract() -> None:
+    args_path = MSM / "smolvla_policy_args.sh"
+    assert args_path.exists()
+    args = args_path.read_text(encoding="utf-8")
+    assert "observation.images.front" in args
+    assert '"shape":[3,480,640]' in args.replace(" ", "")
+    assert '"shape":[7]' in args.replace(" ", "")
+    assert "--policy.n_action_steps=1" in args
+    assert "--policy.chunk_size=50" in args
+    assert "--policy.max_state_dim=32" in args
+    assert "--policy.max_action_dim=32" in args
     combined = _read("04_sft_smoke.pbs") + "\n" + _read("05_sft_train.pbs")
     assert "--policy.path=lerobot/smolvla_base" in combined
-    assert "--policy.max_state_dim=32" in combined
-    assert "--policy.max_action_dim=32" in combined
+    assert 'source "${MSM_SCRIPT_ROOT}/smolvla_policy_args.sh"' in combined
+    assert '"${MSM_SMOLVLA_POLICY_ARGS[@]}"' in combined
+    assert "check_smolvla_policy_contract.py" in _read("04_sft_smoke.pbs")
     assert "--save_freq=\"${MSM_SFT_SAVE_FREQ}\"" in combined
 
 
@@ -85,7 +102,12 @@ def test_benchmark_uses_maniskill_rollout() -> None:
     assert "gym.make" in evaluator
     assert "SmolVLAPolicy.from_pretrained" in evaluator
     assert "make_pre_post_processors" in evaluator
-    assert "policy.select_action" in evaluator
+    assert "def select_fresh_first_action" in evaluator
+    assert "policy.predict_action_chunk" in evaluator
+    assert "policy.select_action" not in evaluator
+    assert "--sustained-success-steps" in evaluator
+    assert "consecutive_successes" in evaluator
+    assert 'MSM_EVAL_EPISODES="${MSM_EVAL_EPISODES:-25}"' in benchmark
     assert "success_rate" in evaluator
 
 
@@ -96,6 +118,19 @@ def test_autopilot_supports_host_retry_and_exit_status() -> None:
     assert "vnode=${host}:gpu_type=RTX6000" in autopilot
     assert 'tolower($1) ~ /exit_status' in autopilot
     assert 'qsub -l "select=${select_spec}"' in autopilot
+    assert "03a_audit_full.pbs" in autopilot
+    assert "pbs_gpu_snapshot.py" in autopilot
+    assert "-q v1_gpu72" in autopilot
+    assert "Failure classification hints" in autopilot
+    assert "smolvla_maniskill_handoff.md" in autopilot
+
+
+def test_audit_full_runs_on_cpu_pbs() -> None:
+    audit = _read("03a_audit_full.pbs")
+    assert "#PBS -q v1_small24" in audit
+    assert "ngpus" not in audit
+    assert "audit_npz_contract.py" in audit
+    assert "MSM_AUDIT_FULL_DONE" in audit
 
 
 def test_env_rebuilds_toppra_without_native_avx512() -> None:
@@ -113,3 +148,10 @@ def test_gitignore_covers_large_artifacts() -> None:
     gitignore = (PROJECT / ".gitignore").read_text(encoding="utf-8")
     for pattern in ["artifacts/", "*.npz", "*.safetensors", "*.pt", "*.mp4"]:
         assert pattern in gitignore
+
+
+def test_data_full_seed_is_configurable_and_manifested() -> None:
+    data_full = _read("02_data_full.pbs")
+    assert 'MSM_FULL_SEED="${MSM_FULL_SEED:-100}"' in data_full
+    assert '--seed "${MSM_FULL_SEED}"' in data_full
+    assert '"seed=${MSM_FULL_SEED}"' in data_full
