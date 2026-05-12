@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #PBS -N msm_data
 #PBS -q v1_gpu72
-#PBS -l select=1:ncpus=64:mem=256gb:ngpus=1:gpu_type=RTX6000
+#PBS -l select=1:ncpus=16:mem=64gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=72:00:00
 #PBS -j oe
 #PBS -o artifacts/smolvla_maniskill/msm_data.out
