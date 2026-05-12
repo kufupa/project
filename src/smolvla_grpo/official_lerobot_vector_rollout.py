@@ -112,6 +112,9 @@ def collect_official_lerobot_vector_rollout_group(
                 pass
 
         active = np.ones((group_size,), dtype=np.bool_)
+        rngs = [torch.Generator(device=device) for _ in range(group_size)]
+        for r, gen in enumerate(rngs):
+            gen.manual_seed(int(reset_seed) * 1000003 + r * 7919)
         for _step in range(max_steps_i):
             if not bool(np.any(active)):
                 break
@@ -119,9 +122,8 @@ def collect_official_lerobot_vector_rollout_group(
             with torch.no_grad():
                 batch = old_wrapper.sample_action_batch_from_proc(
                     proc,
-                    reset_seed=int(reset_seed),
-                    rollout_index_offset=0,
                     n_envs=int(group_size),
+                    rngs=rngs,
                 )
             env_batch = env_h.step_batch(batch.exec_action_np.astype(np.float32, copy=False))
             obs = env_batch.observation
