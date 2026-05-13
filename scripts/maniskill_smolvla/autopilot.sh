@@ -157,14 +157,27 @@ monitor_job() {
 main() {
   echo "[msm-autopilot] run_root=${MSM_RUN_ROOT}"
   local start_index="${MSM_START_STAGE_INDEX:-0}"
+  local max_retries="${MSM_STAGE_MAX_RETRIES:-2}"
   for idx in "${!STAGES[@]}"; do
     if (( idx < start_index )); then
       continue
     fi
     stage="${STAGES[$idx]}"
-    job_id="$(submit_stage "${stage}")"
-    echo "[msm-autopilot] submitted stage=${stage} job=${job_id}"
-    monitor_job "${stage}" "${job_id}"
+    local attempt=0
+    while true; do
+      attempt=$((attempt + 1))
+      job_id="$(submit_stage "${stage}")"
+      echo "[msm-autopilot] submitted stage=${stage} attempt=${attempt} job=${job_id}"
+      if monitor_job "${stage}" "${job_id}"; then
+        break
+      fi
+      if (( attempt > max_retries )); then
+        echo "[msm-autopilot] stage=${stage} exceeded max_retries=${max_retries}"
+        return 1
+      fi
+      echo "[msm-autopilot] retry stage=${stage} next_attempt=$((attempt + 1))"
+      sleep "${MSM_AUTOPILOT_RETRY_SLEEP_SECONDS:-300}"
+    done
   done
   echo "MSM_AUTOPILOT_DONE run_root=${MSM_RUN_ROOT}"
 }
