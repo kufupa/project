@@ -332,6 +332,7 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
         build_subgoal_schedule,
         compute_reset_parity,
         frame_index_to_filename,
+        select_required_oracle_frame_indices,
         should_fail_reset_parity,
     )
     from smolvla_grpo.phase12_rollout import collect_phase12_episode
@@ -362,6 +363,14 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             max_frame_1based=len(oracle["frames"]),
             chunk_len=int(args.chunk_len),
             success_frame_1based=oracle["success_frame_1based"],
+        )
+        _write_selected_frames_png(
+            oracle_dir / "frames",
+            oracle["frames"],
+            select_required_oracle_frame_indices(
+                max_frame_1based=len(oracle["frames"]),
+                schedule=schedule,
+            ),
         )
         goals: list[Phase12Goal] = []
         for subgoal_index, frame_idx in enumerate(schedule.primary_frames_1based):
@@ -535,13 +544,17 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
         env_h.close()
 
 
-def _write_frames_png(frames_dir: Path, frames: list[Any]) -> None:
+def _write_selected_frames_png(frames_dir: Path, frames: list[Any], frame_indices_1based: list[int]) -> None:
     import imageio.v2 as imageio
     import numpy as np
+    from smolvla_grpo.phase12_goals import frame_index_to_filename
 
     frames_dir.mkdir(parents=True, exist_ok=True)
-    for i, frame in enumerate(frames):
-        imageio.imwrite(frames_dir / f"frame_{i:06d}.png", np.asarray(frame, dtype=np.uint8))
+    for frame_index in frame_indices_1based:
+        idx = int(frame_index)
+        if idx < 1 or idx > len(frames):
+            raise ValueError(f"frame index {idx} out of range for {len(frames)} frames")
+        imageio.imwrite(frames_dir / frame_index_to_filename(idx), np.asarray(frames[idx - 1], dtype=np.uint8))
 
 
 def _rollout_phase12_oracle(
@@ -578,7 +591,6 @@ def _rollout_phase12_oracle(
             success_frame_1based = int(step_idx + 2)
         if bool(step.success or step.terminated or step.truncated):
             break
-    _write_frames_png(output_dir / "frames", frames)
     video_path = write_phase12_episode_video(
         video_path=output_dir / "oracle_baseline.mp4",
         frames=frames,

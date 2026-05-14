@@ -65,6 +65,34 @@ def build_subgoal_schedule(
     )
 
 
+def select_required_oracle_frame_indices(
+    *,
+    max_frame_1based: int,
+    schedule: Phase12GoalSchedule,
+    include_initial_pair: bool = True,
+    neighbor_radius: int = 1,
+) -> list[int]:
+    max_frame = int(max_frame_1based)
+    if max_frame < 1:
+        raise ValueError("max_frame_1based must be >= 1")
+    radius = int(neighbor_radius)
+    if radius < 0:
+        raise ValueError("neighbor_radius must be >= 0")
+
+    selected: set[int] = set()
+    if include_initial_pair:
+        selected.update(idx for idx in (1, 2) if idx <= max_frame)
+
+    for goal_frame in schedule.primary_frames_1based:
+        center = int(goal_frame)
+        for offset in range(-radius, radius + 1):
+            idx = center + offset
+            if 1 <= idx <= max_frame:
+                selected.add(idx)
+
+    return sorted(selected)
+
+
 def compute_reset_parity(
     init_image: np.ndarray,
     reset_image: np.ndarray,
