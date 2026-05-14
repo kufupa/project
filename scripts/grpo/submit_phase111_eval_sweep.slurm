@@ -7,6 +7,10 @@
 #SBATCH --output=phase111_eval_sweep_%j.out
 #SBATCH --error=phase111_eval_sweep_%j.err
 #SBATCH --export=NIL
+#
+# Slurm manual: with --export=NIL you must NOT add explicit VAR=value after NIL
+# (invalid; can trigger user env retrieval / requeue+held). Pass optional sweep
+# bounds as positional args 9 (min_update) and 10 (max_update) instead.
 
 set -euo pipefail
 
@@ -54,6 +58,12 @@ EVAL_SEED_START="${5:-1000}"
 TOP_K="${6:-0}"
 TOP_K_EPISODES="${7:-50}"
 SWEEP_NAME="${8:-eval_sweep_current}"
+# Optional min/max update indices (inclusive). Prefer $9/$10 so sbatch can stay
+# `--export=NIL` only. Env fallbacks only help when submitter used a non-NIL export.
+SWEEP_MIN_UPDATE="${PHASE111_SWEEP_MIN_UPDATE:-}"
+SWEEP_MAX_UPDATE="${PHASE111_SWEEP_MAX_UPDATE:-}"
+if [[ $# -ge 9 && -n "${9:-}" ]]; then SWEEP_MIN_UPDATE="${9}"; fi
+if [[ $# -ge 10 && -n "${10:-}" ]]; then SWEEP_MAX_UPDATE="${10}"; fi
 
 if [[ -z "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
   echo "error: RUN_DIR missing or not a directory: ${RUN_DIR}" >&2
@@ -72,16 +82,28 @@ echo "[phase111-eval-sweep] eval_seed_start=${EVAL_SEED_START}"
 echo "[phase111-eval-sweep] top_k=${TOP_K}"
 echo "[phase111-eval-sweep] top_k_episodes=${TOP_K_EPISODES}"
 echo "[phase111-eval-sweep] sweep_name=${SWEEP_NAME}"
+echo "[phase111-eval-sweep] min_update=${SWEEP_MIN_UPDATE:-<none>}"
+echo "[phase111-eval-sweep] max_update=${SWEEP_MAX_UPDATE:-<none>}"
 
-"${GRPO_PYTHON}" scripts/grpo/eval_phase111_grpo_sweep.py \
-  --base-checkpoint "${BASE_CKPT}" \
-  --run-dir "${RUN_DIR}" \
-  --task "${TASK}" \
-  --episodes "${EPISODES}" \
-  --eval-seed-start "${EVAL_SEED_START}" \
-  --top-k "${TOP_K}" \
-  --top-k-episodes "${TOP_K_EPISODES}" \
+SWEEP_PY_ARGS=(
+  scripts/grpo/eval_phase111_grpo_sweep.py
+  --base-checkpoint "${BASE_CKPT}"
+  --run-dir "${RUN_DIR}"
+  --task "${TASK}"
+  --episodes "${EPISODES}"
+  --eval-seed-start "${EVAL_SEED_START}"
+  --top-k "${TOP_K}"
+  --top-k-episodes "${TOP_K_EPISODES}"
   --sweep-name "${SWEEP_NAME}"
+)
+if [[ -n "${SWEEP_MIN_UPDATE}" ]]; then
+  SWEEP_PY_ARGS+=(--min-update "${SWEEP_MIN_UPDATE}")
+fi
+if [[ -n "${SWEEP_MAX_UPDATE}" ]]; then
+  SWEEP_PY_ARGS+=(--max-update "${SWEEP_MAX_UPDATE}")
+fi
+
+"${GRPO_PYTHON}" "${SWEEP_PY_ARGS[@]}"
 
 test -f "${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
 
