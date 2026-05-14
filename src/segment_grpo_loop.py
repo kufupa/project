@@ -477,17 +477,23 @@ def _to_tensor(
         except TypeError as exc:
             return None, f"Failed to inspect {label} latent trace length: {exc}"
     try:
-        latent_np = np.asarray(latents, dtype=np.float32)
+        if torch.is_tensor(latents):
+            lat = latents.detach().to(device=device, dtype=torch.float32)
+        elif isinstance(latents, (list, tuple)) and all(torch.is_tensor(x) for x in latents):
+            lat = torch.stack([x.detach().to(device=device, dtype=torch.float32) for x in latents], dim=0)
+        else:
+            latent_np = np.asarray(latents, dtype=np.float32)
+            if latent_np.size == 0:
+                return None, f"{label} latent trace is empty."
+            if latent_np.ndim == 0:
+                return None, f"{label} latent tensor is a scalar; expected a trailing feature dimension for decode."
+            lat = torch.as_tensor(latent_np, dtype=torch.float32, device=device)
     except Exception as exc:
-        return None, f"Failed to convert {label} latents to numpy: {exc}"
-    if latent_np.size == 0:
+        return None, f"Failed to convert {label} latents to tensor: {exc}"
+    if lat.numel() == 0:
         return None, f"{label} latent trace is empty."
-    if latent_np.ndim == 0:
+    if lat.ndim == 0:
         return None, f"{label} latent tensor is a scalar; expected a trailing feature dimension for decode."
-    try:
-        lat = torch.as_tensor(latent_np, dtype=torch.float32, device=device)
-    except Exception as exc:
-        return None, f"Failed to convert {label} latents to torch tensor: {exc}"
     try:
         normalized = lat
         while normalized.ndim > 6:
@@ -1515,6 +1521,12 @@ def _extract_scoring_latent(z_pred: Any, mode: str = "visual") -> torch.Tensor:
                 visual = torch.as_tensor(np.asarray(visual), dtype=torch.float32)
             if not torch.is_tensor(proprio):
                 proprio = torch.as_tensor(np.asarray(proprio), dtype=torch.float32)
+            if visual.ndim >= 2 and proprio.ndim >= 2:
+                visual = visual.reshape(int(visual.shape[0]), int(visual.shape[1]), -1)
+                proprio = proprio.reshape(int(proprio.shape[0]), int(proprio.shape[1]), -1)
+            else:
+                visual = visual.reshape(-1)
+                proprio = proprio.reshape(-1)
             candidate = torch.cat([visual, proprio], dim=-1)
             if candidate.ndim < 1:
                 raise RuntimeError("Concatenated scoring latent is empty.")
