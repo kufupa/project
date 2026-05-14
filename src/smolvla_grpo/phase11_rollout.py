@@ -286,8 +286,9 @@ def load_bundle_for_grpo(
     *,
     task: str = "push-v3",
     env_backend: str = "custom",
+    n_action_steps: int = 1,
 ) -> tuple[_SmolVLABundle, int]:
-    bundle = _load_smolvla_bundle(checkpoint)
+    bundle = _load_smolvla_bundle(checkpoint, n_action_steps=int(n_action_steps))
     if env_backend == "official_lerobot":
         env_probe = OfficialLeRobotMetaWorldGRPORollout(task=task)
     elif env_backend == "custom":
