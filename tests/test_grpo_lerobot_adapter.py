@@ -63,6 +63,56 @@ class FakeVectorEnv:
         self.closed = True
 
 
+class FakeDeferredVectorEnv:
+    single_action_space = FakeVectorEnv.FakeSingleActionSpace()
+    metadata = {"render_fps": 80}
+
+    def __init__(self, fns):
+        self.envs = [fn() for fn in fns]
+        self.num_envs = len(self.envs)
+        self.closed = False
+        self.reset_seeds = None
+
+    def reset(self, seed=None):
+        self.reset_seeds = seed
+        obs_rows = []
+        info_rows = []
+        for env, item_seed in zip(self.envs, seed, strict=True):
+            obs, info = env.reset(seed=item_seed)
+            obs_rows.append(obs)
+            info_rows.append(info)
+        return {
+            "pixels": np.stack([obs["pixels"] for obs in obs_rows], axis=0),
+            "agent_pos": np.stack([obs["agent_pos"] for obs in obs_rows], axis=0),
+        }, {"info": info_rows}
+
+    def step(self, action):
+        outs = [env.step(np.asarray(action[i], dtype=np.float32)) for i, env in enumerate(self.envs)]
+        obs, rew, term, trunc, info = zip(*outs, strict=True)
+        return (
+            {
+                "pixels": np.stack([o["pixels"] for o in obs], axis=0),
+                "agent_pos": np.stack([o["agent_pos"] for o in obs], axis=0),
+            },
+            np.asarray(rew, dtype=np.float32),
+            np.asarray(term, dtype=bool),
+            np.asarray(trunc, dtype=bool),
+            {"final_info": np.asarray(info, dtype=object)},
+        )
+
+    def call(self, name):
+        if name == "_max_episode_steps":
+            return tuple(getattr(env, "_max_episode_steps", 500) for env in self.envs)
+        if name == "task_description":
+            return tuple(getattr(env, "task_description", "push the puck to the goal") for env in self.envs)
+        return tuple(getattr(env, name)() for env in self.envs)
+
+    def close(self):
+        self.closed = True
+        for env in self.envs:
+            env.close()
+
+
 def _install_fake_official_lerobot(
     monkeypatch,
     *,
@@ -114,6 +164,70 @@ def _install_fake_official_lerobot(
     return fake_vec
 
 
+def _install_fake_deferred_deps(monkeypatch):
+    class FakeSpaces:
+        class Box:
+            def __init__(self, *, low, high, shape, dtype):
+                self.low = np.full(shape, low, dtype=dtype)
+                self.high = np.full(shape, high, dtype=dtype)
+                self.shape = tuple(shape)
+                self.dtype = dtype
+
+        class Dict(dict):
+            pass
+
+    class FakeExpertPolicy:
+        def get_action(self, raw_obs):
+            return np.asarray(raw_obs[:4], dtype=np.float32) * 0.1
+
+    class FakeInner:
+        max_path_length = 500
+        model = type("Model", (), {"cam_pos": {2: [0.0, 0.0, 0.0]}})()
+
+        def __init__(self, *args, **kwargs):
+            self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
+
+        def set_task(self, task):
+            self.task = task
+
+        def reset(self, seed=None):
+            del seed
+            self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
+            return self.raw.copy(), {}
+
+        def step(self, action):
+            self.raw = np.asarray(action, dtype=np.float64).reshape(-1)
+            self.raw = np.pad(self.raw, (0, max(0, 5 - self.raw.size)), constant_values=0.0)
+            return self.raw.copy(), 1.0, False, False, {"success": False}
+
+        def render(self):
+            return np.full((8, 8, 3), 7, dtype=np.uint8)
+
+        def close(self):
+            return None
+
+    class FakeMT1:
+        def __init__(self, task, seed=42):
+            del seed
+            self.train_classes = {task: FakeInner}
+            self.train_tasks = [object()]
+
+    class FakeMetaworldModule:
+        TASK_DESCRIPTIONS = {"push-v3": "push the puck to the goal"}
+        TASK_POLICY_MAPPING = {"push-v3": FakeExpertPolicy}
+
+    import gymnasium
+    import gymnasium.vector
+    import lerobot.envs.metaworld as lr_mw
+    import metaworld
+
+    monkeypatch.setattr(gymnasium, "spaces", FakeSpaces)
+    monkeypatch.setattr(gymnasium.vector, "SyncVectorEnv", FakeDeferredVectorEnv)
+    monkeypatch.setattr(lr_mw, "TASK_DESCRIPTIONS", FakeMetaworldModule.TASK_DESCRIPTIONS)
+    monkeypatch.setattr(lr_mw, "TASK_POLICY_MAPPING", FakeMetaworldModule.TASK_POLICY_MAPPING)
+    monkeypatch.setattr(metaworld, "MT1", FakeMT1)
+
+
 class IdentityBundle:
     device = "cpu"
 
@@ -146,6 +260,38 @@ def test_official_adapter_uses_make_env_and_vector_contract(monkeypatch):
     assert fake_vec.actions[-1].shape == (1, 4)
     rollout.close()
     assert fake_vec.closed is True
+
+
+def test_deferred_metaworld_env_stores_raw_obs_for_expert_action(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3")
+    try:
+        with pytest.raises(RuntimeError, match="before reset"):
+            env.expert_action()
+        obs, _info = env.reset(seed=123)
+        np.testing.assert_allclose(obs["agent_pos"], np.array([1.0, 2.0, 3.0, 4.0]))
+        np.testing.assert_allclose(env.last_agent_pos(), np.array([1.0, 2.0, 3.0, 4.0]))
+        np.testing.assert_allclose(env.expert_action(), np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
+        assert env.render_frame().shape == (8, 8, 3)
+    finally:
+        env.close()
+
+
+def test_official_adapter_expert_oracle_uses_deferred_single_env(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="push-v3", enable_expert_oracle=True)
+    try:
+        obs = rollout.reset(77)
+        assert obs["pixels"].shape == (1, 8, 8, 3)
+        np.testing.assert_allclose(rollout.last_agent_pos(), np.array([1.0, 2.0, 3.0, 4.0]))
+        np.testing.assert_allclose(rollout.expert_action(), np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
+        assert rollout.render_frame().shape == (8, 8, 3)
+    finally:
+        rollout.close()
 
 
 def test_official_adapter_step_batch_matches_n_envs(monkeypatch):
