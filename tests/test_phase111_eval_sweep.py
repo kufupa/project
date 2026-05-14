@@ -58,3 +58,49 @@ def test_run_sweep_collects_rows_and_topk(tmp_path, monkeypatch) -> None:
     assert result["topk"]["rows"][0]["update"] == 10
     out_path = run_dir / "eval_sweep" / "eval_sweep_summary.json"
     assert out_path.exists()
+
+
+def test_run_sweep_min_max_filters_checkpoints(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    run_dir = tmp_path / "run"
+    ckpt_dir = run_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    for u in (5, 10, 15):
+        (ckpt_dir / f"update_{u:04d}.pt").write_text("x", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def fake_run(cmd, check, cwd=None):  # noqa: ANN001
+        assert cwd == str(mod._REPO)  # noqa: SLF001
+        out_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        ckpt = Path(cmd[cmd.index("--grpo-checkpoint") + 1]).name
+        calls.append(ckpt)
+        episodes = int(cmd[cmd.index("--episodes") + 1])
+        update = int(ckpt.replace("update_", "").replace(".pt", ""))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "pc_success": float(update),
+            "avg_sum_reward": float(update) + 0.5,
+            "avg_max_reward": float(update) + 1.0,
+            "episodes": episodes,
+        }
+        (out_dir / "eval_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    result = mod.run_sweep(
+        base_checkpoint="dummy",
+        run_dir=run_dir,
+        task="push-v3",
+        episodes=10,
+        eval_seed_start=1000,
+        top_k=0,
+        sweep_name="eval_filtered",
+        min_update=10,
+        max_update=10,
+    )
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["update"] == 10
+    assert calls == ["update_0010.pt"]
+    assert result["min_update"] == 10
+    assert result["max_update"] == 10

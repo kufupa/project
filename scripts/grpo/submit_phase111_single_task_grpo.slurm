@@ -151,8 +151,14 @@ assert manifest["run_label"]
 if manifest["rollout_execution"] == "vector_async":
     assert manifest["async_start_method"] == "forkserver"
 assert rows, "progress.jsonl has no rows"
-assert len(rows) == num_updates, f"expected {num_updates} progress rows, got {len(rows)}"
+end_update = int(manifest["end_update"])
+assert len(rows) == end_update, (
+    f"expected {end_update} progress rows (manifest end_update), got {len(rows)}"
+)
 row = rows[-1]
+assert int(row["update"]) == end_update - 1, (
+    f"expected last progress update index {end_update - 1}, got {row.get('update')}"
+)
 assert row["env_backend"] == "official_lerobot"
 assert row["rollout_execution"] == manifest["rollout_execution"]
 assert row["action_transform"] == manifest["action_transform"]
@@ -168,12 +174,13 @@ assert "action_clip_any_fraction" in row
 assert "rollout_seconds" in row
 assert "optimize_seconds" in row
 assert "update_seconds" in row
-if num_updates >= 100:
-    assert (out / "checkpoints" / "update_0100.pt").is_file()
+last_ckpt = out / "checkpoints" / f"update_{end_update:04d}.pt"
+assert last_ckpt.is_file(), f"missing terminal checkpoint {last_ckpt}"
+this_run_updates = end_update - int(manifest["start_update"])
 print(
     "PHASE111_SINGLE_TASK_GRPO_OK",
     f"rows={len(rows)}",
-    f"expected_updates={num_updates}",
+    f"expected_updates={this_run_updates}",
     f"success_rate={row['success_rate']}",
 )
 PY

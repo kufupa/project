@@ -65,11 +65,22 @@ def run_sweep(
     top_k: int = 0,
     top_k_episodes: int = 50,
     sweep_name: str = "eval_sweep",
+    min_update: int | None = None,
+    max_update: int | None = None,
 ) -> dict[str, Any]:
     checkpoints_dir = run_dir / "checkpoints"
     ckpts = sorted(checkpoints_dir.glob("update_*.pt"), key=_checkpoint_update)
     if not ckpts:
         raise ValueError(f"no checkpoints found under {checkpoints_dir}")
+    if min_update is not None:
+        ckpts = [c for c in ckpts if _checkpoint_update(c) >= int(min_update)]
+    if max_update is not None:
+        ckpts = [c for c in ckpts if _checkpoint_update(c) <= int(max_update)]
+    if not ckpts:
+        raise ValueError(
+            "no checkpoints remain after min_update/max_update filter "
+            f"(min_update={min_update}, max_update={max_update})"
+        )
 
     sweep_dir = run_dir / sweep_name
     sweep_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +116,8 @@ def run_sweep(
         "eval_seed_start": eval_seed_start,
         "sweep_name": sweep_name,
         "rows": rows_sorted,
+        "min_update": int(min_update) if min_update is not None else None,
+        "max_update": int(max_update) if max_update is not None else None,
     }
 
     if top_k > 0:
@@ -157,6 +170,18 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-k-episodes", type=int, default=50)
     parser.add_argument("--sweep-name", type=str, default="eval_sweep")
+    parser.add_argument(
+        "--min-update",
+        type=int,
+        default=None,
+        help="If set, only evaluate checkpoints with update index >= this value.",
+    )
+    parser.add_argument(
+        "--max-update",
+        type=int,
+        default=None,
+        help="If set, only evaluate checkpoints with update index <= this value.",
+    )
     args = parser.parse_args()
 
     result = run_sweep(
@@ -168,6 +193,8 @@ def main() -> int:
         top_k=args.top_k,
         top_k_episodes=args.top_k_episodes,
         sweep_name=args.sweep_name,
+        min_update=args.min_update,
+        max_update=args.max_update,
     )
     print(
         "phase111_eval_sweep_ok",
