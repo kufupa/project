@@ -984,3 +984,12 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - Submitted CPU PBS supervisor `2857972.pbs-7` via `07_autonomous_supervisor.pbs`.
 - Supervisor is running on `cx3-13-3` and queued CPU audit child `2857984.pbs-7`.
 - RTX6000 snapshot before queueing showed `count=0`; GPU stages must remain queued/waiting for `gpu_type=RTX6000`.
+
+## 2026-05-26T20:50Z Full Audit RCA
+
+- Full audit `2857984.pbs-7` failed intentionally on duplicate detection.
+- Root cause: `96` decoded duplicate trajectory signatures among `16,400` raw demos.
+- Shapes valid: `bad_shape_count=0`, `513,662` frames, RGB `480x640x3`, 7D state/action.
+- Impact: duplicates are ~0.6% of episodes; not a schema blocker, but should not overweight SFT.
+- Fix: converter now deduplicates decoded signatures by default and records skipped duplicate count.
+- Validation: focused SmolVLA tests pass (`17 passed`).
