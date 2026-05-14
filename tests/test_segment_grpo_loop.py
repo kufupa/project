@@ -300,6 +300,48 @@ def test_score_chunk_by_goal_latent_uses_scoring_latent_mode_concat() -> None:
     assert distance == 0.0
 
 
+def test_score_chunk_by_goal_latent_concat_flattens_modalities_before_concatenating() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _ScoringModel:
+        def encode(self, obs: dict[str, object]) -> dict[str, torch.Tensor]:
+            del obs
+            return {
+                "visual": torch.zeros((1, 1, 1, 2, 2, 2), dtype=torch.float32),
+                "proprio": torch.zeros((1, 1, 1), dtype=torch.float32),
+            }
+
+        def unroll(self, z: object, act_suffix: torch.Tensor, debug: bool = False) -> dict[str, torch.Tensor]:
+            del z, act_suffix, debug
+            return {
+                "visual": torch.arange(8, dtype=torch.float32).view(1, 1, 1, 2, 2, 2),
+                "proprio": torch.tensor([[[8.0, 9.0]]], dtype=torch.float32),
+            }
+
+    bundle = WMBundle(
+        model=_ScoringModel(),
+        preprocessor=SimpleNamespace(),
+        proprio_dim=2,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    goal_latent = torch.arange(10, dtype=torch.float32)
+    chunk = np.zeros((1, 4), dtype=np.float32)
+
+    distance = score_chunk_by_goal_latent(
+        wm_bundle=bundle,
+        image=np.zeros((64, 64, 3), dtype=np.uint8),
+        proprio=np.zeros(2, dtype=np.float32),
+        chunk_actions=chunk,
+        goal_latent=goal_latent,
+        chunk_len=1,
+        wm_rollout_mode="batched",
+        wm_scoring_latent="concat",
+    )
+
+    assert distance == 0.0
+
+
 def test_wm_iterative_rollout_calls_unroll_per_action() -> None:
     torch = pytest.importorskip("torch")
 
@@ -368,7 +410,7 @@ def test_iterative_rollout_keeps_structured_score_decode_traces_and_scores_from_
         planner_action_dim=4,
         device=torch.device("cpu"),
     )
-    goal_latent = torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+    goal_latent = torch.tensor([3.0, 4.0, 5.0], dtype=torch.float32)
     chunk_len = 3
     chunk = np.zeros((chunk_len, 4), dtype=np.float32)
 
@@ -385,7 +427,7 @@ def test_iterative_rollout_keeps_structured_score_decode_traces_and_scores_from_
 
     assert model.unroll_calls == chunk_len
     assert len(score_trace.step_vectors) == chunk_len
-    np.testing.assert_allclose(score_trace.final_vector, np.array([3.0, 3.0, 3.0], dtype=np.float32))
+    np.testing.assert_allclose(score_trace.final_vector, np.array([3.0, 4.0, 5.0], dtype=np.float32))
     np.testing.assert_allclose(score_trace.step_vectors[-1], score_trace.final_vector)
     assert np.array_equal(decode_trace.visual_latents[0], np.array([[1.0, 2.0, 3.0]], dtype=np.float32))
     assert np.array_equal(decode_trace.visual_latents[-1], np.array([[3.0, 4.0, 5.0]], dtype=np.float32))
@@ -532,6 +574,40 @@ def test_decode_selected_trace_prefers_fused_modal_and_accepts_structured_latent
     assert set(model.last_payload.keys()) == {"visual", "proprio"}
     assert len(frames) == 2
     assert frames[0].shape == (2, 2, 3)
+
+
+def test_decode_selected_trace_accepts_cuda_or_tensor_latent_lists() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Decoder:
+        def decode_unroll(self, payload: dict[str, object], batch: bool = False) -> np.ndarray:
+            assert batch is True
+            assert torch.is_tensor(payload["visual"])
+            assert torch.is_tensor(payload["proprio"])
+            return np.zeros((1, 2, 3, 2, 2), dtype=np.float32)
+
+    bundle = WMBundle(
+        model=_Decoder(),
+        preprocessor=SimpleNamespace(),
+        proprio_dim=4,
+        planner_action_dim=4,
+        device=torch.device("cpu"),
+    )
+    trace = DecodeTrace(
+        visual_latents=[
+            torch.zeros(1, 1, 1, 2, 2, 4),
+            torch.ones(1, 1, 1, 2, 2, 4),
+        ],
+        proprio_latents=[
+            torch.zeros(1, 1, 1, 4),
+            torch.ones(1, 1, 1, 4),
+        ],
+    )
+
+    frames, failure = _decode_latent_trace_to_frames(bundle, trace)
+
+    assert failure is None
+    assert len(frames) == 2
 
 
 def test_decode_visual_only_must_not_use_single_key_dict() -> None:
