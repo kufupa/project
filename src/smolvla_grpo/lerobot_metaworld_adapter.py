@@ -38,6 +38,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self.observation_width = int(observation_width)
         self.observation_height = int(observation_height)
         self._env: Any | None = None
+        self._last_raw_obs: np.ndarray | None = None
         self._max_episode_steps = 500
         self.task_description = lr_mw.TASK_DESCRIPTIONS[self.task]
         self.expert_policy = lr_mw.TASK_POLICY_MAPPING[self.task]()
@@ -103,6 +104,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self._ensure_env()
         super().reset(seed=seed)
         raw_obs, _info = self._env.reset(seed=seed)
+        self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         return self._format_raw_obs(raw_obs), {"is_success": False}
 
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
@@ -111,6 +113,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         if action_np.ndim != 1:
             raise ValueError(f"Expected action shape (action_dim,), got {action_np.shape}")
         raw_obs, reward, done, truncated, info = self._env.step(action_np)
+        self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         is_success = bool(info.get("success", 0))
         terminated = bool(done or is_success)
         info.update({"task": self.task, "done": bool(done), "is_success": is_success})
@@ -119,6 +122,19 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
             info["final_info"] = {"task": self.task, "done": bool(done), "is_success": is_success}
             self.reset()
         return observation, float(reward), terminated, bool(truncated), info
+
+    def expert_action(self) -> np.ndarray:
+        if self._last_raw_obs is None:
+            raise RuntimeError("expert_action called before reset")
+        return np.asarray(self.expert_policy.get_action(self._last_raw_obs), dtype=np.float32)
+
+    def last_agent_pos(self) -> np.ndarray:
+        if self._last_raw_obs is None:
+            raise RuntimeError("last_agent_pos called before reset")
+        return np.asarray(self._last_raw_obs[:4], dtype=np.float32)
+
+    def render_frame(self) -> np.ndarray:
+        return self.render()
 
     def close(self) -> None:
         if self._env is not None:
@@ -308,6 +324,7 @@ class OfficialLeRobotMetaWorldGRPORollout:
         n_envs: int = 1,
         use_async_envs: bool = False,
         async_start_method: str = "forkserver",
+        enable_expert_oracle: bool = False,
     ) -> None:
         from lerobot.envs.configs import MetaworldEnv
         from lerobot.envs.factory import make_env
@@ -320,10 +337,23 @@ class OfficialLeRobotMetaWorldGRPORollout:
             raise ValueError("n_envs must be >= 1")
         self.use_async_envs = bool(use_async_envs)
         self.async_start_method = str(async_start_method)
+        self.enable_expert_oracle = bool(enable_expert_oracle)
 
         self.env_cfg = MetaworldEnv(task=task, obs_type=obs_type)
 
-        if self.n_envs == 1:
+        if self.enable_expert_oracle:
+            if self.n_envs != 1:
+                raise ValueError("enable_expert_oracle requires n_envs=1")
+            from gymnasium.vector import SyncVectorEnv
+
+            envs = {
+                task: {
+                    0: SyncVectorEnv(
+                        [lambda tn=task: DeferredLeRobotMetaworldEnv(task=tn, **self.env_cfg.gym_kwargs)]
+                    )
+                }
+            }
+        elif self.n_envs == 1:
             envs = make_env(
                 self.env_cfg,
                 n_envs=1,
@@ -449,6 +479,15 @@ class OfficialLeRobotMetaWorldGRPORollout:
 
     def close(self) -> None:
         self.vec_env.close()
+
+    def expert_action(self) -> np.ndarray:
+        return np.asarray(self.vec_env.call("expert_action")[0], dtype=np.float32)
+
+    def last_agent_pos(self) -> np.ndarray:
+        return np.asarray(self.vec_env.call("last_agent_pos")[0], dtype=np.float32)
+
+    def render_frame(self) -> np.ndarray:
+        return np.asarray(self.vec_env.call("render_frame")[0])
 
 
 def resolve_lerobot_horizon(
