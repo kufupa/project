@@ -655,7 +655,7 @@ def _resolve_policy_device(torch_module: Any) -> Any:
     return torch_module.device(policy_dev_raw)
 
 
-def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
+def _load_smolvla_bundle(checkpoint: str, *, n_action_steps: int = 1) -> _SmolVLABundle:
     t0 = time.perf_counter()
     _smolvla_eval_log(f"smolvla_eval: load_bundle_begin checkpoint={checkpoint!r}")
     _agent_debug_ndjson(
@@ -707,7 +707,7 @@ def _load_smolvla_bundle(checkpoint: str) -> _SmolVLABundle:
     )
     model_kwargs: dict[str, Any] = {
         "device": str(device),
-        "n_action_steps": 1,
+        "n_action_steps": int(n_action_steps),
         "expert_width_multiplier": 0.5,
         "self_attn_every_n_layers": 0,
         "load_vlm_weights": load_vlm,
