@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from scripts.grpo import train_phase12_wm_chunk_grpo as trainer
@@ -36,6 +37,17 @@ def test_phase12_trainer_has_no_real_mode_not_implemented_guard() -> None:
     assert "PHASE12_WM_CHUNK_GRPO_TRAIN_DONE" in source
     assert "CarryMode.SIM" not in source
     assert 'carry_mode="sim"' in source
+
+
+def test_write_selected_frames_png_only_writes_requested_indices(tmp_path) -> None:
+    frames = [np.full((2, 2, 3), i, dtype=np.uint8) for i in range(4)]
+
+    trainer._write_selected_frames_png(tmp_path, frames, [1, 3])
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "frame_000000.png",
+        "frame_000002.png",
+    ]
 
 
 def test_manifest_records_phase12_contract(tmp_path) -> None:
