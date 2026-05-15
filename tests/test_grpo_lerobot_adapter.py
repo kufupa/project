@@ -186,12 +186,19 @@ def _install_fake_deferred_deps(monkeypatch):
 
         def __init__(self, *args, **kwargs):
             self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
+            self.seeded_rand_vec = False
+            self.seed_calls: list[int] = []
+            self.reset_calls: list[int | None] = []
 
         def set_task(self, task):
             self.task = task
 
+        def seed(self, seed):
+            self.seed_calls.append(int(seed))
+            return [int(seed)]
+
         def reset(self, seed=None):
-            del seed
+            self.reset_calls.append(None if seed is None else int(seed))
             self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
             return self.raw.copy(), {}
 
@@ -201,7 +208,7 @@ def _install_fake_deferred_deps(monkeypatch):
             return self.raw.copy(), 1.0, False, False, {"success": False}
 
         def render(self):
-            return np.full((8, 8, 3), 7, dtype=np.uint8)
+            return np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
 
         def close(self):
             return None
@@ -279,6 +286,62 @@ def test_deferred_metaworld_env_stores_raw_obs_for_expert_action(monkeypatch):
         env.close()
 
 
+def test_deferred_metaworld_reset_observation_pixels_are_lerobot_vh(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3", camera_name="corner2")
+    try:
+        obs, _info = env.reset(seed=123)
+        raw = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
+
+        np.testing.assert_array_equal(np.asarray(obs["pixels"]), np.flip(raw, (0, 1)))
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_env_seeds_underlying_random_vector(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3")
+    try:
+        env.reset(seed=2000)
+        inner = env._env  # noqa: SLF001
+        assert inner.seed_calls[-1] == 2000
+        assert inner.reset_calls[-1] == 2000
+        assert inner.seeded_rand_vec is True
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_env_does_not_autoreset_terminal_step(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3")
+    try:
+        env.reset(seed=123)
+        inner = env._env  # noqa: SLF001
+
+        def terminal_step(action):
+            inner.raw = np.asarray(action, dtype=np.float64).reshape(-1)
+            inner.raw = np.pad(inner.raw, (0, max(0, 5 - inner.raw.size)), constant_values=0.0)
+            return inner.raw.copy(), 1.0, False, False, {"success": True}
+
+        inner.step = terminal_step
+        before_reset_calls = list(inner.reset_calls)
+        obs, _reward, terminated, _truncated, info = env.step(np.array([9.0, 8.0, 7.0, 6.0], dtype=np.float32))
+
+        assert terminated is True
+        assert info["final_info"]["is_success"] is True
+        assert inner.reset_calls == before_reset_calls
+        np.testing.assert_allclose(obs["agent_pos"], np.array([9.0, 8.0, 7.0, 6.0]))
+        np.testing.assert_allclose(env.last_agent_pos(), np.array([9.0, 8.0, 7.0, 6.0]))
+    finally:
+        env.close()
+
+
 def test_official_adapter_expert_oracle_uses_deferred_single_env(monkeypatch):
     _install_fake_deferred_deps(monkeypatch)
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
@@ -290,6 +353,25 @@ def test_official_adapter_expert_oracle_uses_deferred_single_env(monkeypatch):
         np.testing.assert_allclose(rollout.last_agent_pos(), np.array([1.0, 2.0, 3.0, 4.0]))
         np.testing.assert_allclose(rollout.expert_action(), np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
         assert rollout.render_frame().shape == (8, 8, 3)
+    finally:
+        rollout.close()
+
+
+def test_expert_oracle_rollout_reset_exposes_lerobot_vh_pixels(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(
+        task="push-v3",
+        n_envs=1,
+        enable_expert_oracle=True,
+    )
+    try:
+        obs = rollout.reset(123)
+        raw = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
+        policy_frame = np.asarray(obs["pixels"][0])
+
+        np.testing.assert_array_equal(policy_frame, np.flip(raw, (0, 1)))
     finally:
         rollout.close()
 

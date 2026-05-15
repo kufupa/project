@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
@@ -24,6 +26,8 @@ from smolvla_grpo.phase12_logging import (
     write_jsonl_row,
     write_manifest,
 )
+from smolvla_grpo.phase12_diagnostics import build_decode_artifacts, write_phase12_episode_video
+from smolvla_grpo.phase12_pixels import policy_rgb_from_obs, wm_rgb_from_policy_rgb_corner2
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -101,6 +105,10 @@ def build_manifest(args: argparse.Namespace) -> dict:
         "lr": float(args.lr),
         "clip_eps": float(args.clip_eps),
         "save_every": int(args.save_every),
+        "phase12_policy_frame_contract": "lerobot_corner2_vhflip",
+        "phase12_wm_frame_contract": "jepa_corner2_vflip",
+        "phase12_goal_frame_contract": "jepa_corner2_vflip",
+        "phase12_decode_real_frame_source": "wm_frames",
     }
 
 
@@ -308,12 +316,182 @@ def _merge_phase12_decode_metadata(meta: dict[str, Any], decode_metadata: dict[s
         meta["wm_decode_status"] = decode_metadata["decode_status"]
 
 
+def _build_phase12_selected_decode_artifacts(
+    *,
+    args: Any,
+    episode: Any,
+    episode_dir: Path,
+    rollout_env: Any,
+    score_inputs: dict[tuple[int, int], dict[str, Any]],
+    wm_bundle: Any,
+    action_dim: int,
+    meta: dict[str, Any],
+) -> None:
+    if not bool(getattr(args, "save_wm_decodes", False)) or not getattr(episode, "segments", []):
+        meta.setdefault("wm_decode_status", "disabled")
+        return
+    first_segment = episode.segments[0]
+    key = (0, int(first_segment.selected_candidate_index))
+    decode_input = score_inputs.get(key)
+    if decode_input is None:
+        if bool(getattr(args, "strict_decode", False)):
+            raise RuntimeError("strict Phase12 decode requested but selected decode input was not recorded")
+        meta.setdefault("wm_decode_status", "missing_input")
+        return
+    real_frames = list(getattr(rollout_env, "wm_frames", rollout_env.frames))
+    decode_result = build_decode_artifacts(
+        decode_fn=lambda: _decode_phase12_prediction_frames(
+            wm_bundle,
+            image=decode_input["image"],
+            proprio=decode_input["proprio"],
+            actions=decode_input["actions"],
+            mode=args.goal_latent_mode,
+        ),
+        output_dir=episode_dir,
+        real_frames=real_frames,
+        strict_decode=bool(args.strict_decode),
+        segment_index=0,
+        selected_candidate_index=int(first_segment.selected_candidate_index),
+        env_steps_per_wm_step=max(1, int(wm_bundle.planner_action_dim) // max(1, int(action_dim))),
+        carried_steps=min(int(args.chunk_len), max(0, len(real_frames) - 1)),
+    )
+    _merge_phase12_decode_metadata(meta, decode_result.metadata)
+
+
 def _count_values(values) -> dict[str, int]:
     out: dict[str, int] = {}
     for value in values:
         key = str(value)
         out[key] = out.get(key, 0) + 1
     return out
+
+
+def _phase12_agent_debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        import os
+        import time
+
+        if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+            return
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_train_{os.getpid()}_{int(time.time() * 1000)}",
+            "timestamp": int(time.time() * 1000),
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        with open("/vol/bitbucket/aa6622/.logs/debug-588128.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+def _phase12_frame_debug(frame: Any) -> dict[str, Any]:
+    import hashlib
+    import numpy as np
+
+    arr = np.asarray(frame)
+    return {
+        "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
+        "mean": float(arr.mean()) if arr.size else 0.0,
+        "sha16": hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()[:16],
+    }
+
+
+def _phase12_vector_debug(vec: Any, *, max_items: int = 16) -> dict[str, Any]:
+    import numpy as np
+
+    arr = np.asarray(vec, dtype=np.float64).reshape(-1)
+    return {
+        "shape": list(arr.shape),
+        "values": [float(x) for x in arr[: int(max_items)]],
+        "max_abs": float(np.max(np.abs(arr))) if arr.size else 0.0,
+    }
+
+
+def _save_phase12_reset_debug_artifacts(
+    *,
+    output_dir: Path,
+    oracle_frame: Any,
+    reset_frame: Any,
+    oracle_raw_obs: Any,
+    reset_raw_obs: Any,
+    reset_metrics: dict[str, float],
+    reset_seed: int,
+) -> dict[str, Any]:
+    import json
+    import numpy as np
+    import imageio.v2 as imageio
+
+    debug_dir = Path(output_dir) / "debug_reset_frame_compare" / f"seed_{int(reset_seed)}_gate"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    oracle_arr = np.asarray(oracle_frame, dtype=np.uint8)
+    reset_arr = np.asarray(reset_frame, dtype=np.uint8)
+    diff = np.abs(oracle_arr.astype(np.int16) - reset_arr.astype(np.int16)).astype(np.uint8)
+    diff_x50 = np.clip(diff.astype(np.int16) * 50, 0, 255).astype(np.uint8)
+
+    oracle_path = debug_dir / "oracle_frame0_raw.png"
+    reset_path = debug_dir / "reset_frame0_raw.png"
+    diff_path = debug_dir / "oracle_vs_reset_absdiff_x50.png"
+    report_path = debug_dir / "reset_parity_vectors.json"
+    imageio.imwrite(oracle_path, oracle_arr)
+    imageio.imwrite(reset_path, reset_arr)
+    imageio.imwrite(diff_path, diff_x50)
+
+    oracle_vec = np.asarray(oracle_raw_obs, dtype=np.float64).reshape(-1)
+    reset_vec = np.asarray(reset_raw_obs, dtype=np.float64).reshape(-1)
+    raw_diff = np.abs(oracle_vec - reset_vec) if oracle_vec.shape == reset_vec.shape else np.asarray([], dtype=np.float64)
+    report = {
+        "reset_seed": int(reset_seed),
+        "reset_metrics": reset_metrics,
+        "oracle_raw_obs": _phase12_vector_debug(oracle_vec, max_items=80),
+        "reset_raw_obs": _phase12_vector_debug(reset_vec, max_items=80),
+        "raw_obs_shape_match": list(oracle_vec.shape) == list(reset_vec.shape),
+        "raw_obs_max_abs_diff": float(np.max(raw_diff)) if raw_diff.size else None,
+        "raw_obs_mean_abs_diff": float(np.mean(raw_diff)) if raw_diff.size else None,
+        "paths": {
+            "oracle_frame0_raw": str(oracle_path),
+            "reset_frame0_raw": str(reset_path),
+            "oracle_vs_reset_absdiff_x50": str(diff_path),
+            "vector_report": str(report_path),
+        },
+    }
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
+def _phase12_reset_gate_decision(
+    *,
+    reset_metrics: dict[str, float],
+    reset_debug_report: dict[str, Any],
+    raw_obs_max_threshold: float = 1e-9,
+    proprio_max_threshold: float = 1e-5,
+    image_mean_threshold: float = 1.0,
+) -> dict[str, Any]:
+    """Strict on simulator state, tolerant of sparse MuJoCo RGB render jitter."""
+
+    raw_max = reset_debug_report.get("raw_obs_max_abs_diff")
+    raw_mismatch = raw_max is None or float(raw_max) > float(raw_obs_max_threshold)
+    proprio_mismatch = float(reset_metrics.get("proprio_max_abs_diff", 0.0)) > float(proprio_max_threshold)
+    gross_image_mismatch = float(reset_metrics.get("image_mean_abs_diff", 0.0)) > float(image_mean_threshold)
+    old_strict_image_gate_would_fail = (
+        float(reset_metrics.get("image_mean_abs_diff", 0.0)) > 0.01
+        or float(reset_metrics.get("image_max_abs_diff", 0.0)) > 2.0
+    )
+    return {
+        "fail": bool(raw_mismatch or proprio_mismatch or gross_image_mismatch),
+        "raw_mismatch": bool(raw_mismatch),
+        "proprio_mismatch": bool(proprio_mismatch),
+        "gross_image_mismatch": bool(gross_image_mismatch),
+        "old_strict_image_gate_would_fail": bool(old_strict_image_gate_would_fail),
+        "raw_obs_max_threshold": float(raw_obs_max_threshold),
+        "proprio_max_threshold": float(proprio_max_threshold),
+        "image_mean_threshold": float(image_mean_threshold),
+    }
 
 
 def collect_phase12_training_episode(**kwargs: Any) -> Any:
@@ -326,7 +504,6 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
         OfficialLeRobotMetaWorldGRPORollout,
         resolve_lerobot_horizon,
     )
-    from smolvla_grpo.phase12_diagnostics import build_decode_artifacts, write_phase12_episode_video
     from smolvla_grpo.phase12_goals import (
         Phase12Goal,
         build_subgoal_schedule,
@@ -384,7 +561,7 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             )
             encoded = _encode_structured(
                 wm_bundle,
-                oracle["frames"][frame_idx - 1],
+                oracle["wm_frames"][frame_idx - 1],
                 oracle["proprios"][frame_idx - 1],
                 mode=args.goal_latent_mode,
             )
@@ -403,21 +580,56 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             )
 
         reset_obs = env_h.reset(reset_seed)
-        reset_frame = np.asarray(env_h.render_frame())
+        reset_frame = policy_rgb_from_obs(reset_obs)
         reset_proprio = np.asarray(env_h.last_agent_pos(), dtype=np.float32)
+        reset_raw_obs = np.asarray(env_h.last_raw_obs(), dtype=np.float64)
         reset_metrics = compute_reset_parity(
             oracle["frames"][0],
             reset_frame,
             oracle["proprios"][0],
             reset_proprio,
         )
-        if args.reset_mismatch == "fail" and should_fail_reset_parity(
-            reset_metrics,
-            image_mean_threshold=1.0,
-            image_max_threshold=255.0,
-            proprio_max_threshold=1e-5,
-        ):
-            raise RuntimeError(f"Phase12 reset mismatch for seed {reset_seed}: {reset_metrics}")
+        reset_debug_report = _save_phase12_reset_debug_artifacts(
+            output_dir=output_dir,
+            oracle_frame=oracle["frames"][0],
+            reset_frame=reset_frame,
+            oracle_raw_obs=oracle["raw_obs"][0],
+            reset_raw_obs=reset_raw_obs,
+            reset_metrics=reset_metrics,
+            reset_seed=reset_seed,
+        )
+        reset_gate = _phase12_reset_gate_decision(
+            reset_metrics=reset_metrics,
+            reset_debug_report=reset_debug_report,
+        )
+        # region agent log
+        _phase12_agent_debug_log(
+            run_id=__import__("os").environ.get("AGENT_DEBUG_RUN_ID", "phase12-decode-post-fix-bounded"),
+            hypothesis_id="H4,H5,H6,H7",
+            location="scripts/grpo/train_phase12_wm_chunk_grpo.py:collect_phase12_training_episode",
+            message="phase12 reset parity full-state comparison before selected rollout",
+            data={
+                "reset_seed": int(reset_seed),
+                "reset_metrics": reset_metrics,
+                "oracle_frame0": _phase12_frame_debug(oracle["frames"][0]),
+                "reset_frame": _phase12_frame_debug(reset_frame),
+                "oracle_proprio0": _phase12_vector_debug(oracle["proprios"][0]),
+                "reset_proprio": _phase12_vector_debug(reset_proprio),
+                "oracle_raw_obs0": _phase12_vector_debug(oracle["raw_obs"][0], max_items=80),
+                "reset_raw_obs": _phase12_vector_debug(reset_raw_obs, max_items=80),
+                "raw_obs_shape_match": reset_debug_report["raw_obs_shape_match"],
+                "raw_obs_max_abs_diff": reset_debug_report["raw_obs_max_abs_diff"],
+                "raw_obs_mean_abs_diff": reset_debug_report["raw_obs_mean_abs_diff"],
+                "reset_gate": reset_gate,
+                "debug_artifact_paths": reset_debug_report["paths"],
+            },
+        )
+        # endregion
+        if args.reset_mismatch == "fail" and reset_gate["fail"]:
+            raise RuntimeError(
+                f"Phase12 reset mismatch for seed {reset_seed}: "
+                f"{reset_metrics} gate={reset_gate} artifacts={reset_debug_report['paths']}"
+            )
 
         rollout_env = _Phase12SelectedRolloutEnv(
             env_h=env_h,
@@ -459,6 +671,24 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             goal_latent = {"visual": goal.goal_visual}
             if args.goal_latent_mode == "visual_proprio":
                 goal_latent["proprio"] = goal.goal_proprio
+            # region agent log
+            _phase12_agent_debug_log(
+                run_id=__import__("os").environ.get("AGENT_DEBUG_RUN_ID", "phase12-bounded-wm-issue"),
+                hypothesis_id="H1,H2,H3",
+                location="scripts/grpo/train_phase12_wm_chunk_grpo.py:collect_phase12_training_episode.score_fn",
+                message="Phase12 candidate selected for WM scoring input audit",
+                data={
+                    "segment_index": int(segment_index),
+                    "candidate_index": int(candidate.candidate_index),
+                    "goal_frame_index_1based": int(goal.frame_index_1based),
+                    "goal_frame_path": str(goal.frame_path),
+                    "companion_frame_index_1based": None
+                    if goal.companion_frame_index_1based is None
+                    else int(goal.companion_frame_index_1based),
+                    "action_metadata": dict(candidate.action_metadata),
+                },
+            )
+            # endregion
             score_inputs[(int(segment_index), int(candidate.candidate_index))] = {
                 "image": root_observation["image"],
                 "proprio": root_observation["proprio"],
@@ -514,30 +744,16 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                 "oracle_manifest_path": str(oracle["manifest_path"]),
             }
         )
-        if bool(args.save_wm_decodes) and episode.segments:
-            first_segment = episode.segments[0]
-            key = (0, int(first_segment.selected_candidate_index))
-            decode_input = score_inputs.get(key)
-            if decode_input is not None:
-                decode_result = build_decode_artifacts(
-                    decode_fn=lambda: _decode_phase12_prediction_frames(
-                        wm_bundle,
-                        image=decode_input["image"],
-                        proprio=decode_input["proprio"],
-                        actions=decode_input["actions"],
-                        mode=args.goal_latent_mode,
-                    ),
-                    output_dir=episode_dir,
-                    real_frames=rollout_env.frames,
-                    strict_decode=bool(args.strict_decode),
-                    segment_index=0,
-                    selected_candidate_index=int(first_segment.selected_candidate_index),
-                    env_steps_per_wm_step=max(1, int(wm_bundle.planner_action_dim) // max(1, action_dim)),
-                    carried_steps=min(int(args.chunk_len), max(0, len(rollout_env.frames) - 1)),
-                )
-                _merge_phase12_decode_metadata(meta, decode_result.metadata)
-            elif bool(args.strict_decode):
-                raise RuntimeError("strict Phase12 decode requested but selected decode input was not recorded")
+        _build_phase12_selected_decode_artifacts(
+            args=args,
+            episode=episode,
+            episode_dir=episode_dir,
+            rollout_env=rollout_env,
+            score_inputs=score_inputs,
+            wm_bundle=wm_bundle,
+            action_dim=action_dim,
+            meta=meta,
+        )
         meta.setdefault("wm_decode_status", "disabled")
         return _with_episode_metadata(episode, meta)
     finally:
@@ -567,14 +783,15 @@ def _rollout_phase12_oracle(
 ) -> dict[str, Any]:
     import json
     import numpy as np
-    from smolvla_grpo.phase12_diagnostics import write_phase12_episode_video
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     obs = env_h.reset(int(seed))
-    del obs
-    frames: list[np.ndarray] = [np.asarray(env_h.render_frame(), dtype=np.uint8)]
+    policy_frame = policy_rgb_from_obs(obs)
+    frames: list[np.ndarray] = [policy_frame]
+    wm_frames: list[np.ndarray] = [wm_rgb_from_policy_rgb_corner2(policy_frame)]
     proprios: list[np.ndarray] = [np.asarray(env_h.last_agent_pos(), dtype=np.float32)]
+    raw_obs: list[np.ndarray] = [np.asarray(env_h.last_raw_obs(), dtype=np.float64)]
     actions: list[list[float]] = []
     rewards: list[float] = []
     successes: list[bool] = []
@@ -585,8 +802,11 @@ def _rollout_phase12_oracle(
         actions.append(action.reshape(-1).astype(float).tolist())
         rewards.append(float(step.reward))
         successes.append(bool(step.success))
-        frames.append(np.asarray(env_h.render_frame(), dtype=np.uint8))
+        policy_frame = policy_rgb_from_obs(step.observation)
+        frames.append(policy_frame)
+        wm_frames.append(wm_rgb_from_policy_rgb_corner2(policy_frame))
         proprios.append(np.asarray(env_h.last_agent_pos(), dtype=np.float32))
+        raw_obs.append(np.asarray(env_h.last_raw_obs(), dtype=np.float64))
         if bool(step.success) and success_frame_1based is None:
             success_frame_1based = int(step_idx + 2)
         if bool(step.success or step.terminated or step.truncated):
@@ -603,16 +823,21 @@ def _rollout_phase12_oracle(
         "seed": int(seed),
         "max_steps": int(max_steps),
         "frame_count": len(frames),
+        "wm_frame_count": len(wm_frames),
         "action_count": len(actions),
         "success_any": any(successes),
         "success_frame_1based": success_frame_1based,
         "video_path": str(video_path),
+        "policy_frame_contract": "lerobot_corner2_vhflip",
+        "wm_frame_contract": "jepa_corner2_vflip",
     }
     manifest_path = output_dir / "oracle_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {
         "frames": frames,
+        "wm_frames": wm_frames,
         "proprios": proprios,
+        "raw_obs": raw_obs,
         "actions": actions,
         "rewards": rewards,
         "successes": successes,
@@ -637,9 +862,11 @@ class _Phase12SelectedRolloutEnv:
         self.bundle = bundle
         self.seed = int(seed)
         self._obs = initial_obs
-        self._frame = initial_frame
+        self._frame = np.asarray(initial_frame, dtype=np.uint8)
+        self._wm_frame = wm_rgb_from_policy_rgb_corner2(self._frame)
         self._proprio = initial_proprio
-        self.frames: list[Any] = [initial_frame]
+        self.frames: list[Any] = [self._frame]
+        self.wm_frames: list[Any] = [self._wm_frame]
         self.rewards: list[float] = []
         self.successes: list[bool] = []
         self.action_space = getattr(env_h.inner, "single_action_space", None)
@@ -652,7 +879,8 @@ class _Phase12SelectedRolloutEnv:
             "id": f"seed{self.seed}_step{len(self.rewards)}",
             "seed": self.seed,
             "obs": self._obs,
-            "image": self._frame,
+            "image": self._wm_frame,
+            "policy_image": self._frame,
             "proprio": self._proprio,
             "proc": self.env_h.build_proc(self._obs, bundle=self.bundle),
         }
@@ -663,9 +891,11 @@ class _Phase12SelectedRolloutEnv:
         action_batch = np.asarray(action, dtype=np.float32).reshape(1, -1)
         step = self.env_h.step(action_batch)
         self._obs = step.observation
-        self._frame = np.asarray(self.env_h.render_frame(), dtype=np.uint8)
+        self._frame = policy_rgb_from_obs(step.observation)
+        self._wm_frame = wm_rgb_from_policy_rgb_corner2(self._frame)
         self._proprio = np.asarray(self.env_h.last_agent_pos(), dtype=np.float32)
         self.frames.append(self._frame)
+        self.wm_frames.append(self._wm_frame)
         self.rewards.append(float(step.reward))
         self.successes.append(bool(step.success))
         info = dict(step.info)
@@ -729,8 +959,10 @@ def _decode_phase12_prediction_frames(
             latent = latent["visual"]
         visual_latents: list[Any] = []
         proprio_latents: list[Any] = []
+        decode_step_shapes: list[dict[str, Any]] = []
         for t in range(int(action_t.shape[0])):
-            latent = wm_bundle.model.unroll(latent, act_suffix=action_t[t : t + 1], debug=False)
+            unroll_out = wm_bundle.model.unroll(latent, act_suffix=action_t[t : t + 1], debug=False)
+            latent = _next_latent_state_after_unroll(unroll_out)
             visual = _structured_field(latent, "visual")
             proprio_latent = _structured_field(latent, "proprio")
             if visual is not None:
@@ -739,7 +971,6 @@ def _decode_phase12_prediction_frames(
                     proprio_latents.append(proprio_latent)
             else:
                 visual_latents.append(latent)
-            latent = _next_latent_state_after_unroll(latent)
             if isinstance(latent, dict) and mode == "visual_proprio":
                 try:
                     from tensordict import TensorDict
@@ -752,6 +983,48 @@ def _decode_phase12_prediction_frames(
                     pass
             elif isinstance(latent, dict) and mode == "visual_only_ablation":
                 latent = latent["visual"]
+            if len(decode_step_shapes) < 8:
+                decode_step_shapes.append(
+                    {
+                        "step": int(t),
+                        "act_suffix_shape": [int(x) for x in action_t[t : t + 1].shape],
+                        "visual_shape": [int(x) for x in visual.shape] if hasattr(visual, "shape") else None,
+                        "proprio_shape": [int(x) for x in proprio_latent.shape] if hasattr(proprio_latent, "shape") else None,
+                    }
+                )
+        # region agent log
+        try:
+            import json as _json
+            import os as _os
+            import time as _time
+
+            if _os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() in {"1", "true", "yes"}:
+                payload = {
+                    "sessionId": "588128",
+                    "id": f"phase12_decode_{_os.getpid()}_{int(_time.time() * 1000)}",
+                    "timestamp": int(_time.time() * 1000),
+                    "runId": _os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-decode-post-fix"),
+                    "hypothesisId": "H2",
+                    "location": "scripts/grpo/train_phase12_wm_chunk_grpo.py:_decode_phase12_prediction_frames",
+                    "message": "phase12 decode final latent trace built",
+                    "data": {
+                        "actions_shape": list(actions_np.shape),
+                        "normalized_shape": list(normalized.shape),
+                        "packed_shape": list(packed.shape),
+                        "action_t_shape": [int(x) for x in action_t.shape],
+                        "env_dim": int(env_dim),
+                        "wm_dim": int(wm_dim),
+                        "factor": int(factor),
+                        "visual_latent_count": int(len(visual_latents)),
+                        "proprio_latent_count": int(len(proprio_latents)),
+                        "decode_step_shapes": decode_step_shapes,
+                    },
+                }
+                with open("/vol/bitbucket/aa6622/.logs/debug-588128.log", "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps(payload, sort_keys=True) + "\n")
+        except Exception:
+            pass
+        # endregion
     frames, failure = _decode_latent_trace_to_frames(
         wm_bundle,
         DecodeTrace(visual_latents=visual_latents, proprio_latents=proprio_latents),

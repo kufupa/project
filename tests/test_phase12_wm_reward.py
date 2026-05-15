@@ -96,6 +96,58 @@ def test_score_phase12_chunk_reduces_time_major_unroll_context_between_steps() -
     assert score.final_proprio_distance == 0.0
 
 
+def test_score_phase12_chunk_packs_five_env_actions_into_one_wm_action() -> None:
+    class PackedActionWM(FakeWM):
+        planner_action_dim = 20
+
+        class Preprocessor:
+            action_mean = np.zeros(4, dtype=np.float32)
+            action_std = np.ones(4, dtype=np.float32)
+
+        preprocessor = Preprocessor()
+
+        class Model:
+            action_dim = 20
+
+            def __init__(self) -> None:
+                self.actions: list[torch.Tensor] = []
+
+            def encode(self, obs):
+                del obs
+                return {
+                    "visual": torch.zeros(1, 1, 1, dtype=torch.float32),
+                    "proprio": torch.zeros(1, 1, 1, dtype=torch.float32),
+                }
+
+            def unroll(self, z, *, act_suffix, debug=False):
+                del debug
+                self.actions.append(act_suffix.detach().cpu())
+                delta = act_suffix.float().sum().reshape(1, 1, 1)
+                return {
+                    "visual": z["visual"] + delta,
+                    "proprio": z["proprio"] + delta,
+                }
+
+        model = Model()
+
+    wm = PackedActionWM()
+    actions = np.arange(20, dtype=np.float32).reshape(5, 4)
+    score_phase12_chunk_with_wm(
+        wm_bundle=wm,
+        image=np.zeros((8, 8, 3), dtype=np.uint8),
+        proprio=np.zeros(1, dtype=np.float32),
+        chunk_actions=actions,
+        goal={"visual": torch.zeros(1, 1, 1), "proprio": torch.zeros(1, 1, 1)},
+        candidate_index=0,
+        proprio_alpha=0.1,
+        mode="visual_proprio",
+    )
+
+    assert len(wm.model.actions) == 1
+    assert tuple(wm.model.actions[0].shape) == (1, 1, 20)
+    np.testing.assert_allclose(wm.model.actions[0].numpy().reshape(20), actions.reshape(20))
+
+
 def test_phase12_wm_reward_module_does_not_import_old_concat_scorer() -> None:
     source = Path("src/smolvla_grpo/phase12_wm_reward.py").read_text(encoding="utf-8")
 

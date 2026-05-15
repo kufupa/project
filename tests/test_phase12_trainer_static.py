@@ -67,6 +67,28 @@ def test_manifest_records_phase12_contract(tmp_path) -> None:
     assert json.dumps(manifest)
 
 
+def test_manifest_records_phase12_pixel_contracts(tmp_path) -> None:
+    args = parse_args(["--output-dir", str(tmp_path), "--dry-run", "--num-episodes", "1"])
+
+    manifest = build_manifest(args)
+
+    assert manifest["phase12_policy_frame_contract"] == "lerobot_corner2_vhflip"
+    assert manifest["phase12_wm_frame_contract"] == "jepa_corner2_vflip"
+    assert manifest["phase12_goal_frame_contract"] == "jepa_corner2_vflip"
+    assert manifest["phase12_decode_real_frame_source"] == "wm_frames"
+
+
+def test_phase12_oracle_and_selected_rollout_do_not_use_render_frame_for_pixels() -> None:
+    source = (trainer._REPO / "scripts" / "grpo" / "train_phase12_wm_chunk_grpo.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "env_h.render_frame()" not in source
+    assert "self.env_h.render_frame()" not in source
+    assert "policy_rgb_from_obs(reset_obs)" in source
+    assert "policy_rgb_from_obs(step.observation)" in source
+
+
 def test_rollout_validation_manifest_is_not_grpo_training(tmp_path) -> None:
     args = parse_args(["--mode", "rollout_validation", "--output-dir", str(tmp_path), "--dry-run"])
 
