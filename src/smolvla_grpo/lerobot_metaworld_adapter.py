@@ -497,6 +497,13 @@ class OfficialLeRobotMetaWorldGRPORollout:
         obs, _info = self.vec_env.reset(seed=seeds)
         return obs
 
+    def reset_many(self, reset_seeds: Sequence[int]) -> dict[str, Any]:
+        seeds = [int(seed) for seed in reset_seeds]
+        if len(seeds) != self.n_envs:
+            raise ValueError(f"reset_many expected {self.n_envs} seeds; got {len(seeds)}")
+        obs, _info = self.vec_env.reset(seed=seeds)
+        return obs
+
     def _task_batch(self) -> list[str]:
         try:
             task_result = self.vec_env.call("task_description")

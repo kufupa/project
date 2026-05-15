@@ -269,6 +269,19 @@ def test_official_adapter_uses_make_env_and_vector_contract(monkeypatch):
     assert fake_vec.closed is True
 
 
+def test_official_adapter_reset_many_uses_per_row_seeds(monkeypatch):
+    fake_vec = _install_fake_official_lerobot(monkeypatch, n_envs=3)
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=3)
+    try:
+        obs = rollout.reset_many([1000, 1001, 1002])
+        assert fake_vec.reset_seeds == [1000, 1001, 1002]
+        assert obs["pixels"].shape[0] == 3
+    finally:
+        rollout.close()
+
+
 def test_deferred_metaworld_env_stores_raw_obs_for_expert_action(monkeypatch):
     _install_fake_deferred_deps(monkeypatch)
     from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
