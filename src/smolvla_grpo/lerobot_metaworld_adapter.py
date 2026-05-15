@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+from pathlib import Path
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +15,47 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 import numpy as np
 import gymnasium as gym
+
+_AGENT_DEBUG_LOG_PATH = Path("/vol/bitbucket/aa6622/.cursor/debug-588128.log")
+_AGENT_DEBUG_LOG_COUNT = 0
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    global _AGENT_DEBUG_LOG_COUNT
+    if os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if _AGENT_DEBUG_LOG_COUNT >= 20:
+        return
+    _AGENT_DEBUG_LOG_COUNT += 1
+    try:
+        payload = {
+            "sessionId": "588128",
+            "id": f"phase12_lerobot_adapter_{os.getpid()}_{_AGENT_DEBUG_LOG_COUNT}",
+            "timestamp": int(time.time() * 1000),
+            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-bounded-wm-issue"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def _image_debug(frame: Any) -> dict[str, Any]:
+    arr = np.asarray(frame)
+    if arr.ndim == 3 and arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    arr = np.ascontiguousarray(arr)
+    return {
+        "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
+        "mean": float(np.mean(arr)) if arr.size else 0.0,
+        "sha16": hashlib.sha256(arr.tobytes()).hexdigest()[:16],
+    }
 
 
 class DeferredLeRobotMetaworldEnv(gym.Env):
@@ -87,9 +132,28 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
 
     def render(self) -> np.ndarray:
         self._ensure_env()
-        image = self._env.render()
+        raw_image = np.asarray(self._env.render())
+        image = raw_image
         if self.camera_name == "corner2":
-            image = np.flip(image, (0, 1))
+            vflip_image = np.flip(raw_image, 0)
+            image = np.flip(raw_image, (0, 1))
+        else:
+            vflip_image = raw_image
+        # region agent log
+        _agent_debug_log(
+            hypothesis_id="H3",
+            location="src/smolvla_grpo/lerobot_metaworld_adapter.py:DeferredLeRobotMetaworldEnv.render",
+            message="adapter render orientation candidates before Phase12 WM encode",
+            data={
+                "camera_name": self.camera_name,
+                "returned_contract": "vhflip_for_corner2" if self.camera_name == "corner2" else "raw",
+                "jepa_metaworld_expected_contract": "vflip_for_corner2",
+                "raw": _image_debug(raw_image),
+                "vflip": _image_debug(vflip_image),
+                "returned": _image_debug(image),
+            },
+        )
+        # endregion
         return image
 
     def _format_raw_obs(self, raw_obs: np.ndarray) -> dict[str, Any]:
@@ -103,6 +167,10 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
     def reset(self, seed: int | None = None, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self._ensure_env()
         super().reset(seed=seed)
+        if seed is not None:
+            self._env.seed(int(seed))
+            if hasattr(self._env, "seeded_rand_vec"):
+                self._env.seeded_rand_vec = True
         raw_obs, _info = self._env.reset(seed=seed)
         self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         return self._format_raw_obs(raw_obs), {"is_success": False}
@@ -120,7 +188,6 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         observation = self._format_raw_obs(raw_obs)
         if terminated:
             info["final_info"] = {"task": self.task, "done": bool(done), "is_success": is_success}
-            self.reset()
         return observation, float(reward), terminated, bool(truncated), info
 
     def expert_action(self) -> np.ndarray:
@@ -132,6 +199,11 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         if self._last_raw_obs is None:
             raise RuntimeError("last_agent_pos called before reset")
         return np.asarray(self._last_raw_obs[:4], dtype=np.float32)
+
+    def last_raw_obs(self) -> np.ndarray:
+        if self._last_raw_obs is None:
+            raise RuntimeError("last_raw_obs called before reset")
+        return np.asarray(self._last_raw_obs, dtype=np.float64).copy()
 
     def render_frame(self) -> np.ndarray:
         return self.render()
@@ -485,6 +557,9 @@ class OfficialLeRobotMetaWorldGRPORollout:
 
     def last_agent_pos(self) -> np.ndarray:
         return np.asarray(self.vec_env.call("last_agent_pos")[0], dtype=np.float32)
+
+    def last_raw_obs(self) -> np.ndarray:
+        return np.asarray(self.vec_env.call("last_raw_obs")[0], dtype=np.float64)
 
     def render_frame(self) -> np.ndarray:
         return np.asarray(self.vec_env.call("render_frame")[0])
