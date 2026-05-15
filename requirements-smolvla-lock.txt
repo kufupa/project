@@ -1,4 +1,4 @@
-# Auto-generated from .envs/lerobot_mw_py310 at: 2026-05-06T08:45:23Z UTC
+# Auto-generated from .envs/lerobot_mw_py312 at: 2026-05-06T08:45:23Z UTC
 absl-py==2.4.0
 accelerate==1.13.0
 aiohappyeyeballs==2.6.1
@@ -194,7 +194,7 @@ torchrl==0.11.1
 torchvision==0.21.0+cu124
 tqdm==4.67.3
 traitlets==5.14.3
-transformers==5.5.0
+transformers==5.3.0
 triton==3.2.0
 typer==0.24.1
 typing-inspect==0.9.0
