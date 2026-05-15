@@ -343,3 +343,87 @@ def test_phase12_selected_decode_uses_wm_frames_as_real_frames(monkeypatch, tmp_
     assert seen["real_frames"] == [wm_frame]
     assert meta["wm_decode_status"] == "ok"
 
+
+def test_phase12_microbatch_backward_frees_each_logprob_graph_before_next_forward() -> None:
+    class TrackGraph(torch.autograd.Function):
+        active = 0
+        max_active = 0
+
+        @staticmethod
+        def forward(ctx, weight, value):
+            del ctx
+            TrackGraph.active += 1
+            TrackGraph.max_active = max(TrackGraph.max_active, TrackGraph.active)
+            return weight * 0.0 + weight.new_tensor(float(value))
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            del ctx
+            TrackGraph.active -= 1
+            return torch.zeros_like(grad_output), None
+
+    class Wrapper:
+        def __init__(self, weight):
+            self.weight = weight
+            self.calls = 0
+
+        def get_action_probs_for_chunk_from_proc(self, proc, chunk):
+            del proc, chunk
+            self.calls += 1
+            return TrackGraph.apply(self.weight, -0.1 * self.calls)
+
+    weight = torch.nn.Parameter(torch.tensor(1.0))
+    wrapper = Wrapper(weight)
+    old_lp = torch.zeros(4)
+    advantages = torch.tensor([-1.0, -0.5, 0.5, 1.0])
+    procs = [{"x": torch.zeros(1)} for _ in range(4)]
+    chunks = [torch.zeros(1, 4) for _ in range(4)]
+
+    loss, stats, new_lp = trainer._backward_chunk_grpo_loss_microbatched(
+        train_wrapper=wrapper,
+        proc_snapshots=procs,
+        unsquashed_chunks=chunks,
+        old_lp=old_lp,
+        advantages=advantages,
+        clip_eps=0.2,
+    )
+
+    assert wrapper.calls == 4
+    assert TrackGraph.max_active == 1
+    assert TrackGraph.active == 0
+    assert isinstance(loss, float)
+    assert len(new_lp) == 4
+    assert "ratio_mean" in stats
+
+
+def test_phase12_old_policy_sampling_uses_inference_mode_when_enabled() -> None:
+    seen = {}
+
+    class Wrapper:
+        bundle = SimpleNamespace(device=torch.device("cpu"))
+
+        def sample_action_chunk_from_proc(self, proc, *, chunk_len, rng):
+            del proc, chunk_len, rng
+            seen["grad_enabled"] = torch.is_grad_enabled()
+            seen["inference_mode"] = torch.is_inference_mode_enabled()
+            return SimpleNamespace(
+                unsquashed_chunk=torch.zeros(2, 4),
+                log_prob_steps=torch.zeros(2),
+                log_prob_sum=torch.tensor(0.0),
+                exec_action_np=np.zeros((2, 4), dtype=np.float32),
+                action_clip_fraction=np.zeros(2),
+                action_clip_any=np.zeros(2, dtype=bool),
+                unique_action_rows=1,
+            )
+
+    sample = trainer._sample_old_action_chunk(
+        Wrapper(),
+        {"x": torch.zeros(1)},
+        chunk_len=2,
+        rng=torch.Generator(device="cpu"),
+        use_inference_mode=True,
+    )
+
+    assert sample.unique_action_rows == 1
+    assert seen == {"grad_enabled": False, "inference_mode": True}
+

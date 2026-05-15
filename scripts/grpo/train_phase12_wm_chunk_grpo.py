@@ -49,6 +49,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--proprio-alpha", type=float, default=0.1)
     p.add_argument("--reward-key", choices=("wm_latent_progress", "latent_return"), default="wm_latent_progress")
     p.add_argument("--ratio-mode", choices=("chunk", "per_step_ablation"), default="chunk")
+    p.add_argument("--logprob-backward-mode", choices=("stack", "microbatch"), default="stack")
+    p.add_argument("--old-policy-inference-mode", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--action-transform", choices=("no_tanh", "tanh_norm_ablation"), default="no_tanh")
     p.add_argument("--reset-mismatch", choices=("fail", "skip", "warn"), default="fail")
     p.add_argument("--decode-candidates", choices=("selected", "all", "none"), default="selected")
@@ -97,6 +99,8 @@ def build_manifest(args: argparse.Namespace) -> dict:
         "proprio_alpha": float(args.proprio_alpha),
         "reward_key": str(args.reward_key),
         "ratio_mode": str(args.ratio_mode),
+        "logprob_backward_mode": str(args.logprob_backward_mode),
+        "old_policy_inference_mode": bool(args.old_policy_inference_mode),
         "action_transform": str(args.action_transform),
         "reset_mismatch": str(args.reset_mismatch),
         "decode_candidates": str(args.decode_candidates),
@@ -255,6 +259,22 @@ def build_old_wrapper(args: argparse.Namespace, bundle: Any, old_policy: Any, ac
         action_transform=args.action_transform,
         policy_module=old_policy,
     )
+
+
+def _sample_old_action_chunk(
+    old_wrapper: Any,
+    proc: Any,
+    *,
+    chunk_len: int,
+    rng: Any,
+    use_inference_mode: bool,
+) -> Any:
+    import torch
+
+    if bool(use_inference_mode):
+        with torch.inference_mode():
+            return old_wrapper.sample_action_chunk_from_proc(proc, chunk_len=int(chunk_len), rng=rng)
+    return old_wrapper.sample_action_chunk_from_proc(proc, chunk_len=int(chunk_len), rng=rng)
 
 
 def phase12_episode_training_metadata(episode: Any, reward_key: str) -> dict[str, Any]:
@@ -647,10 +667,12 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             for candidate_index in range(int(num_candidates)):
                 gen = torch.Generator(device=old_wrapper.bundle.device)
                 gen.manual_seed(reset_seed * 1000003 + int(segment_index) * 7919 + int(candidate_index))
-                sample = old_wrapper.sample_action_chunk_from_proc(
+                sample = _sample_old_action_chunk(
+                    old_wrapper,
                     proc,
                     chunk_len=int(args.chunk_len),
                     rng=gen,
+                    use_inference_mode=bool(args.old_policy_inference_mode),
                 )
                 yield {
                     "candidate_index": int(candidate_index),
@@ -1069,6 +1091,76 @@ def _save_latest_and_numbered(
     return ckpt_path
 
 
+def _chunk_grpo_row_loss(
+    new_lp: Any,
+    old_lp: Any,
+    advantage: Any,
+    *,
+    clip_eps: float,
+    normalizer: int,
+) -> tuple[Any, Any]:
+    import torch
+
+    ratio = torch.exp(new_lp.float() - old_lp.float())
+    clipped_ratio = torch.clamp(ratio, 1.0 - float(clip_eps), 1.0 + float(clip_eps))
+    loss = -torch.minimum(ratio * advantage.float(), clipped_ratio * advantage.float()) / float(normalizer)
+    return loss, ratio
+
+
+def _ratio_stats_from_tensors(old_lp: Any, new_lp: Any, *, clip_eps: float) -> dict[str, float]:
+    import torch
+
+    old = torch.as_tensor(old_lp).float()
+    new = torch.as_tensor(new_lp).float()
+    ratio = torch.exp(new - old)
+    low = 1.0 - float(clip_eps)
+    high = 1.0 + float(clip_eps)
+    clip_fraction = ((ratio < low) | (ratio > high)).float().mean()
+    return {
+        "ratio_mean": float(ratio.mean().item()),
+        "ratio_max": float(ratio.max().item()),
+        "ratio_min": float(ratio.min().item()),
+        "ratio_clip_fraction": float(clip_fraction.item()),
+        "approx_kl": float((old.detach() - new.detach()).float().mean().item()),
+    }
+
+
+def _backward_chunk_grpo_loss_microbatched(
+    *,
+    train_wrapper: Any,
+    proc_snapshots: list[Any],
+    unsquashed_chunks: list[Any],
+    old_lp: Any,
+    advantages: Any,
+    clip_eps: float,
+) -> tuple[float, dict[str, float], Any]:
+    import torch
+
+    row_count = len(unsquashed_chunks)
+    if row_count == 0:
+        raise RuntimeError("microbatch GRPO loss needs at least one chunk")
+    old_lp = torch.as_tensor(old_lp).float()
+    advantages = torch.as_tensor(advantages).float()
+    new_lp_values: list[torch.Tensor] = []
+    loss_values: list[torch.Tensor] = []
+    for row_idx, (proc, chunk) in enumerate(zip(proc_snapshots, unsquashed_chunks, strict=True)):
+        new_lp_row = train_wrapper.get_action_probs_for_chunk_from_proc(proc, chunk).sum()
+        loss_row, _ratio = _chunk_grpo_row_loss(
+            new_lp_row,
+            old_lp[row_idx].to(new_lp_row.device),
+            advantages[row_idx].to(new_lp_row.device),
+            clip_eps=float(clip_eps),
+            normalizer=row_count,
+        )
+        loss_values.append(loss_row.detach().cpu())
+        new_lp_values.append(new_lp_row.detach().cpu())
+        loss_row.backward()
+    new_lp = torch.stack(new_lp_values).reshape(old_lp.shape)
+    stats = _ratio_stats_from_tensors(old_lp.detach().cpu(), new_lp, clip_eps=float(clip_eps))
+    loss = float(torch.stack(loss_values).sum().item())
+    return loss, stats, new_lp
+
+
 def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
     import torch
     from torch import nn
@@ -1089,9 +1181,11 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
         start_update = int(ckpt.get("update_index", -1)) + 1
 
     old_policy = copy.deepcopy(bundle.policy).eval().to(bundle.device)
+    for param in old_policy.parameters():
+        param.requires_grad_(False)
     old_wrapper = build_old_wrapper(args, bundle, old_policy, action_dim)
     ckpt_dir = out / "checkpoints"
-    episodes: list[Any] = []
+    first_episode: Any | None = None
     end_update = start_update + int(args.num_updates)
     for update_index in range(start_update, end_update):
         update_t0 = time.perf_counter()
@@ -1111,7 +1205,8 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
             meta = dict(getattr(episode, "metadata", {}) or {})
             meta.update(phase12_episode_training_metadata(episode, args.reward_key))
             episode = _with_episode_metadata(episode, meta)
-        episodes.append(episode)
+        if first_episode is None:
+            first_episode = episode
         meta = dict(getattr(episode, "metadata", {}) or {})
         segment_rows = meta.get("segment_candidate_rewards") or [meta.get("candidate_rewards", [])]
         segment_rewards = [
@@ -1127,10 +1222,6 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
         rewards = torch.cat(segment_rewards, dim=0)
         advantages = torch.cat(segment_advantages, dim=0)
         old_lp = torch.tensor(meta["old_logprob_sums"], dtype=torch.float32, device=bundle.device)
-        new_lp_rows = []
-        for proc, chunk in zip(meta["proc_root_snapshots"], meta["unsquashed_chunks"], strict=True):
-            new_lp_rows.append(train_wrapper.get_action_probs_for_chunk_from_proc(proc, chunk).sum())
-        new_lp = torch.stack(new_lp_rows)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             ckpt_path = _save_latest_and_numbered(
                 ckpt_dir=ckpt_dir,
@@ -1153,15 +1244,32 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
             }
             write_jsonl_row(out / "progress.jsonl", row)
             continue
-        loss, ratio_stats = chunk_grpo_loss(old_lp, new_lp, advantages, clip_eps=float(args.clip_eps))
-        optimizer.zero_grad()
-        loss.backward()
+        optimizer.zero_grad(set_to_none=True)
+        if args.logprob_backward_mode == "microbatch":
+            loss_value, ratio_stats, new_lp_for_log = _backward_chunk_grpo_loss_microbatched(
+                train_wrapper=train_wrapper,
+                proc_snapshots=meta["proc_root_snapshots"],
+                unsquashed_chunks=meta["unsquashed_chunks"],
+                old_lp=old_lp,
+                advantages=advantages,
+                clip_eps=float(args.clip_eps),
+            )
+        else:
+            new_lp_rows = [
+                train_wrapper.get_action_probs_for_chunk_from_proc(proc, chunk).sum()
+                for proc, chunk in zip(meta["proc_root_snapshots"], meta["unsquashed_chunks"], strict=True)
+            ]
+            new_lp = torch.stack(new_lp_rows)
+            loss, ratio_stats = chunk_grpo_loss(old_lp, new_lp, advantages, clip_eps=float(args.clip_eps))
+            loss_value = float(loss.detach().cpu())
+            new_lp_for_log = new_lp.detach().cpu()
+            loss.backward()
         nn.utils.clip_grad_norm_(trainable, float(args.grad_clip))
         optimizer.step()
-        old_policy.load_state_dict({k: v.detach().clone() for k, v in bundle.policy.state_dict().items()})
+        old_policy.load_state_dict(bundle.policy.state_dict())
         old_policy.eval()
         old_wrapper._policy = old_policy
-        extra = {"loss": float(loss.detach().cpu()), **ratio_stats}
+        extra = {"loss": float(loss_value), **ratio_stats}
         ckpt_path = _save_latest_and_numbered(
             ckpt_dir=ckpt_dir,
             policy_state=_ensure_checkpointable_policy_state(bundle.policy),
@@ -1179,9 +1287,10 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "update_index": int(update_index),
                 "reset_seed": int(reset_seed),
                 "optimizer_step": True,
-                "loss": float(loss.detach().cpu()),
+                "loss": float(loss_value),
                 "advantages": advantages.detach().cpu().tolist(),
                 "returns": rewards.detach().cpu().tolist(),
+                "new_logprob_sums": new_lp_for_log.reshape(-1).tolist(),
                 "segment_candidate_rewards": [row.detach().cpu().tolist() for row in segment_rewards],
                 "segment_advantages": [row.detach().cpu().tolist() for row in segment_advantages],
                 "checkpoint_path": str(ckpt_path),
@@ -1189,8 +1298,8 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 **ratio_stats,
             },
         )
-    if episodes:
-        smoke = _episode_smoke_manifest(episodes[0])
+    if first_episode is not None:
+        smoke = _episode_smoke_manifest(first_episode)
         write_manifest(out / "smoke_manifest.json", smoke)
     print("PHASE12_WM_CHUNK_GRPO_TRAIN_DONE", f"updates={int(args.num_updates)}", f"out={out}", flush=True)
     return 0
