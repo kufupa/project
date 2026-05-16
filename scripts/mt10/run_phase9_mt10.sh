@@ -16,7 +16,7 @@ fi
 INDEX_JSON="${MT10_PHASE6_INDEX_JSON:-${PROJECT_ROOT}/artifacts/mt10_runs/mt10_phase6_index.json}"
 INDEX9_JSON="${MT10_PHASE9_INDEX_JSON:-${PROJECT_ROOT}/artifacts/mt10_runs/mt10_phase9_index.json}"
 MAP_TMP="${MT10_PHASE9_MAP_TMP:-$(mktemp)}"
-PY="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python"
+PY="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python"
 PHASE9_PY="${PROJECT_ROOT}/scripts/run_phase9_oracle_vs_wm.py"
 
 if [[ ! -f "${INDEX_JSON}" ]]; then

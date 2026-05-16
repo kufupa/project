@@ -11,7 +11,7 @@ if [[ -n "${MT10_ONLY_TASK:-}" ]]; then
   MT10_TASK_IDS=("${MT10_ONLY_TASK}")
 fi
 
-PY="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python"
+PY="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python"
 ORACLE_SH="${PROJECT_ROOT}/scripts/oracle/run_oracle_baseline_eval.sh"
 CAMPAIGN="${PROJECT_ROOT}/scripts/segment_grpo/run_all60_frame50_k3.py"
 PHASE9_PY="${PROJECT_ROOT}/scripts/run_phase9_oracle_vs_wm.py"

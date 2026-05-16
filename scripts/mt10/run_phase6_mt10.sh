@@ -14,7 +14,7 @@ if [[ -n "${MT10_ONLY_TASK:-}" ]]; then
 fi
 
 PIPELINE="${PROJECT_ROOT}/scripts/oracle/pushv3_oracle_data_pipeline.sh"
-PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python"
+PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python"
 INDEX_DIR="${MT10_INDEX_DIR:-${PROJECT_ROOT}/artifacts/mt10_runs}"
 INDEX_JSON="${MT10_PHASE6_INDEX_JSON:-${INDEX_DIR}/mt10_phase6_index.json}"
 MAP_TMP="${MT10_PHASE6_MAP_TMP:-$(mktemp)}"
