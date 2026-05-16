@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# PBS (CX3): SmolVLA baseline push-v3 vector video smoke.
+# Submit from repo root with qsub -v PHASE50_EVAL_SEED_START=1000,PHASE50_SWEEP_NAME=...
+#PBS -N p50basevid
+#PBS -l select=1:ncpus=8:mem=32gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=00:35:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/smolvla_baseline_pushv3_seed6_video.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+source "${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+slurm_resolve_project_root "scripts/grpo/eval_smolvla_baseline_vector_video.py"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "smolvla-baseline-pushv3-video"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: no usable PYTHON_BIN=${PYTHON_BIN}" >&2
+  exit 2
+fi
+
+TASK="${PHASE50_TASK:-push-v3}"
+SEED_START="${PHASE50_EVAL_SEED_START:-1000}"
+EPISODES="${PHASE50_EVAL_EPISODES:-6}"
+N_ENVS="${PHASE50_EVAL_N_ENVS:-3}"
+MAX_STEPS="${PHASE50_EVAL_MAX_STEPS:-120}"
+SWEEP_NAME="${PHASE50_SWEEP_NAME:-smolvla_baseline_seed${SEED_START}_video6_nenv${N_ENVS}}"
+OUT="${PHASE50_OUT:-${PROJECT_ROOT}/artifacts/phase50_smolvla_baseline_video/${TASK}/${SWEEP_NAME}}"
+BASE_CKPT="${PHASE50_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+
+mkdir -p "${OUT}" "$(dirname "${PBS_O_WORKDIR:-${PROJECT_ROOT}}/logs/pbs/grpo/x")"
+echo "[smolvla-base-video] job=${PBS_JOBID:-local} seed_start=${SEED_START} episodes=${EPISODES} n_envs=${N_ENVS} out=${OUT}"
+
+"${PYTHON_BIN}" scripts/grpo/eval_smolvla_baseline_vector_video.py \
+  --checkpoint "${BASE_CKPT}" \
+  --output-dir "${OUT}" \
+  --task "${TASK}" \
+  --episodes "${EPISODES}" \
+  --eval-seed-start "${SEED_START}" \
+  --n-envs "${N_ENVS}" \
+  --max-steps "${MAX_STEPS}" \
+  --fps "${PHASE50_EVAL_FPS:-20}"
+
+test -f "${OUT}/eval_summary.json"
+echo "SMOLVLA_BASELINE_VECTOR_VIDEO_DONE out=${OUT}"
