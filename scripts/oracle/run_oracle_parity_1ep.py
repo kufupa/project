@@ -79,7 +79,7 @@ def _unique_run_dir(
 def _resolve_lerobot_python(workspace_root: Path) -> Path:
     env_dir = os.environ.get("SMOLVLA_LEROBOT_ENV_DIR", "").strip()
     if not env_dir:
-        env_dir = str(workspace_root / ".envs" / "lerobot_mw_py310")
+        env_dir = str(workspace_root / ".envs" / "lerobot_mw_py312")
     py = Path(env_dir).expanduser() / "bin" / "python"
     if not py.is_file():
         raise FileNotFoundError(
