@@ -28,7 +28,7 @@ ART="${PROJECT_ROOT}/artifacts"
 export MT10_PHASE9_OUTPUT_ROOT="${MT10_PHASE9_OUTPUT_ROOT:-${ART}/mt10_phase09_oracle_vs_wm_baseline}"
 
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 VOL_CACHE="${WORKSPACE_ROOT}/.cache"
 export TORCH_HOME="${TORCH_HOME:-${VOL_CACHE}/torch}"
 export JEPA_REPO="${JEPA_REPO:-${TORCH_HOME}/hub/facebookresearch_jepa-wms_main}"

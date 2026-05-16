@@ -31,7 +31,7 @@ ART="${PROJECT_ROOT}/artifacts"
 export PUSHV3_OUTPUT_ROOT="${PUSHV3_OUTPUT_ROOT:-${ART}/mt10_phase06_oracle_baseline}"
 
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 
 echo "[mt10:p6-slurm] host=$(hostname) job=${SLURM_JOB_ID:-local} partition=${SLURM_JOB_PARTITION:-unknown}"
 

@@ -28,7 +28,7 @@ ART="${PROJECT_ROOT}/artifacts"
 export MT10_PHASE8_OUTPUT_ROOT="${MT10_PHASE8_OUTPUT_ROOT:-${ART}/mt10_phase08_segment_grpo_baseline}"
 
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 VOL_CACHE="${WORKSPACE_ROOT}/.cache"
 export HF_HOME="${HF_HOME:-${VOL_CACHE}/huggingface}"
 export TORCH_HOME="${TORCH_HOME:-${VOL_CACHE}/torch}"
