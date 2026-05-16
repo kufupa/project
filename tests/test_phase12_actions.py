@@ -29,6 +29,9 @@ def test_official_jepa_mirror_scores_raw_postprocessed_actions() -> None:
     np.testing.assert_allclose(result.exec_actions_clipped, np.clip(raw, -1.0, 1.0))
     assert result.metadata["clip_fraction"] > 0.0
     assert result.metadata["clip_any"] is True
+    assert result.metadata["clip_delta_max_abs"] == pytest.approx(1.0)
+    assert result.metadata["raw_action_max_abs"] == pytest.approx(2.0)
+    assert result.metadata["clipped_action_max_abs"] == pytest.approx(1.0)
     assert result.metadata["exec_action_source"] == "raw_postprocessed"
     assert result.metadata["wm_action_source"] == "raw_postprocessed"
 
