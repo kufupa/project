@@ -11,7 +11,7 @@ TOP_K="${TOP_K:-15}"
 EPISODES_PER_TARGET="${EPISODES_PER_TARGET:-4}"
 SAVE_FRAMES="false"
 
-PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python}"
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "error: smolvla python not found" >&2
   exit 2
