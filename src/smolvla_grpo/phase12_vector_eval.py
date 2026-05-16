@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -131,6 +132,7 @@ def write_eval_artifacts(
         encoding="utf-8",
     )
     eval_info = {
+        "reset_randomization_mode": os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded"),
         "per_task": [
             {
                 "task_group": task,
@@ -208,6 +210,33 @@ def _reset_policy(policy: Any) -> None:
         reset()
 
 
+def select_eval_action_queue_free(policy: Any, proc: dict[str, Any]) -> torch.Tensor:
+    """Return first eval action without using SmolVLA's cross-step action queue."""
+
+    if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
+        getattr(policy, "model", None), "sample_actions"
+    ):
+        batch = policy._prepare_batch(proc)
+        images, img_masks = policy.prepare_images(batch)
+        state = policy.prepare_state(batch)
+        lang_tokens = batch["observation.language.tokens"]
+        lang_masks = batch["observation.language.attention_mask"]
+        actions = policy.model.sample_actions(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=None,
+        )
+        if not torch.is_tensor(actions):
+            raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
+        action_dim = int(policy.config.action_feature.shape[0])
+        return actions[:, 0, :action_dim]
+
+    return policy.select_action(proc)
+
+
 def _resolve_action_dim(task: str) -> int:
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
@@ -264,7 +293,7 @@ def evaluate_loaded_policy_vectorized(
                 proc_rows = [envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows]
                 proc = concatenate_proc_rows(proc_rows)
                 with torch.inference_mode():
-                    action = bundle.policy.select_action(proc)
+                    action = select_eval_action_queue_free(bundle.policy, proc)
                     post = bundle.postprocessor(action)
                 exec_action_np = coerce_exec_action_batch(post, action_dim=action_dim, n_envs=len(active_rows))
 
