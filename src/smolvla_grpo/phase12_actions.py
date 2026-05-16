@@ -145,6 +145,7 @@ def apply_phase12_action_profile(
     high = _bounds(action_high, raw.shape[1])
     clipped = np.clip(raw, low.reshape(1, -1), high.reshape(1, -1)).astype(np.float32, copy=False)
     changed = np.not_equal(raw, clipped)
+    delta = raw - clipped
 
     profile = str(action_profile).strip().lower()
     if profile == "official_jepa_mirror":
@@ -164,6 +165,9 @@ def apply_phase12_action_profile(
         "clip_any": bool(np.any(changed)),
         "exec_action_source": source,
         "wm_action_source": source,
+        "clip_delta_max_abs": float(np.max(np.abs(delta))) if delta.size else 0.0,
+        "raw_action_max_abs": float(np.max(np.abs(raw))) if raw.size else 0.0,
+        "clipped_action_max_abs": float(np.max(np.abs(clipped))) if clipped.size else 0.0,
     }
     metadata.update(_stats("raw_action", raw))
     metadata.update(_stats("clipped_action", clipped))

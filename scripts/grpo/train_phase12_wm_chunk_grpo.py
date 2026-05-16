@@ -296,6 +296,18 @@ def phase12_episode_training_metadata(episode: Any, reward_key: str) -> dict[str
         "wm_status_counts": _count_values(_field(score, "wm_status", "unknown") for score in scores),
         "action_clip_fraction": float(np.mean([candidate.action_metadata.get("clip_fraction", 0.0) for candidate in candidates])) if candidates else 0.0,
         "action_clip_any_fraction": float(np.mean([candidate.action_metadata.get("clip_any", False) for candidate in candidates])) if candidates else 0.0,
+        "raw_action_max_abs": max(
+            (float(candidate.action_metadata.get("raw_action_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
+        "clipped_action_max_abs": max(
+            (float(candidate.action_metadata.get("clipped_action_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
+        "clip_delta_max_abs": max(
+            (float(candidate.action_metadata.get("clip_delta_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
     }
 
 
@@ -320,6 +332,29 @@ def _structured_field(value: Any, key: str) -> Any:
         return value[key]
     except Exception:
         return None
+
+
+def _phase12_sample_to_candidate_dict(sample: Any, *, candidate_index: int) -> dict[str, Any]:
+    import numpy as np
+
+    raw_actions = getattr(sample, "raw_postprocessed_action_np", None)
+    if raw_actions is None:
+        raw_actions = getattr(sample, "exec_action_np")
+    clipped_actions = getattr(sample, "exec_action_np", raw_actions)
+    return {
+        "candidate_index": int(candidate_index),
+        "proc_root_snapshot": None,
+        "unsquashed_chunk": sample.unsquashed_chunk.detach().cpu(),
+        "old_logprob_steps": sample.log_prob_steps.detach().cpu().numpy(),
+        "old_logprob_sum": float(sample.log_prob_sum.detach().cpu().item()),
+        "exec_actions_raw_postprocessed": np.asarray(raw_actions, dtype=np.float32),
+        "exec_actions_clipped": np.asarray(clipped_actions, dtype=np.float32),
+        "action_metadata": {
+            "sample_clip_fraction_mean": float(np.mean(sample.action_clip_fraction)),
+            "sample_clip_any_fraction": float(np.mean(sample.action_clip_any)),
+            "unique_action_rows": int(sample.unique_action_rows),
+        },
+    }
 
 
 def _with_episode_metadata(episode: Any, metadata: dict[str, Any]) -> Any:
@@ -674,19 +709,9 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                     rng=gen,
                     use_inference_mode=bool(args.old_policy_inference_mode),
                 )
-                yield {
-                    "candidate_index": int(candidate_index),
-                    "proc_root_snapshot": detach_proc_snapshot(proc),
-                    "unsquashed_chunk": sample.unsquashed_chunk.detach().cpu(),
-                    "old_logprob_steps": sample.log_prob_steps.detach().cpu().numpy(),
-                    "old_logprob_sum": float(sample.log_prob_sum.detach().cpu().item()),
-                    "exec_actions_raw_postprocessed": sample.exec_action_np,
-                    "action_metadata": {
-                        "sample_clip_fraction_mean": float(np.mean(sample.action_clip_fraction)),
-                        "sample_clip_any_fraction": float(np.mean(sample.action_clip_any)),
-                        "unique_action_rows": int(sample.unique_action_rows),
-                    },
-                }
+                candidate = _phase12_sample_to_candidate_dict(sample, candidate_index=int(candidate_index))
+                candidate["proc_root_snapshot"] = detach_proc_snapshot(proc)
+                yield candidate
 
         def score_fn(root_observation, candidate, goal, *, root_id, segment_index):
             del root_id
@@ -1295,6 +1320,11 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "segment_advantages": [row.detach().cpu().tolist() for row in segment_advantages],
                 "checkpoint_path": str(ckpt_path),
                 "update_seconds": float(time.perf_counter() - update_t0),
+                "action_clip_fraction": float(meta.get("action_clip_fraction", 0.0)),
+                "action_clip_any_fraction": float(meta.get("action_clip_any_fraction", 0.0)),
+                "raw_action_max_abs": float(meta.get("raw_action_max_abs", 0.0)),
+                "clipped_action_max_abs": float(meta.get("clipped_action_max_abs", 0.0)),
+                "clip_delta_max_abs": float(meta.get("clip_delta_max_abs", 0.0)),
                 **ratio_stats,
             },
         )

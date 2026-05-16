@@ -118,6 +118,7 @@ def test_sample_action_chunk_from_proc_returns_full_chunk_shapes() -> None:
     )
 
     assert chunk.exec_action_np.shape == (25, 4)
+    assert chunk.raw_postprocessed_action_np.shape == (25, 4)
     assert chunk.policy_tensor.shape == (25, 4)
     assert chunk.unsquashed_chunk.shape == (25, 4)
     assert chunk.log_prob_steps.shape == (25,)
@@ -128,6 +129,24 @@ def test_sample_action_chunk_from_proc_returns_full_chunk_shapes() -> None:
     assert chunk.unique_action_rows >= 1
     assert policy.chunk_calls == [50]
     assert policy.select_calls == 0
+
+
+def test_sample_action_chunk_preserves_raw_postprocessed_actions_before_clip() -> None:
+    wrapper, _policy, _bundle = _wrapper()
+    wrapper.action_low = np.full((4,), -1.0, dtype=np.float32)
+    wrapper.action_high = np.full((4,), 1.0, dtype=np.float32)
+
+    chunk = wrapper.sample_action_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk_len=25,
+        rng=torch.Generator(device="cpu").manual_seed(123),
+    )
+
+    assert chunk.raw_postprocessed_action_np.shape == (25, 4)
+    assert chunk.exec_action_np.shape == (25, 4)
+    assert np.max(chunk.raw_postprocessed_action_np) > 1.0
+    assert np.max(chunk.exec_action_np) <= 1.0
+    assert np.any(chunk.raw_postprocessed_action_np != chunk.exec_action_np)
 
 
 def test_sample_action_chunk_slices_installed_lerobot_full_chunk() -> None:
