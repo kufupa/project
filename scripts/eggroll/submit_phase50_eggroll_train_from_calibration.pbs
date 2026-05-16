@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# PBS (CX3): EGGROLL overnight train from calibration.
+#PBS -N p50eggtrain
+#PBS -l select=1:ncpus=16:mem=48gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o phase50_eggroll_train_pbs.out
+
+set -euo pipefail
+
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+source "${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+slurm_resolve_project_root "scripts/eggroll/train_smolvla_eggroll.py"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase50-eggroll-train"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+EGGROLL_PYTHON="${EGGROLL_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+if [[ ! -x "${EGGROLL_PYTHON}" ]]; then
+  echo "error: no usable EGGROLL_PYTHON=${EGGROLL_PYTHON}" >&2
+  exit 2
+fi
+CHECKPOINT="${PHASE50_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+TASK="${PHASE50_TASK:-push-v3}"
+CAL_ROOT="${PHASE50_CALIBRATION_ROOT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_calibration/${TASK}}"
+SUMMARY="${CAL_ROOT}/calibration_summary.json"
+if [[ ! -f "${SUMMARY}" ]]; then
+  echo "error: missing calibration summary: ${SUMMARY}" >&2
+  exit 2
+fi
+SELECTED="$("${EGGROLL_PYTHON}" - "${SUMMARY}" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["selected_population_batch_size"])
+PY
+)"
+ITER_SECONDS="$("${EGGROLL_PYTHON}" - "${SUMMARY}" "${SELECTED}" <<'PY'
+import json, sys
+summary=json.load(open(sys.argv[1], encoding="utf-8"))
+item=summary.get("metrics_by_candidate", {}).get(str(sys.argv[2]), {})
+print(float(item.get("iteration_seconds") or 600.0))
+PY
+)"
+POPULATION_SIZE="${PHASE50_POPULATION_SIZE:-32}"
+RANK="${PHASE50_RANK:-2}"
+MAX_STEPS="${PHASE50_MAX_STEPS:-40}"
+NUM_ITERATIONS="${PHASE50_NUM_ITERATIONS:-$("${EGGROLL_PYTHON}" - "${ITER_SECONDS}" <<'PY'
+import sys
+iter_s=float(sys.argv[1])
+# Leave load/eval buffer; ensure at least update_0010 exists for eval.
+budget_s=10*3600
+print(max(10, min(50, int(budget_s // max(iter_s, 1.0)))))
+PY
+)}"
+SIGMA="${PHASE50_SIGMA:-0.01}"
+ALPHA="${PHASE50_ALPHA:-0.03}"
+FITNESS_SHAPING="${PHASE50_FITNESS_SHAPING:-centered}"
+OUT="${PHASE50_OUT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_train/${TASK}/pop${POPULATION_SIZE}_b${SELECTED}_r${RANK}_seed2000}"
+
+"${EGGROLL_PYTHON}" scripts/eggroll/train_smolvla_eggroll.py \
+  --checkpoint "${CHECKPOINT}" \
+  --output-dir "${OUT}" \
+  --task "${TASK}" \
+  --population-size "${POPULATION_SIZE}" \
+  --population-batch-size "${SELECTED}" \
+  --rank "${RANK}" \
+  --sigma "${SIGMA}" \
+  --alpha "${ALPHA}" \
+  --fitness-shaping "${FITNESS_SHAPING}" \
+  --num-iterations "${NUM_ITERATIONS}" \
+  --max-steps "${MAX_STEPS}" \
+  --rollout-execution vector_sync \
+  --save-every "${PHASE50_SAVE_EVERY:-10}" \
+  --video-every "${PHASE50_VIDEO_EVERY:-10}" \
+  --write-oracle-video
+
+test -f "${OUT}/train_manifest.json"
+test -f "${OUT}/progress.jsonl"
+test -f "${OUT}/timings.jsonl"
+test -f "${OUT}/checkpoints/latest.pt"
+echo "${OUT}" > "${CAL_ROOT}/train_run_dir.txt"
+echo "PHASE50_EGGROLL_TRAIN_DONE out=${OUT} selected_batch=${SELECTED}"
