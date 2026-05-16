@@ -31,7 +31,7 @@ if [[ ! -d "${ORACLE_RUN_DIR}" ]]; then
   echo "ORACLE_RUN_DIR does not exist: ${ORACLE_RUN_DIR}" >&2
   exit 2
 fi
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 echo "smolvla-topk-submit: launch_mode=${SMOLVLA_TOPK_LAUNCH_MODE} allow_nested_sbatch=${SMOLVLA_ALLOW_NESTED_SBATCH}"
 
 bash "${PROJECT_ROOT}/scripts/smolvla/run_oracle_topk_smolvla_full.sh"
