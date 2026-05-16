@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 
-PYTHON_BIN="${SEGMENT_GRPO_PYTHON:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python}"
+PYTHON_BIN="${SEGMENT_GRPO_PYTHON:-${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "[phase9] ERROR: python not executable: ${PYTHON_BIN}" >&2
   echo "[phase9] Set SMOLVLA_LEROBOT_ENV_DIR or SEGMENT_GRPO_PYTHON." >&2
