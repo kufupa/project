@@ -182,6 +182,25 @@ def coerce_exec_action_batch(action: Any, *, action_dim: int, n_envs: int) -> np
     return np.clip(action_np.reshape(int(n_envs), int(action_dim)), -1.0, 1.0).astype(np.float32, copy=False)
 
 
+def coerce_exec_action_chunk_batch(action: Any, *, action_dim: int, n_envs: int, chunk_len: int) -> np.ndarray:
+    if hasattr(action, "detach"):
+        action_np = action.detach().float().cpu().numpy()
+    else:
+        action_np = np.asarray(action, dtype=np.float32)
+    action_np = np.asarray(action_np, dtype=np.float32)
+    expected_size = int(n_envs) * int(chunk_len) * int(action_dim)
+    if action_np.size != expected_size:
+        raise RuntimeError(
+            f"Policy action chunk dim mismatch: expected batch ({n_envs}, {chunk_len}, {action_dim}) "
+            f"with {expected_size} values, got shape {tuple(action_np.shape)} and size {action_np.size}. "
+            "Refusing silent pad/truncate."
+        )
+    return np.clip(action_np.reshape(int(n_envs), int(chunk_len), int(action_dim)), -1.0, 1.0).astype(
+        np.float32,
+        copy=False,
+    )
+
+
 def concatenate_proc_rows(proc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not proc_rows:
         raise ValueError("proc_rows must be non-empty")
@@ -237,6 +256,41 @@ def select_eval_action_queue_free(policy: Any, proc: dict[str, Any]) -> torch.Te
     return policy.select_action(proc)
 
 
+def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, chunk_len: int) -> torch.Tensor:
+    """Return an eval action chunk without using SmolVLA's cross-step action queue."""
+
+    if int(chunk_len) < 1:
+        raise ValueError("chunk_len must be >= 1")
+    if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
+        getattr(policy, "model", None), "sample_actions"
+    ):
+        batch = policy._prepare_batch(proc)
+        images, img_masks = policy.prepare_images(batch)
+        state = policy.prepare_state(batch)
+        lang_tokens = batch["observation.language.tokens"]
+        lang_masks = batch["observation.language.attention_mask"]
+        actions = policy.model.sample_actions(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=None,
+        )
+        if not torch.is_tensor(actions):
+            raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
+        action_dim = int(policy.config.action_feature.shape[0])
+        actions = actions[:, :, :action_dim] if actions.ndim == 3 else actions.reshape(actions.shape[0], -1, action_dim)
+        if int(actions.shape[1]) < int(chunk_len):
+            raise RuntimeError(f"SmolVLA returned {int(actions.shape[1])} actions, requested chunk_len={int(chunk_len)}")
+        return actions[:, : int(chunk_len), :]
+
+    first = select_eval_action_queue_free(policy, proc)
+    if int(chunk_len) != 1:
+        raise RuntimeError("Chunked baseline eval requires SmolVLA model.sample_actions when chunk_len > 1")
+    return first.unsqueeze(1)
+
+
 def _resolve_action_dim(task: str) -> int:
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
@@ -259,9 +313,12 @@ def evaluate_loaded_policy_vectorized(
     n_envs: int,
     rollout_execution: str,
     max_steps: int,
+    chunk_len: int = 1,
 ) -> dict[str, Any]:
     if rollout_execution != "vector_sync":
         raise ValueError("manual-pool eval currently supports rollout_execution='vector_sync' only")
+    if int(chunk_len) < 1:
+        raise ValueError("chunk_len must be >= 1")
 
     from smolvla_grpo.lerobot_metaworld_adapter import (
         OfficialLeRobotMetaWorldGRPORollout,
@@ -286,27 +343,55 @@ def evaluate_loaded_policy_vectorized(
             terminated = [False for _ in range(wave_n)]
             truncated = [False for _ in range(wave_n)]
 
-            for _step in range(int(resolved_steps)):
+            step_count = 0
+            while step_count < int(resolved_steps):
                 if not bool(np.any(active)):
                     break
                 active_rows = [idx for idx in range(wave_n) if bool(active[idx])]
                 proc_rows = [envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows]
                 proc = concatenate_proc_rows(proc_rows)
+                effective_chunk = min(int(chunk_len), int(resolved_steps) - int(step_count))
                 with torch.inference_mode():
-                    action = select_eval_action_queue_free(bundle.policy, proc)
-                    post = bundle.postprocessor(action)
-                exec_action_np = coerce_exec_action_batch(post, action_dim=action_dim, n_envs=len(active_rows))
+                    if int(chunk_len) == 1:
+                        action = select_eval_action_queue_free(bundle.policy, proc)
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_batch(
+                            post,
+                            action_dim=action_dim,
+                            n_envs=len(active_rows),
+                        )[:, None, :]
+                    else:
+                        action = select_eval_action_chunk_queue_free(
+                            bundle.policy,
+                            proc,
+                            chunk_len=effective_chunk,
+                        )
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_chunk_batch(
+                            post,
+                            action_dim=action_dim,
+                            n_envs=len(active_rows),
+                            chunk_len=effective_chunk,
+                        )
 
-                for batch_row, row in enumerate(active_rows):
-                    step = envs[row].step(exec_action_np[batch_row : batch_row + 1])
-                    obs_by_row[row] = step.observation
-                    actions[row].append(exec_action_np[batch_row].reshape(-1).tolist())
-                    rewards[row].append(float(step.reward))
-                    successes[row].append(bool(step.success))
-                    if step.success or step.terminated or step.truncated:
-                        active[row] = False
-                        terminated[row] = bool(step.terminated)
-                        truncated[row] = bool(step.truncated)
+                for chunk_step in range(effective_chunk):
+                    if not bool(np.any(active)):
+                        break
+                    for batch_row, row in enumerate(active_rows):
+                        if not bool(active[row]):
+                            continue
+                        step = envs[row].step(exec_action_np[batch_row, chunk_step : chunk_step + 1])
+                        obs_by_row[row] = step.observation
+                        actions[row].append(exec_action_np[batch_row, chunk_step].reshape(-1).tolist())
+                        rewards[row].append(float(step.reward))
+                        successes[row].append(bool(step.success))
+                        if step.success or step.terminated or step.truncated:
+                            active[row] = False
+                            terminated[row] = bool(step.terminated)
+                            truncated[row] = bool(step.truncated)
+                    step_count += 1
+                    if step_count >= int(resolved_steps):
+                        break
 
             for row, (episode_index, reset_seed) in enumerate(wave):
                 all_results.append(
@@ -325,7 +410,7 @@ def evaluate_loaded_policy_vectorized(
             for env in envs:
                 env.close()
 
-    return write_eval_artifacts(
+    summary = write_eval_artifacts(
         base_checkpoint=base_checkpoint,
         grpo_checkpoint=grpo_checkpoint,
         output_dir=output_dir,
@@ -334,4 +419,9 @@ def evaluate_loaded_policy_vectorized(
         eval_seed_start=eval_seed_start,
         results=all_results,
     )
+    summary["n_envs"] = int(n_envs)
+    summary["max_steps"] = int(max_steps)
+    summary["chunk_len"] = int(chunk_len)
+    (output_dir / "eval_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
 
