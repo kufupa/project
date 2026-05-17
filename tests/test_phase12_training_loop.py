@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from scripts.grpo import train_phase12_wm_chunk_grpo as trainer
+from smolvla_grpo.phase12_decode_compare import _structured_field, decode_phase12_prediction_frames
 from smolvla_grpo.phase12_rollout import Phase12EpisodeResult
 
 
@@ -129,9 +130,9 @@ def test_structured_field_reads_tensordict_like_values() -> None:
 
     td = TensorDictLike()
 
-    assert trainer._structured_field(td, "visual") == "v"
-    assert trainer._structured_field(td, "proprio") == "p"
-    assert trainer._structured_field(td, "missing") is None
+    assert _structured_field(td, "visual") == "v"
+    assert _structured_field(td, "proprio") == "p"
+    assert _structured_field(td, "missing") is None
 
 
 def test_with_episode_metadata_handles_frozen_phase12_episode_result() -> None:
@@ -214,7 +215,7 @@ def test_phase12_decode_uses_final_unroll_timestep(monkeypatch) -> None:
         device=torch.device("cpu"),
     )
 
-    frames = trainer._decode_phase12_prediction_frames(
+    frames = decode_phase12_prediction_frames(
         wm_bundle,
         image=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.zeros(1, dtype=np.float32),
