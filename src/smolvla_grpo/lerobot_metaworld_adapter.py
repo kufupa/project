@@ -139,7 +139,24 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
             env._freeze_rand_vec = False
         env.reset()
         self._env = env
+        self._sync_metaworld_reset_sites()
         self._max_episode_steps = int(env.max_path_length)
+
+    def _sync_metaworld_reset_sites(self) -> None:
+        """Flush MetaWorld reset-time model edits into MuJoCo data before rendering."""
+        env = self._env
+        if env is None:
+            return
+
+        target_site_config = getattr(env, "_target_site_config", ())
+        set_pos_site = getattr(env, "_set_pos_site", None)
+        if callable(set_pos_site):
+            for site_args in target_site_config:
+                set_pos_site(*site_args)
+
+        import mujoco
+
+        mujoco.mj_forward(env.model, env.data)
 
     def render(self) -> np.ndarray:
         self._ensure_env()
@@ -188,6 +205,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         elif hasattr(self._env, "seeded_rand_vec"):
             self._env.seeded_rand_vec = False
         raw_obs, _info = self._env.reset(seed=seed)
+        self._sync_metaworld_reset_sites()
         self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         return self._format_raw_obs(raw_obs), {"is_success": False}
 

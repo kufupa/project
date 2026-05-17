@@ -186,16 +186,29 @@ def _install_fake_deferred_deps(monkeypatch):
 
     class FakeInner:
         max_path_length = 500
-        model = type("Model", (), {"cam_pos": {2: [0.0, 0.0, 0.0]}})()
 
         def __init__(self, *args, **kwargs):
             self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
             self.seeded_rand_vec = False
             self.seed_calls: list[int] = []
             self.reset_calls: list[int | None] = []
+            self.model = types.SimpleNamespace(
+                cam_pos={2: [0.0, 0.0, 0.0]},
+                goal_pos=np.array([9.0, 9.0, 9.0], dtype=np.float64),
+            )
+            self.data = types.SimpleNamespace(
+                goal_xpos=np.array([-1.0, -1.0, -1.0], dtype=np.float64),
+                forward_calls=0,
+            )
+            self._target_site_config = [("goal", np.array([1.0, 2.0, 3.0], dtype=np.float64))]
+            self.render_goal_snapshots: list[np.ndarray] = []
 
         def set_task(self, task):
             self.task = task
+
+        def _set_pos_site(self, name, pos):
+            assert name == "goal"
+            self.model.goal_pos = np.asarray(pos, dtype=np.float64).copy()
 
         def seed(self, seed):
             self.seed_calls.append(int(seed))
@@ -212,6 +225,7 @@ def _install_fake_deferred_deps(monkeypatch):
             return self.raw.copy(), 1.0, False, False, {"success": False}
 
         def render(self):
+            self.render_goal_snapshots.append(self.data.goal_xpos.copy())
             return np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
 
         def close(self):
@@ -233,12 +247,20 @@ def _install_fake_deferred_deps(monkeypatch):
 
     fake_metaworld = types.ModuleType("metaworld")
     fake_metaworld.MT1 = FakeMT1
+    fake_mujoco = types.ModuleType("mujoco")
+
+    def fake_mj_forward(model, data):
+        data.forward_calls += 1
+        data.goal_xpos = np.asarray(model.goal_pos, dtype=np.float64).copy()
+
+    fake_mujoco.mj_forward = fake_mj_forward
 
     monkeypatch.setattr(gymnasium, "spaces", FakeSpaces)
     monkeypatch.setattr(gymnasium.vector, "SyncVectorEnv", FakeDeferredVectorEnv)
     monkeypatch.setitem(sys.modules, "lerobot.envs.metaworld", fake_lr_mw)
     monkeypatch.setattr(lr_envs, "metaworld", fake_lr_mw, raising=False)
     monkeypatch.setitem(sys.modules, "metaworld", fake_metaworld)
+    monkeypatch.setitem(sys.modules, "mujoco", fake_mujoco)
 
 
 class IdentityBundle:
@@ -317,6 +339,38 @@ def test_deferred_metaworld_reset_observation_pixels_are_lerobot_vh(monkeypatch)
         raw = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
 
         np.testing.assert_array_equal(np.asarray(obs["pixels"]), np.flip(raw, (0, 1)))
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_reset_syncs_goal_site_before_render(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3", camera_name="corner2")
+    try:
+        env.reset(seed=123)
+        inner = env._env  # noqa: SLF001
+        np.testing.assert_allclose(inner.model.goal_pos, np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_allclose(inner.data.goal_xpos, np.array([1.0, 2.0, 3.0]))
+        assert inner.data.forward_calls >= 1
+        np.testing.assert_allclose(inner.render_goal_snapshots[-1], np.array([1.0, 2.0, 3.0]))
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_reset_forward_works_without_target_site_config(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3")
+    try:
+        env.reset(seed=123)
+        inner = env._env  # noqa: SLF001
+        delattr(inner, "_target_site_config")
+        obs, _info = env.reset(seed=124)
+        assert obs["pixels"].shape == (8, 8, 3)
+        assert inner.data.forward_calls >= 1
     finally:
         env.close()
 
