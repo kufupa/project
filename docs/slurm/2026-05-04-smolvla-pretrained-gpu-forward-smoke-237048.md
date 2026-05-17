@@ -36,7 +36,7 @@
 ## Override checkpoint or Python
 
 - `SMOLVLA_PRETRAINED_SMOKE_CHECKPOINT` — passed through the `.slurm` script to `--checkpoint`.
-- `LEROBOT_MW_PYTHON` — defaults to `lerobot_mw_py310` venv python.
+- `LEROBOT_MW_PYTHON` — defaults to `lerobot_mw_py312` venv python.
 
 ## Related
 

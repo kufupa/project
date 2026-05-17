@@ -26,7 +26,7 @@ slurm_export_pythonpath
 slurm_export_hf_torch_cache "smolvla-lerobot-pkg-import-gpu-smoke"
 
 # Production MetaWorld / GRPO venv (site-packages lerobot was patched here).
-PY="${LEROBOT_MW_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
+PY="${LEROBOT_MW_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python}"
 if [[ ! -x "${PY}" ]]; then
   echo "error: python not executable: ${PY} (set LEROBOT_MW_PYTHON)" >&2
   exit 2

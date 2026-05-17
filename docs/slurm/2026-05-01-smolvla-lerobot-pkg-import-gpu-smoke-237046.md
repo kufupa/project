@@ -9,7 +9,7 @@
 ## What ran
 
 - Sourced [`scripts/slurm/common_env.sh`](../scripts/slurm/common_env.sh): `PROJECT_ROOT`, `PYTHONPATH`, pinned HF/torch caches under workspace `.cache`.
-- Interpreter: `/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python` (override with `LEROBOT_MW_PYTHON` if needed).
+- Interpreter: `/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python` (override with `LEROBOT_MW_PYTHON` if needed).
 - Python work: **import** `SmolVLAPolicy` / `VLAFlowMatching`, print **CUDA** availability and device name, **inspect** `sample_actions` return type and presence of GRPO hooks. **No** `from_pretrained`, **no** Hugging Face checkpoint download, **no** full VLM forward pass.
 
 ## Did we load real SmolVLA weights?
@@ -34,5 +34,5 @@ sbatch --export=NIL scripts/slurm/smolvla_lerobot_pkg_import_gpu_smoke.slurm
 ## Next (high level)
 
 1. **Optional:** Add a second Slurm smoke that loads **base checkpoint** (`jadechoghari/smolvla_metaworld`) and runs one tiny **GPU forward** (policy or `sample_actions` with dummy batch), still under `--export=NIL` + `common_env.sh`.
-2. **Phase11 GRPO:** Implement or harden `src/smolvla_grpo/policy_wrapper.py` (distribution hooks, `rsample` / noise handling per plan), `grpo_math`, rollout collector, trainer; run **API gate** and **forward** smokes under `scripts/grpo/` with **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`** (Phase11 primary interpreter per amended plan).
+2. **Phase11 GRPO:** Implement or harden `src/smolvla_grpo/policy_wrapper.py` (distribution hooks, `rsample` / noise handling per plan), `grpo_math`, rollout collector, trainer; run **API gate** and **forward** smokes under `scripts/grpo/` with **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`** (Phase11 primary interpreter per amended plan).
 3. **Slurm hygiene:** Ensure every GRPO `sbatch` uses `--chdir=/vol/bitbucket/aa6622/project` (or equivalent) and pins caches like parity jobs.
