@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase072 official LeRobot MT50 — 10 parallel GPUs, shard 5/10 — 5 tasks × 10 episodes.
+# Submit from repo root: cd .../project && qsub scripts/mt50/submit_mt50_phase072_10ep_10gpu_shard5.pbs
+#
+# Task order matches README_MT50_Phase072_10ep_shards.txt; lists are embedded (qsub -v breaks on commas).
+#PBS -N mt50p072s5
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o mt50_phase072_10gpu_pbs_s5.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if command -v module >/dev/null 2>&1; then
+  module purge >/dev/null 2>&1 || true
+  module load tools/prod
+  module load Python/3.12.3-GCCcore-13.3.0
+fi
+
+# PBS runs a spool copy; resolve repo root from submission cwd only.
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+  cd "${PROJECT_ROOT}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+  cd "${PROJECT_ROOT}"
+fi
+
+export PROJECT_ROOT
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
+
+# CX3: MuJoCo default egl often breaks PyOpenGL.EGL on batch nodes; glfw works with xvfb-run in the eval wrapper.
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+
+export MT50_PHASE071_EPISODES="${MT50_PHASE071_EPISODES:-10}"
+export MT50_PHASE071_SEED="${MT50_PHASE071_SEED:-1000}"
+export MT50_PHASE071_OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_10ep_10gpu/shard5}"
+export MT50_PHASE071_TASK='handle-pull-side-v3,handle-pull-v3,lever-pull-v3,peg-insert-side-v3,peg-unplug-side-v3'
+
+echo "[mt50-p072-pbs-s5] host=$(hostname) job=${PBS_JOBID:-local} PROJECT_ROOT=${PROJECT_ROOT} tasks=5 episodes=${MT50_PHASE071_EPISODES}"
+
+exec bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
