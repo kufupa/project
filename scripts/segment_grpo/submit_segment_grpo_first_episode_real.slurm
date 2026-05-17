@@ -23,7 +23,7 @@ cd "${PROJECT_ROOT}"
 mkdir -p "${PROJECT_ROOT}/logs"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 
 # Defaults: same as run_first_episode_real_pipeline.sh (phase07 checkpoint + hub cache).
 export SMOLVLA_CHECKPOINT="${SMOLVLA_CHECKPOINT:-jadechoghari/smolvla_metaworld}"

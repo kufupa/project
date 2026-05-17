@@ -17,7 +17,7 @@ PROJECT_ROOT="/vol/bitbucket/aa6622/project"
 cd "${PROJECT_ROOT}"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 PY="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
 
 export SMOLVLA_CHECKPOINT="${SMOLVLA_CHECKPOINT:-jadechoghari/smolvla_metaworld}"

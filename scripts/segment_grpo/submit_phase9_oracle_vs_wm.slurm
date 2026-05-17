@@ -22,6 +22,6 @@ export TORCH_HOME="${TORCH_HOME:-${VOL_CACHE}/torch}"
 export JEPA_REPO="${JEPA_REPO:-${TORCH_HOME}/hub/facebookresearch_jepa-wms_main}"
 
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312}"
 
 bash scripts/segment_grpo/run_phase9_oracle_vs_wm.sh
