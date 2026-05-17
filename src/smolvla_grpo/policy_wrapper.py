@@ -60,6 +60,18 @@ class SampledActionChunk:
     unique_action_rows: int
 
 
+@dataclass
+class SampledActionChunkBatch:
+    exec_action_np: np.ndarray
+    raw_postprocessed_action_np: np.ndarray
+    policy_tensor: torch.Tensor
+    unsquashed_chunk: torch.Tensor
+    log_prob_steps: torch.Tensor
+    log_prob_sum: torch.Tensor
+    action_clip_fraction: np.ndarray
+    action_clip_any: np.ndarray
+
+
 class MetaWorldSmolVLAGRPOPolicy:
     """Wraps LeRobot SmolVLAPolicy + preprocessor/postprocessor for Push-v3 rollouts."""
 
@@ -221,6 +233,47 @@ class MetaWorldSmolVLAGRPOPolicy:
                 f"({int(chunk_len)}), got mean={tuple(mean.shape)} log_std={tuple(log_std.shape)}."
             )
         return mean, log_std
+
+    def _reshape_chunk_params_batch(
+        self,
+        mean: torch.Tensor,
+        log_std: torch.Tensor,
+        *,
+        n_envs: int,
+        chunk_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        b = int(n_envs)
+        t = int(chunk_len)
+        a = int(self.action_dim)
+        if b < 1:
+            raise ValueError("n_envs must be >= 1")
+        if t < 1:
+            raise ValueError("chunk_len must be >= 1")
+
+        def _reshape(x: torch.Tensor, name: str) -> torch.Tensor:
+            x = x.reshape(*tuple(x.shape))
+            if x.ndim == 3 and int(x.shape[0]) == b and int(x.shape[2]) == a:
+                out = x
+            elif x.ndim == 2 and int(x.shape[0]) == b * t and int(x.shape[1]) == a:
+                out = x.reshape(b, t, a)
+            elif x.ndim == 2 and int(x.shape[0]) == b and int(x.shape[1]) == a:
+                out = x.unsqueeze(1).expand(b, t, a)
+            elif x.ndim == 2 and int(x.shape[0]) >= b * t and int(x.shape[1]) == a:
+                out = x[: b * t].reshape(b, t, a)
+            else:
+                raise RuntimeError(
+                    f"Batch chunk {name} params must be (B,T,A), (B*T,A), or (B,A); got {tuple(x.shape)} "
+                    f"for B={b} T={t} A={a}."
+                )
+            if int(out.shape[1]) > t:
+                out = out[:, :t, :]
+            if tuple(out.shape) != (b, t, a):
+                raise RuntimeError(
+                    f"Batch chunk {name} params must reshape to {(b, t, a)}, got {tuple(out.shape)}."
+                )
+            return out
+
+        return _reshape(mean, "mean"), _reshape(log_std, "log_std")
 
     def assert_grpo_api(self) -> None:
         """Raise if forked LeRobot GRPO hooks are missing."""
@@ -393,6 +446,99 @@ class MetaWorldSmolVLAGRPOPolicy:
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
             unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
+        )
+
+    def sample_action_chunk_batch_from_proc(
+        self,
+        proc: Any,
+        *,
+        n_envs: int,
+        chunk_len: int,
+        rngs: Sequence[torch.Generator] | None = None,
+        reset_seed: int | None = None,
+        rollout_index_offset: int = 0,
+    ) -> SampledActionChunkBatch:
+        proc_d = self._proc_to_device(proc)
+        b = int(n_envs)
+        if rngs is not None and len(rngs) != b:
+            raise ValueError(f"rngs length {len(rngs)} != n_envs {b}")
+        if rngs is None and reset_seed is None:
+            raise ValueError("Either rngs or reset_seed must be provided")
+
+        policy_hook = getattr(self._policy, "_get_distr_params_chunk", None)
+        if callable(policy_hook):
+            try:
+                mean, log_std = policy_hook(proc_d)
+            except TypeError:
+                mean, log_std = policy_hook(proc_d, chunk_len=int(chunk_len))
+        else:
+            model = getattr(self._policy, "model", None)
+            model_hook = getattr(model, "_get_distr_params_chunk", None)
+            if callable(model_hook):
+                try:
+                    mean, log_std = model_hook(proc_d)
+                except TypeError:
+                    mean, log_std = model_hook(proc_d, chunk_len=int(chunk_len))
+            else:
+                mean, log_std = self._policy.select_action_distr_params(proc_d)
+        mean, log_std = self._reshape_chunk_params_batch(
+            mean,
+            log_std,
+            n_envs=b,
+            chunk_len=int(chunk_len),
+        )
+
+        policy_rows: list[torch.Tensor] = []
+        unsq_rows: list[torch.Tensor] = []
+        lp_rows: list[torch.Tensor] = []
+        raw_rows: list[np.ndarray] = []
+        exec_rows: list[np.ndarray] = []
+        clip_frac_rows: list[np.ndarray] = []
+        clip_any_rows: list[np.ndarray] = []
+        base = int(rollout_index_offset)
+        for row_idx in range(b):
+            gen = rngs[row_idx] if rngs is not None else torch.Generator(device=mean.device)
+            if rngs is None:
+                gen.manual_seed(int(reset_seed) * 1000003 + (base + row_idx) * 7919)
+            m = mean[row_idx]
+            ls = log_std[row_idx]
+            std = torch.exp(ls)
+            noise = torch.randn(m.shape, generator=gen, device=m.device, dtype=m.dtype)
+            unsquashed = m + std * noise
+            if self.action_transform == "tanh_norm_ablation":
+                policy_tensor = torch.tanh(unsquashed)
+                log_prob_steps = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+            else:
+                policy_tensor = unsquashed
+                log_prob_steps = self.calculate_gaussian_log_prob(m, ls, unsquashed)
+
+            raw_steps: list[np.ndarray] = []
+            exec_steps: list[np.ndarray] = []
+            frac_steps: list[float] = []
+            any_steps: list[bool] = []
+            for step_tensor in policy_tensor:
+                raw_np, exec_np, clip_fraction, clip_any = self._postprocess_action(step_tensor.reshape(1, -1))
+                raw_steps.append(np.asarray(raw_np, dtype=np.float32))
+                exec_steps.append(np.asarray(exec_np, dtype=np.float32))
+                frac_steps.append(float(clip_fraction))
+                any_steps.append(bool(clip_any))
+            policy_rows.append(policy_tensor.detach())
+            unsq_rows.append(unsquashed.detach())
+            lp_rows.append(log_prob_steps.detach())
+            raw_rows.append(np.stack(raw_steps, axis=0))
+            exec_rows.append(np.stack(exec_steps, axis=0))
+            clip_frac_rows.append(np.asarray(frac_steps, dtype=np.float64))
+            clip_any_rows.append(np.asarray(any_steps, dtype=np.bool_))
+
+        return SampledActionChunkBatch(
+            exec_action_np=np.stack(exec_rows, axis=0),
+            raw_postprocessed_action_np=np.stack(raw_rows, axis=0),
+            policy_tensor=torch.stack(policy_rows, dim=0),
+            unsquashed_chunk=torch.stack(unsq_rows, dim=0),
+            log_prob_steps=torch.stack(lp_rows, dim=0),
+            log_prob_sum=torch.stack(lp_rows, dim=0).sum(dim=1),
+            action_clip_fraction=np.stack(clip_frac_rows, axis=0),
+            action_clip_any=np.stack(clip_any_rows, axis=0),
         )
 
     def sample_action(
