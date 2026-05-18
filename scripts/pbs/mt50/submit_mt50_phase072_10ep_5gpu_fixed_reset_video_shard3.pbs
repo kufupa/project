@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase072 official LeRobot MT50 fixed-reset A/B — 5 GPUs, shard 3/5 — 10 tasks × 10 episodes.
+# Same checkpoint/seed/n_episodes as randomized Phase072. Only change: MetaWorld _freeze_rand_vec=true.
+# Submit from repo root: cd .../project && qsub scripts/pbs/mt50/submit_mt50_phase072_10ep_5gpu_fixed_reset_video_shard3.pbs
+#
+#PBS -N mt50fixs3
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o logs/pbs/mt50/phase072_10ep_5gpu_fixed_reset_video/s3.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if command -v module >/dev/null 2>&1; then
+  module purge >/dev/null 2>&1 || true
+  module load tools/prod
+  module load Python/3.12.3-GCCcore-13.3.0
+fi
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"   # scripts/pbs/mt50 → project root
+fi
+cd "${PROJECT_ROOT}"
+export PROJECT_ROOT
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+
+export MT50_PHASE071_EPISODES="${MT50_PHASE071_EPISODES:-10}"
+export MT50_PHASE071_SEED="${MT50_PHASE071_SEED:-1000}"
+export MT50_PHASE071_OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_10ep_5gpu_fixed_reset_video/shard3}"
+export MT50_PHASE071_TASK='pick-out-of-hole-v3,pick-place-v3,pick-place-wall-v3,plate-slide-back-side-v3,plate-slide-back-v3,plate-slide-side-v3,plate-slide-v3,push-back-v3,push-v3,push-wall-v3'
+export MT50_METAWORLD_FREEZE_RAND_VEC="${MT50_METAWORLD_FREEZE_RAND_VEC:-true}"
+# NOTE: videos enabled by omitting MT50_LEROBOT_MAX_EPISODES_RENDERED.
+
+echo "[mt50-p072-fixed-reset-s3] host=$(hostname) job=${PBS_JOBID:-local} tasks=10 ep=${MT50_PHASE071_EPISODES} freeze=${MT50_METAWORLD_FREEZE_RAND_VEC}"
+exec bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
