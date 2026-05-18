@@ -102,7 +102,7 @@ echo "[phase11-P128B] train pop128 lr5e-6 clip0.1 updates 1-50 job=${PBS_JOBID:-
   --lr 5e-6 \
   --clip-eps 0.1 \
   --logprob-recompute-mode batched \
-  --logprob-batch-size 32 \
+  --logprob-batch-size 16 \
   --rollout-policy-batch-size 16 \
   --run-label chunk5_pop128_rpbs32_lr5e6_clip01
 
