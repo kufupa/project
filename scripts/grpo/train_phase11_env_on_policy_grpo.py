@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import torch
+
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
@@ -22,8 +24,74 @@ def _append_progress(path: Path, row: dict) -> None:
         fp.write(json.dumps(row) + "\n")
 
 
+def _json_ready_args(args: argparse.Namespace) -> dict:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
+
+
+def _phase11_clipped_row_loss(
+    new_lp: torch.Tensor,
+    old_lp: torch.Tensor,
+    advantage: torch.Tensor,
+    clip_eps: float,
+) -> torch.Tensor:
+    ratio = torch.exp(new_lp - old_lp)
+    unclipped = ratio * advantage
+    clipped = torch.clamp(ratio, 1.0 - float(clip_eps), 1.0 + float(clip_eps)) * advantage
+    return -torch.min(unclipped, clipped)
+
+
+def _backward_phase11_chunk_loss(
+    *,
+    train_wrapper,
+    action_chunks,
+    advantage: torch.Tensor,
+    device: torch.device,
+    optimizer_chunk_size: int,
+    clip_eps: float,
+    normalizer: int,
+) -> int:
+    rows = list(action_chunks)
+    if not rows:
+        return 0
+    denom = int(normalizer)
+    if denom <= 0:
+        raise ValueError("normalizer must be > 0")
+    opt_chunk = max(int(optimizer_chunk_size), 1)
+
+    def _recompute_row_logprob(row) -> torch.Tensor:
+        unsquashed = row.unsquashed_chunk.to(device)
+        if getattr(row, "logprob_mode", "chunk") == "step":
+            return train_wrapper.get_action_probs_from_proc_list(
+                [row.proc_snapshot],
+                unsquashed.reshape(1, -1).to(device),
+            ).sum()
+        return train_wrapper.get_action_probs_for_chunk_from_proc(
+            row.proc_snapshot,
+            unsquashed,
+        ).sum()
+
+    for cs in range(0, len(rows), opt_chunk):
+        batch_rows = rows[cs : cs + opt_chunk]
+        new_lp = torch.stack(
+            [
+                _recompute_row_logprob(row)
+                for row in batch_rows
+            ]
+        ).float()
+        old_lp = torch.stack([row.log_prob_sum for row in batch_rows]).to(
+            device=new_lp.device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        adv = advantage.to(device=new_lp.device, dtype=torch.float32)
+        losses = _phase11_clipped_row_loss(new_lp.reshape(-1), old_lp, adv, clip_eps)
+        (losses.sum() / denom).backward()
+    return len(rows)
+
+
 def main() -> int:
-    import torch
     from torch import nn
 
     from smolvla_grpo.checkpointing import load_grpo_checkpoint, save_grpo_checkpoint
@@ -66,7 +134,18 @@ def main() -> int:
     p.add_argument("--group-size", type=int, default=4)
     p.add_argument("--batch-size", type=int, default=1, help="Must be 1 for single-seed group")
     p.add_argument("--update-epochs", type=int, default=1)
-    p.add_argument("--chunk-size", type=int, default=5)
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=5,
+        help="Optimizer microbatch size for logprob recompute/backward",
+    )
+    p.add_argument(
+        "--action-chunk-size",
+        type=int,
+        default=1,
+        help="Open-loop rollout horizon. 1 keeps legacy Phase11 behavior; 5 samples one 5-step action chunk per root observation.",
+    )
     p.add_argument("--clip-eps", type=float, default=0.2)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--init-log-std", type=float, default=-2.0)
@@ -83,6 +162,10 @@ def main() -> int:
     args = p.parse_args()
     if args.batch_size != 1:
         raise SystemExit("Only batch_size=1 supported (one seed context per update).")
+    if int(args.chunk_size) < 1:
+        raise SystemExit("--chunk-size must be >= 1")
+    if int(args.action_chunk_size) < 1:
+        raise SystemExit("--action-chunk-size must be >= 1")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out = args.output_dir.expanduser().resolve()
@@ -94,7 +177,12 @@ def main() -> int:
     progress_path = out / "progress.jsonl"
     manifest_path = out / "train_manifest.json"
 
-    bundle, action_dim = load_bundle_for_grpo(args.checkpoint, task=args.task, env_backend=args.env_backend)
+    bundle, action_dim = load_bundle_for_grpo(
+        args.checkpoint,
+        task=args.task,
+        env_backend=args.env_backend,
+        n_action_steps=int(args.action_chunk_size),
+    )
     task_text = _resolve_task_text(args.task, override=None)
     camera_name = _resolve_camera_name()
     flip_corner2 = _resolve_flip_corner2()
@@ -144,6 +232,9 @@ def main() -> int:
         "end_update": end_u,
         "max_steps": args.max_steps,
         "group_size": args.group_size,
+        "optimizer_chunk_size": int(args.chunk_size),
+        "action_chunk_size": int(args.action_chunk_size),
+        "loss_unit": "policy_chunk",
         "clip_eps": args.clip_eps,
         "lr": args.lr,
         "action_transform": args.action_transform,
@@ -170,6 +261,7 @@ def main() -> int:
             rollout_execution=args.rollout_execution,
             async_start_method=args.async_start_method,
             action_transform=args.action_transform,
+            action_chunk_size=int(args.action_chunk_size),
         )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
         returns = torch.tensor(
@@ -182,6 +274,20 @@ def main() -> int:
         avg_ret = float(returns.mean().item())
         episode_lengths = [len(tr.rewards) for tr in rollouts]
         num_env_steps = int(sum(episode_lengths))
+        num_policy_sample_calls = int(
+            sum(
+                int(
+                    (getattr(tr, "metadata", {}) or {}).get(
+                        "policy_sample_calls",
+                        len(getattr(tr, "action_chunks", []) or []),
+                    )
+                )
+                for tr in rollouts
+            )
+        )
+        num_loss_units = int(
+            sum(len(getattr(tr, "action_chunks", []) or []) for tr in rollouts)
+        )
         terminated_flags = [bool(tr.terminated) for tr in rollouts]
         truncated_flags = [bool(tr.truncated) for tr in rollouts]
         clip_values = [float(v) for tr in rollouts for v in tr.action_clip_fractions]
@@ -195,9 +301,41 @@ def main() -> int:
             resolved_max_steps = int(
                 rollouts[0].metadata.get("resolved_max_steps", resolved_max_steps)
             )
+        metrics_common = {
+            "env_backend": args.env_backend,
+            "rollout_execution": args.rollout_execution,
+            "action_transform": args.action_transform,
+            "run_label": args.run_label,
+            "async_start_method": (
+                args.async_start_method if args.rollout_execution == "vector_async" else None
+            ),
+            "max_steps": args.max_steps,
+            "resolved_max_steps": resolved_max_steps,
+            "avg_return": avg_ret,
+            "successes": successes,
+            "success_rate": success_rate,
+            "episode_lengths": episode_lengths,
+            "num_env_steps": num_env_steps,
+            "num_policy_sample_calls": num_policy_sample_calls,
+            "num_loss_units": num_loss_units,
+            "optimizer_chunk_size": int(args.chunk_size),
+            "action_chunk_size": int(args.action_chunk_size),
+            "loss_unit": "policy_chunk",
+            "action_clip_fraction": action_clip_fraction,
+            "action_clip_any_fraction": action_clip_any_fraction,
+            "terminated": terminated_flags,
+            "truncated": truncated_flags,
+        }
         advantages = compute_group_advantages(returns)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             update_seconds = float(time.perf_counter() - update_t0)
+            skipped_extra = {
+                **metrics_common,
+                "skipped": True,
+                "rollout_seconds": rollout_seconds,
+                "optimize_seconds": 0.0,
+                "update_seconds": update_seconds,
+            }
             _append_progress(
                 progress_path,
                 {
@@ -205,55 +343,19 @@ def main() -> int:
                     "skipped": True,
                     "reason": "zero_advantages",
                     "reset_seed": reset_seed,
-                    "env_backend": args.env_backend,
-                    "rollout_execution": args.rollout_execution,
-                    "action_transform": args.action_transform,
-                    "run_label": args.run_label,
-                    "async_start_method": (
-                        args.async_start_method if args.rollout_execution == "vector_async" else None
-                    ),
-                    "max_steps": args.max_steps,
-                    "resolved_max_steps": resolved_max_steps,
-                    "avg_return": avg_ret,
                     "returns": returns.detach().cpu().tolist(),
-                    "successes": successes,
-                    "success_rate": success_rate,
-                    "episode_lengths": episode_lengths,
-                    "num_env_steps": num_env_steps,
-                    "action_clip_fraction": action_clip_fraction,
-                    "action_clip_any_fraction": action_clip_any_fraction,
-                    "rollout_seconds": rollout_seconds,
-                    "optimize_seconds": 0.0,
-                    "update_seconds": update_seconds,
-                    "terminated": terminated_flags,
-                    "truncated": truncated_flags,
+                    **skipped_extra,
                 },
             )
             state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
             old_policy.load_state_dict(state)
             old_policy.eval()
-            skipped_extra = {
-                "avg_return": avg_ret,
-                "success_rate": success_rate,
-                "successes": successes,
-                "skipped": True,
-                "resolved_max_steps": resolved_max_steps,
-                "episode_lengths": episode_lengths,
-                "num_env_steps": num_env_steps,
-                "action_clip_fraction": action_clip_fraction,
-                "action_clip_any_fraction": action_clip_any_fraction,
-                "rollout_seconds": rollout_seconds,
-                "optimize_seconds": 0.0,
-                "update_seconds": update_seconds,
-                "terminated": terminated_flags,
-                "truncated": truncated_flags,
-            }
             save_grpo_checkpoint(
                 ckpt_dir / "latest.pt",
                 policy_state=bundle.policy.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 update_index=update,
-                args=vars(args),
+                args=_json_ready_args(args),
                 extra=skipped_extra,
             )
             if (update + 1) % args.save_every == 0 or update == end_u - 1:
@@ -262,7 +364,7 @@ def main() -> int:
                     policy_state=bundle.policy.state_dict(),
                     optimizer_state=optimizer.state_dict(),
                     update_index=update,
-                    args=vars(args),
+                    args=_json_ready_args(args),
                     extra=skipped_extra,
                 )
             print(
@@ -276,6 +378,9 @@ def main() -> int:
                 f"success_rate={success_rate:.3f}",
                 f"episode_lengths={episode_lengths}",
                 f"env_steps={num_env_steps}",
+                f"policy_calls={num_policy_sample_calls}",
+                f"loss_units={num_loss_units}",
+                f"action_chunk_size={int(args.action_chunk_size)}",
                 f"clip_frac={action_clip_fraction:.4f}",
                 f"clip_any_frac={action_clip_any_fraction:.4f}",
                 f"rollout_s={rollout_seconds:.2f}",
@@ -290,58 +395,41 @@ def main() -> int:
         optimize_t0 = time.perf_counter()
         for _epoch in range(args.update_epochs):
             optimizer.zero_grad()
+            G = len(rollouts)
             for gi, traj in enumerate(rollouts):
                 A = advantages[gi].reshape(()).float()
-                T = len(traj.proc_snapshots)
-                G = len(rollouts)
-                for cs in range(0, T, args.chunk_size):
-                    ce = min(cs + args.chunk_size, T)
-                    procs = traj.proc_snapshots[cs:ce]
-                    u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(
-                        device
-                    )
-                    old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, u_chunk).reshape(-1)
-                    ratio = torch.exp(new_lp - old_lp)
-                    unclipped = ratio * A
-                    clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * A
-                    step_losses = -torch.min(unclipped, clipped)
-                    chunk_loss = step_losses.sum() / max(T * G, 1)
-                    chunk_loss.backward()
+                n_units = len(getattr(traj, "action_chunks", []) or [])
+                if n_units <= 0:
+                    raise RuntimeError("Phase11 rollout produced no action_chunks")
+                _backward_phase11_chunk_loss(
+                    train_wrapper=train_wrapper,
+                    action_chunks=traj.action_chunks,
+                    advantage=A,
+                    device=device,
+                    optimizer_chunk_size=int(args.chunk_size),
+                    clip_eps=float(args.clip_eps),
+                    normalizer=n_units * G,
+                )
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
             optimizer.step()
         optimize_seconds = float(time.perf_counter() - optimize_t0)
         update_seconds = float(time.perf_counter() - update_t0)
+        checkpoint_extra = {
+            **metrics_common,
+            "rollout_seconds": rollout_seconds,
+            "optimize_seconds": optimize_seconds,
+            "update_seconds": update_seconds,
+        }
 
         _append_progress(
             progress_path,
             {
                 "update": update,
                 "reset_seed": reset_seed,
-                "env_backend": args.env_backend,
-                "rollout_execution": args.rollout_execution,
-                "action_transform": args.action_transform,
-                "run_label": args.run_label,
-                "async_start_method": (
-                    args.async_start_method if args.rollout_execution == "vector_async" else None
-                ),
-                "max_steps": args.max_steps,
-                "resolved_max_steps": resolved_max_steps,
-                "avg_return": avg_ret,
                 "returns": returns.detach().cpu().tolist(),
-                "successes": successes,
-                "success_rate": success_rate,
                 "advantages": advantages.detach().cpu().tolist(),
-                "episode_lengths": episode_lengths,
-                "num_env_steps": num_env_steps,
-                "action_clip_fraction": action_clip_fraction,
-                "action_clip_any_fraction": action_clip_any_fraction,
-                "rollout_seconds": rollout_seconds,
-                "optimize_seconds": optimize_seconds,
-                "update_seconds": update_seconds,
-                "terminated": terminated_flags,
-                "truncated": truncated_flags,
+                **checkpoint_extra,
             },
         )
         state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
@@ -353,19 +441,8 @@ def main() -> int:
             policy_state=bundle.policy.state_dict(),
             optimizer_state=optimizer.state_dict(),
             update_index=update,
-            args=vars(args),
-            extra={
-                "avg_return": avg_ret,
-                "success_rate": success_rate,
-                "successes": successes,
-                "resolved_max_steps": resolved_max_steps,
-                "episode_lengths": episode_lengths,
-                "num_env_steps": num_env_steps,
-                "action_clip_fraction": action_clip_fraction,
-                "action_clip_any_fraction": action_clip_any_fraction,
-                "terminated": terminated_flags,
-                "truncated": truncated_flags,
-            },
+            args=_json_ready_args(args),
+            extra=checkpoint_extra,
         )
         if (update + 1) % args.save_every == 0 or update == end_u - 1:
             save_grpo_checkpoint(
@@ -373,18 +450,8 @@ def main() -> int:
                 policy_state=bundle.policy.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 update_index=update,
-                args=vars(args),
-                extra={
-                    "avg_return": avg_ret,
-                    "success_rate": success_rate,
-                    "successes": successes,
-                    "resolved_max_steps": resolved_max_steps,
-                    "episode_lengths": episode_lengths,
-                    "terminated": terminated_flags,
-                    "truncated": truncated_flags,
-                    "action_clip_fraction": action_clip_fraction,
-                    "action_clip_any_fraction": action_clip_any_fraction,
-                },
+                args=_json_ready_args(args),
+                extra=checkpoint_extra,
             )
         print(
             "phase111_grpo_update",
@@ -397,6 +464,9 @@ def main() -> int:
             f"success_rate={success_rate:.3f}",
             f"episode_lengths={episode_lengths}",
             f"env_steps={num_env_steps}",
+            f"policy_calls={num_policy_sample_calls}",
+            f"loss_units={num_loss_units}",
+            f"action_chunk_size={int(args.action_chunk_size)}",
             f"clip_frac={action_clip_fraction:.4f}",
             f"clip_any_frac={action_clip_any_fraction:.4f}",
             f"rollout_s={rollout_seconds:.2f}",
