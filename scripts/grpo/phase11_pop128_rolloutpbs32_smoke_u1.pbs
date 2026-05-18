@@ -111,11 +111,13 @@ import json
 from pathlib import Path
 
 run_dir = Path("artifacts/phase11_pushv3_pop128_rolloutpbs32_smoke_u1")
+manifest = json.loads((run_dir / "train_manifest.json").read_text(encoding="utf-8"))
 rows = [json.loads(line) for line in (run_dir / "progress.jsonl").read_text().splitlines() if line.strip()]
 if not rows:
     raise SystemExit("progress.jsonl empty")
 last = rows[-1]
-assert int(last["group_size"]) == 128
+assert int(manifest["group_size"]) == 128
+assert int(manifest["rollout_policy_batch_size"]) == 16
 assert int(last["rollout_policy_batch_size"]) == 16
 assert int(last["logprob_batch_size"]) == 16
 assert int(last["num_loss_units"]) > 0
