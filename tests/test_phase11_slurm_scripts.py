@@ -175,3 +175,41 @@ def test_phase11_batched_logprob_smoke_pbs_defaults_to_batched_bs16() -> None:
     assert "--logprob-batch-size 16" in text
     assert "PHASE11_BATCHED_LOGPROB_SMOKE_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_phase11_train_pbs_scripts_track_cpu_memory() -> None:
+    helper = (_REPO_ROOT / "scripts" / "grpo" / "phase11_cpu_mem_telemetry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'scripts/grpo/sample_process_tree_memory.py' in helper
+    assert 'scripts/grpo/summarize_process_tree_memory.py' in helper
+    assert 'process_tree_memory.csv' in helper
+    assert 'process_tree_memory_summary.json' in helper
+    subprocess.run(
+        ["bash", "-n", str(_REPO_ROOT / "scripts" / "grpo" / "phase11_cpu_mem_telemetry.sh")],
+        check=True,
+        cwd=str(_REPO_ROOT),
+    )
+
+    names = (
+        "phase11_pop128_rolloutpbs32_smoke_u1.pbs",
+        "phase11_P128A_lr2e6_clip005_train_0001_0050.pbs",
+        "phase11_P128B_lr5e6_clip01_train_0001_0050.pbs",
+        "phase11_P128C_lr5e6_clip01_lownoise_train_0001_0050.pbs",
+        "phase11_R1_g32_lr2e6_clip005_train_0001_0050.pbs",
+        "phase11_R2_g32_lr5e6_clip01_lownoise_train_0001_0050.pbs",
+        "phase11_R3_g64_lr5e6_clip01_train_0001_0050.pbs",
+        "phase11_A_g32_lr5e6_clip01_train_0000_0030.pbs",
+        "phase11_A_g32_lr5e6_clip01_resume_train_0014_0030.pbs",
+        "phase11_g16_lr5e6_clip02_train_0000_0010.pbs",
+        "phase11_g16_lr5e6_clip02_train_0010_0020_resume.pbs",
+        "phase11_batched_logprob_smoke_u2.pbs",
+    )
+    for name in names:
+        path = _REPO_ROOT / "scripts" / "grpo" / name
+        text = path.read_text(encoding="utf-8")
+        assert 'CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"' in text
+        assert 'CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train"' in text
+        assert "source scripts/grpo/phase11_cpu_mem_telemetry.sh" in text
+        assert "run_phase11_with_cpu_mem_telemetry" in text
+        subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))

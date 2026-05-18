@@ -16,8 +16,11 @@ cd /rds/general/user/aa6622/home/project
 RUN_DIR="artifacts/phase11_pushv3_batched_logprob_smoke_u2"
 BASE_CKPT="/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900"
 PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
+CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train"
+source scripts/grpo/phase11_cpu_mem_telemetry.sh
 
-mkdir -p logs/pbs/grpo "${RUN_DIR}"
+mkdir -p logs/pbs/grpo "${RUN_DIR}" "${CPU_MEM_TELEMETRY_DIR}"
 
 export PYTHONPATH=src
 export MUJOCO_GL=egl
@@ -43,8 +46,15 @@ if [[ ! -d "${BASE_CKPT}" ]]; then
   exit 2
 fi
 
+cleanup_phase11_cpu_mem_telemetry() {
+  local status=$?
+  stop_cpu_mem_telemetry
+  exit "${status}"
+}
+trap cleanup_phase11_cpu_mem_telemetry EXIT
+
 echo "[phase11-batched-logprob-smoke] train u2 g32 bs16 job=${PBS_JOBID:-local}"
-"${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
+run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
   --checkpoint "${BASE_CKPT}" \
   --output-dir "${RUN_DIR}" \
   --task push-v3 \
