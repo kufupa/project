@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
+from scripts.grpo.sample_process_tree_memory import write_process_tree_memory_sample
+from scripts.grpo.summarize_process_tree_memory import summarize_process_tree_memory_csv
 from smolvla_grpo.process_memory import (
     prefixed_process_tree_memory_fields,
     process_tree_memory_snapshot,
@@ -76,3 +79,54 @@ def test_prefixed_process_tree_memory_fields_are_flat(tmp_path: Path) -> None:
         "proc_mem_update_start_tree_vmpeak_kb": 5100,
         "proc_mem_update_start_max_descendant_rss_kb": 0,
     }
+
+
+def test_write_process_tree_memory_sample_appends_csv(tmp_path: Path) -> None:
+    _write_status(tmp_path / "proc", 100, ppid=1, rss=1000, hwm=1100, vmsize=5000, vmpeak=5100)
+    output = tmp_path / "memory.csv"
+
+    write_process_tree_memory_sample(
+        output,
+        root_pid=100,
+        label="train",
+        proc_root=tmp_path / "proc",
+        timestamp_unix_ms=1000,
+    )
+    write_process_tree_memory_sample(
+        output,
+        root_pid=100,
+        label="train",
+        proc_root=tmp_path / "proc",
+        timestamp_unix_ms=2000,
+    )
+
+    rows = list(csv.DictReader(output.open(newline="", encoding="utf-8")))
+    assert len(rows) == 2
+    assert rows[0]["label"] == "train"
+    assert rows[0]["root_pid"] == "100"
+    assert rows[0]["tree_rss_kb"] == "1000"
+    assert rows[1]["timestamp_unix_ms"] == "2000"
+
+
+def test_summarize_process_tree_memory_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "memory.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "timestamp_unix_ms,label,root_pid,process_count,descendant_count,missing_process_count,self_rss_kb,self_vmhwm_kb,self_vmsize_kb,self_vmpeak_kb,tree_rss_kb,tree_vmhwm_kb,tree_vmsize_kb,tree_vmpeak_kb,max_descendant_rss_kb",
+                "1000,train,100,1,0,0,1000,1100,5000,5100,1000,1100,5000,5100,0",
+                "2000,train,100,3,2,0,2000,2200,6000,6200,9000,9900,16000,16200,4000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_process_tree_memory_csv(csv_path)
+
+    assert summary["sample_count"] == 2
+    assert summary["max_tree_rss_kb"] == 9000
+    assert summary["max_tree_rss_mib"] == 9000 / 1024.0
+    assert summary["max_tree_vmsize_kb"] == 16000
+    assert summary["max_descendant_count"] == 2
+    assert summary["max_max_descendant_rss_kb"] == 4000
