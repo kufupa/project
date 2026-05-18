@@ -199,10 +199,14 @@ class FakeVectorPolicyWrapper:
             [np.full((4,), float(row + 1), dtype=np.float32) for row in range(int(n_envs))],
             axis=0,
         )
+        tensor = torch.as_tensor(actions, dtype=torch.float32)
+        log_prob = torch.arange(int(n_envs), dtype=torch.float32)
         return SimpleNamespace(
             exec_action_np=actions,
-            unsquashed=torch.as_tensor(actions, dtype=torch.float32),
-            log_prob=torch.arange(int(n_envs), dtype=torch.float32),
+            raw_postprocessed_action_np=actions.copy(),
+            policy_tensor=tensor,
+            unsquashed=tensor,
+            log_prob=log_prob,
             action_clip_fraction=np.zeros((int(n_envs),), dtype=np.float64),
             action_clip_any=np.zeros((int(n_envs),), dtype=np.bool_),
         )
@@ -213,12 +217,17 @@ class FakeVectorPolicyWrapper:
         for row in range(int(n_envs)):
             for step in range(int(chunk_len)):
                 actions[row, step] = float(len(self.chunk_calls) * 100 + row * 10 + step)
+        tensor = torch.as_tensor(actions, dtype=torch.float32)
+        log_prob_steps = torch.arange(int(n_envs) * int(chunk_len), dtype=torch.float32).reshape(
+            int(n_envs), int(chunk_len)
+        )
         return SimpleNamespace(
             exec_action_np=actions,
-            unsquashed_chunk=torch.as_tensor(actions, dtype=torch.float32),
-            log_prob_steps=torch.arange(int(n_envs) * int(chunk_len), dtype=torch.float32).reshape(
-                int(n_envs), int(chunk_len)
-            ),
+            raw_postprocessed_action_np=actions.copy(),
+            policy_tensor=tensor,
+            unsquashed_chunk=tensor,
+            log_prob_steps=log_prob_steps,
+            log_prob_sum=log_prob_steps.sum(dim=1),
             action_clip_fraction=np.zeros((int(n_envs), int(chunk_len)), dtype=np.float64),
             action_clip_any=np.zeros((int(n_envs), int(chunk_len)), dtype=np.bool_),
         )
@@ -400,6 +409,40 @@ def test_phase11_vector_action_chunk_samples_active_rows_once_per_chunk(monkeypa
     ]
 
 
+def test_phase11_vector_rollout_microbatches_policy_forward(monkeypatch):
+    _install_vector_fakes(monkeypatch)
+    rollouts = phase11_rollout.collect_rollout_group(
+        bundle=FakeBundle(),
+        policy_old=SimpleNamespace(),
+        task="push-v3",
+        task_text="push",
+        reset_seed=1000,
+        episode_index=0,
+        max_steps=5,
+        group_size=6,
+        action_dim=4,
+        device=torch.device("cpu"),
+        env_backend="official_lerobot",
+        rollout_execution="vector_sync",
+        rollout_policy_batch_size=2,
+        action_chunk_size=2,
+    )
+    wrapper = FakeVectorPolicyWrapper.instances[-1]
+    assert wrapper.chunk_calls == [
+        (2, 2),
+        (2, 2),
+        (2, 2),
+        (2, 2),
+        (2, 2),
+        (2, 2),
+        (2, 1),
+        (2, 1),
+        (2, 1),
+    ]
+    assert [len(tr.rewards) for tr in rollouts] == [5, 5, 5, 5, 5, 5]
+    assert {tr.metadata["rollout_policy_batch_size"] for tr in rollouts} == {2}
+
+
 def test_phase11_vector_chunk_stops_sampling_done_rows(monkeypatch):
     _install_vector_fakes(monkeypatch)
     FakeVectorOfficialEnv.success_row_after_step = {1: 1}
@@ -472,6 +515,8 @@ class FakeChunkTrainWrapper:
         self.scale = torch.nn.Parameter(torch.tensor(init, dtype=torch.float32))
         self.calls: list[tuple[str, tuple[int, ...]]] = []
         self.step_calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+        self.batch_calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+        self.step_batch_calls: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
 
     def get_action_probs_for_chunk_from_proc(self, proc_snapshot, unsquashed_chunk):
         self.calls.append((proc_snapshot["id"], tuple(unsquashed_chunk.shape)))
@@ -479,6 +524,20 @@ class FakeChunkTrainWrapper:
 
     def get_action_probs_from_proc_list(self, proc_snapshots, unsquashed_actions):
         self.step_calls.append(
+            (tuple(proc_snapshot["id"] for proc_snapshot in proc_snapshots), tuple(unsquashed_actions.shape))
+        )
+        return self.scale.expand(int(unsquashed_actions.shape[0]))
+
+    def get_action_probs_for_chunk_batch_from_proc_list(self, proc_snapshots, unsquashed_chunks):
+        self.batch_calls.append(
+            (tuple(proc_snapshot["id"] for proc_snapshot in proc_snapshots), tuple(unsquashed_chunks.shape))
+        )
+        b = int(unsquashed_chunks.shape[0])
+        t = int(unsquashed_chunks.shape[1])
+        return self.scale.expand(b, t) / float(t)
+
+    def get_action_probs_step_batch_from_proc_list(self, proc_snapshots, unsquashed_actions):
+        self.step_batch_calls.append(
             (tuple(proc_snapshot["id"] for proc_snapshot in proc_snapshots), tuple(unsquashed_actions.shape))
         )
         return self.scale.expand(int(unsquashed_actions.shape[0]))
@@ -513,7 +572,8 @@ def test_phase11_training_loss_recomputes_root_conditioned_chunk_logprob():
     )
 
     assert count == 1
-    assert wrapper.calls == [("root", (5, 4))]
+    assert wrapper.calls == []
+    assert wrapper.batch_calls == [(("root",), (1, 5, 4))]
     assert wrapper.step_calls == []
     assert wrapper.scale.grad is not None
     assert wrapper.scale.grad.abs().item() > 0.0
@@ -535,7 +595,8 @@ def test_phase11_training_loss_step_mode_uses_legacy_step_recompute():
 
     assert count == 1
     assert wrapper.calls == []
-    assert wrapper.step_calls == [(("root",), (1, 4))]
+    assert wrapper.step_calls == []
+    assert wrapper.step_batch_calls == [(("root",), (1, 4))]
     assert wrapper.scale.grad is not None
     assert wrapper.scale.grad.abs().item() > 0.0
 
@@ -555,7 +616,8 @@ def test_phase11_training_loss_chunk_mode_single_row_uses_chunk_recompute():
     )
 
     assert count == 1
-    assert wrapper.calls == [("root", (1, 4))]
+    assert wrapper.calls == []
+    assert wrapper.batch_calls == [(("root",), (1, 1, 4))]
     assert wrapper.step_calls == []
     assert wrapper.scale.grad is not None
     assert wrapper.scale.grad.abs().item() > 0.0
@@ -588,9 +650,88 @@ def test_phase11_training_loss_normalizer_scales_gradient():
     )
 
     assert count == 2
-    assert wrapper_one.calls == [("root-a", (5, 4)), ("root-b", (5, 4))]
+    assert wrapper_one.calls == []
+    assert wrapper_one.batch_calls == [(("root-a",), (1, 5, 4)), (("root-b",), (1, 5, 4))]
     torch.testing.assert_close(wrapper_one.scale.grad, torch.tensor(-0.9048374))
     torch.testing.assert_close(wrapper_two.scale.grad, wrapper_one.scale.grad / 2.0)
+
+
+def test_phase11_group_loss_batches_across_trajectories_without_global_denominator():
+    train = _load_phase11_train_module()
+    chunks_a = [_action_chunk("a0", steps=5)]
+    chunks_b = [_action_chunk("b0", steps=5), _action_chunk("b1", steps=5)]
+    rollouts = [
+        SimpleNamespace(action_chunks=chunks_a),
+        SimpleNamespace(action_chunks=chunks_b),
+    ]
+
+    batched = FakeChunkTrainWrapper()
+    count = train._backward_phase11_group_loss(
+        train_wrapper=batched,
+        rollouts=rollouts,
+        advantages=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        device=torch.device("cpu"),
+        optimizer_chunk_size=1,
+        clip_eps=0.2,
+        logprob_recompute_mode="batched",
+        logprob_batch_size=16,
+        telemetry=None,
+    )
+
+    loop = FakeChunkTrainWrapper()
+    train._backward_phase11_group_loss(
+        train_wrapper=loop,
+        rollouts=rollouts,
+        advantages=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        device=torch.device("cpu"),
+        optimizer_chunk_size=1,
+        clip_eps=0.2,
+        logprob_recompute_mode="loop",
+        logprob_batch_size=16,
+        telemetry=None,
+    )
+
+    assert count == 3
+    assert batched.batch_calls == [(("a0", "b0", "b1"), (3, 5, 4))]
+    torch.testing.assert_close(batched.scale.grad, loop.scale.grad)
+    assert batched.scale.grad is not None
+    assert batched.scale.grad.item() != -0.9048374
+
+
+def test_phase11_group_loss_matches_closed_form_per_trajectory_normalizer():
+    train = _load_phase11_train_module()
+    rollouts = [
+        SimpleNamespace(action_chunks=[_action_chunk("a0", steps=5)]),
+        SimpleNamespace(action_chunks=[_action_chunk("b0", steps=5), _action_chunk("b1", steps=5)]),
+    ]
+    wrapper = FakeChunkTrainWrapper(init=-0.1)
+
+    train._backward_phase11_group_loss(
+        train_wrapper=wrapper,
+        rollouts=rollouts,
+        advantages=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        device=torch.device("cpu"),
+        optimizer_chunk_size=1,
+        clip_eps=0.2,
+        logprob_recompute_mode="batched",
+        logprob_batch_size=16,
+        telemetry=None,
+    )
+
+    # d[-exp(new_lp) * A / normalizer] / d scale, with new_lp == scale.
+    expected = -torch.exp(torch.tensor(-0.1)) * (
+        torch.tensor(1.0) / torch.tensor(1 * 2)
+        + torch.tensor(2.0) / torch.tensor(2 * 2)
+        + torch.tensor(2.0) / torch.tensor(2 * 2)
+    )
+    wrong_global_denominator = -torch.exp(torch.tensor(-0.1)) * (
+        torch.tensor(1.0)
+        + torch.tensor(2.0)
+        + torch.tensor(2.0)
+    ) / torch.tensor(3 * 2)
+
+    torch.testing.assert_close(wrapper.scale.grad, expected)
+    assert not torch.allclose(wrapper.scale.grad, wrong_global_denominator)
 
 
 def test_phase11_clipped_row_loss_positive_advantage_clamp_saturates_grad():
@@ -625,6 +766,7 @@ def test_phase11_training_loss_returns_zero_for_missing_action_chunks():
 
     assert count == 0
     assert wrapper.calls == []
+    assert wrapper.batch_calls == []
 
 
 def test_phase11_training_loss_rejects_non_positive_normalizer():
@@ -663,6 +805,15 @@ def test_phase11_train_script_exposes_action_chunk_size_static():
     assert "action_chunk_size=int(args.action_chunk_size)" in script
     assert "num_policy_sample_calls" in script
     assert '"loss_unit": "policy_chunk"' in script
+    assert "--logprob-recompute-mode" in script
+    assert 'default="batched"' in script
+    assert "--logprob-batch-size" in script
+    assert "--rollout-policy-batch-size" in script
+    assert "default=16" in script
+    assert "default=32" in script
+    assert '"logprob_recompute_mode": args.logprob_recompute_mode' in script
+    assert '"logprob_batch_size": int(args.logprob_batch_size)' in script
+    assert '"rollout_policy_batch_size": int(args.rollout_policy_batch_size)' in script
 
 
 def test_phase11_json_ready_args_converts_path_values():
@@ -690,6 +841,10 @@ def test_phase11_train_script_checkpoint_metadata_static():
     assert '"optimizer_chunk_size": int(args.chunk_size)' in script
     assert '"num_policy_sample_calls": num_policy_sample_calls' in script
     assert '"num_loss_units": num_loss_units' in script
+    assert '"num_logprob_forward_batches": 0' in script
+    assert '"ratio_clip_fraction": None' in script
+    assert '"approx_kl": None' in script
+    assert '"log_std_mean": None' in script
     assert "skipped_extra = {" in script
     assert "checkpoint_extra = {" in script
     assert '"rollout_seconds": rollout_seconds' in script
