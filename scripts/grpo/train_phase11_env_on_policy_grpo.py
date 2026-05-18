@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -31,6 +33,65 @@ def _json_ready_args(args: argparse.Namespace) -> dict:
     }
 
 
+# region agent log
+def _debug_mem_log(*, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    if os.environ.get("AGENT_DEBUG_MEM") != "1":
+        return
+    try:
+        pid = os.getpid()
+
+        def _status_for(process_id: int) -> dict[str, int]:
+            fields: dict[str, int] = {}
+            try:
+                with open(f"/proc/{process_id}/status", "r", encoding="utf-8") as fp:
+                    for line in fp:
+                        if line.startswith(("VmRSS:", "VmHWM:", "VmSize:", "PPid:")):
+                            parts = line.split()
+                            fields[parts[0].rstrip(":")] = int(parts[1])
+            except OSError:
+                pass
+            return fields
+
+        child_rss_kb = 0
+        child_count = 0
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            status = _status_for(int(entry))
+            if status.get("PPid") == pid:
+                child_count += 1
+                child_rss_kb += int(status.get("VmRSS", 0))
+        cuda_data = {}
+        if torch.cuda.is_available():
+            cuda_data = {
+                "cuda_allocated": int(torch.cuda.memory_allocated()),
+                "cuda_reserved": int(torch.cuda.memory_reserved()),
+                "cuda_max_allocated": int(torch.cuda.max_memory_allocated()),
+                "cuda_max_reserved": int(torch.cuda.max_memory_reserved()),
+            }
+        payload = {
+            "sessionId": "1b1269",
+            "runId": os.environ.get("AGENT_DEBUG_RUN_ID", "phase11_mem"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": {
+                **data,
+                "pid": pid,
+                "self_status": _status_for(pid),
+                "child_count": child_count,
+                "child_rss_kb": child_rss_kb,
+                **cuda_data,
+            },
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/rds/general/user/aa6622/home/.cursor/debug-1b1269.log", "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload) + "\n")
+    except Exception:
+        return
+# endregion
+
+
 def _phase11_clipped_row_loss(
     new_lp: torch.Tensor,
     old_lp: torch.Tensor,
@@ -43,7 +104,297 @@ def _phase11_clipped_row_loss(
     return -torch.min(unclipped, clipped)
 
 
+def _new_loss_telemetry(*, mode: str, batch_size: int) -> dict:
+    return {
+        "logprob_recompute_mode": str(mode),
+        "logprob_batch_size": int(batch_size),
+        "num_logprob_forward_batches": 0,
+        "old_logprob_chunks": [],
+        "new_logprob_chunks": [],
+    }
+
+
+def _record_loss_telemetry(telemetry: dict | None, *, old_lp: torch.Tensor, new_lp: torch.Tensor, forwards: int) -> None:
+    if telemetry is None:
+        return
+    telemetry["num_logprob_forward_batches"] = int(telemetry.get("num_logprob_forward_batches", 0)) + int(forwards)
+    telemetry.setdefault("old_logprob_chunks", []).append(old_lp.detach().float().cpu().reshape(-1))
+    telemetry.setdefault("new_logprob_chunks", []).append(new_lp.detach().float().cpu().reshape(-1))
+
+
+def _finalize_loss_telemetry(telemetry: dict | None, *, clip_eps: float) -> dict:
+    if telemetry is None:
+        return {}
+    old_chunks = list(telemetry.get("old_logprob_chunks", []) or [])
+    new_chunks = list(telemetry.get("new_logprob_chunks", []) or [])
+    base = {
+        "logprob_recompute_mode": telemetry.get("logprob_recompute_mode"),
+        "logprob_batch_size": int(telemetry.get("logprob_batch_size", 0)),
+        "num_logprob_forward_batches": int(telemetry.get("num_logprob_forward_batches", 0)),
+    }
+    if not old_chunks or not new_chunks:
+        return {
+            **base,
+            "ratio_mean": None,
+            "ratio_min": None,
+            "ratio_max": None,
+            "ratio_clip_fraction": None,
+            "approx_kl": None,
+            "old_logprob_sum_mean": None,
+            "new_logprob_sum_mean": None,
+        }
+    old_lp = torch.cat(old_chunks, dim=0)
+    new_lp = torch.cat(new_chunks, dim=0)
+    ratio = torch.exp(new_lp - old_lp)
+    if not torch.isfinite(ratio).all():
+        raise RuntimeError("non-finite PPO ratio during Phase11 telemetry")
+    clipped = (ratio < (1.0 - float(clip_eps))) | (ratio > (1.0 + float(clip_eps)))
+    return {
+        **base,
+        "ratio_mean": float(ratio.mean().item()),
+        "ratio_min": float(ratio.min().item()),
+        "ratio_max": float(ratio.max().item()),
+        "ratio_clip_fraction": float(clipped.float().mean().item()),
+        "approx_kl": float((old_lp - new_lp).mean().item()),
+        "old_logprob_sum_mean": float(old_lp.mean().item()),
+        "new_logprob_sum_mean": float(new_lp.mean().item()),
+    }
+
+
+def _log_std_telemetry(policy) -> dict:
+    model = getattr(policy, "model", None)
+    log_std = getattr(model, "log_std", None)
+    if log_std is None:
+        return {
+            "log_std_mean": None,
+            "log_std_min": None,
+            "log_std_max": None,
+            "entropy_proxy_mean": None,
+        }
+    vals = log_std.detach().float().reshape(-1)
+    entropy_proxy = vals + 0.5 * (1.0 + math.log(2.0 * math.pi))
+    return {
+        "log_std_mean": float(vals.mean().item()),
+        "log_std_min": float(vals.min().item()),
+        "log_std_max": float(vals.max().item()),
+        "entropy_proxy_mean": float(entropy_proxy.mean().item()),
+    }
+
+
+def _fmt_metric(value: object) -> str:
+    if value is None:
+        return "null"
+    try:
+        return f"{float(value):.4g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _backward_phase11_chunk_loss(
+    *,
+    train_wrapper,
+    action_chunks,
+    advantage: torch.Tensor,
+    device: torch.device,
+    optimizer_chunk_size: int,
+    clip_eps: float,
+    normalizer: int,
+    logprob_recompute_mode: str = "batched",
+    logprob_batch_size: int | None = None,
+    telemetry: dict | None = None,
+) -> int:
+    rows = list(action_chunks)
+    if not rows:
+        return 0
+    denom = int(normalizer)
+    if denom <= 0:
+        raise ValueError("normalizer must be > 0")
+    opt_chunk = max(int(optimizer_chunk_size), 1)
+    lp_batch = max(int(logprob_batch_size or opt_chunk), 1)
+
+    def _recompute_row_logprob(row) -> torch.Tensor:
+        unsquashed = row.unsquashed_chunk.to(device)
+        if getattr(row, "logprob_mode", "chunk") == "step":
+            return train_wrapper.get_action_probs_from_proc_list(
+                [row.proc_snapshot],
+                unsquashed.reshape(1, -1).to(device),
+            ).sum()
+        return train_wrapper.get_action_probs_for_chunk_from_proc(
+            row.proc_snapshot,
+            unsquashed,
+        ).sum()
+
+    def _backward_batch(batch_rows, new_lp: torch.Tensor, *, forwards: int) -> None:
+        new_lp = new_lp.float().reshape(-1)
+        old_lp = torch.stack([row.log_prob_sum for row in batch_rows]).to(
+            device=new_lp.device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        if new_lp.shape != old_lp.shape:
+            raise RuntimeError(f"new/old logprob shape mismatch: {tuple(new_lp.shape)} != {tuple(old_lp.shape)}")
+        if not torch.isfinite(new_lp).all() or not torch.isfinite(old_lp).all():
+            raise RuntimeError("non-finite logprob during Phase11 loss")
+        adv = advantage.to(device=new_lp.device, dtype=torch.float32)
+        losses = _phase11_clipped_row_loss(new_lp, old_lp, adv, clip_eps)
+        _record_loss_telemetry(telemetry, old_lp=old_lp, new_lp=new_lp, forwards=forwards)
+        (losses.sum() / denom).backward()
+
+    if str(logprob_recompute_mode) == "loop":
+        for cs in range(0, len(rows), opt_chunk):
+            batch_rows = rows[cs : cs + opt_chunk]
+            new_lp = torch.stack([_recompute_row_logprob(row) for row in batch_rows])
+            _backward_batch(batch_rows, new_lp, forwards=len(batch_rows))
+        return len(rows)
+    if str(logprob_recompute_mode) != "batched":
+        raise ValueError("logprob_recompute_mode must be 'batched' or 'loop'")
+
+    groups: dict[tuple[str, tuple[int, ...]], list] = {}
+    for row in rows:
+        mode = str(getattr(row, "logprob_mode", "chunk"))
+        shape = tuple(row.unsquashed_chunk.reshape(-1, row.unsquashed_chunk.shape[-1]).shape)
+        groups.setdefault((mode, shape), []).append(row)
+
+    for (mode, _shape), group_rows in groups.items():
+        for cs in range(0, len(group_rows), lp_batch):
+            batch_rows = group_rows[cs : cs + lp_batch]
+            if mode == "step":
+                if not hasattr(train_wrapper, "get_action_probs_step_batch_from_proc_list"):
+                    new_lp = torch.stack([_recompute_row_logprob(row) for row in batch_rows])
+                    _backward_batch(batch_rows, new_lp, forwards=len(batch_rows))
+                    continue
+                proc_snapshots = [row.proc_snapshot for row in batch_rows]
+                unsquashed = torch.stack(
+                    [row.unsquashed_chunk.reshape(-1) for row in batch_rows],
+                    dim=0,
+                ).to(device)
+                new_lp = train_wrapper.get_action_probs_step_batch_from_proc_list(
+                    proc_snapshots,
+                    unsquashed,
+                )
+                _backward_batch(batch_rows, new_lp, forwards=1)
+                continue
+            if not hasattr(train_wrapper, "get_action_probs_for_chunk_batch_from_proc_list"):
+                new_lp = torch.stack([_recompute_row_logprob(row) for row in batch_rows])
+                _backward_batch(batch_rows, new_lp, forwards=len(batch_rows))
+                continue
+            proc_snapshots = [row.proc_snapshot for row in batch_rows]
+            unsquashed = torch.stack([row.unsquashed_chunk for row in batch_rows], dim=0).to(device)
+            new_lp_steps = train_wrapper.get_action_probs_for_chunk_batch_from_proc_list(
+                proc_snapshots,
+                unsquashed,
+            )
+            new_lp = new_lp_steps.reshape(len(batch_rows), -1).sum(dim=1)
+            _backward_batch(batch_rows, new_lp, forwards=1)
+    return len(rows)
+
+
+def _backward_phase11_group_loss(
+    *,
+    train_wrapper,
+    rollouts,
+    advantages: torch.Tensor,
+    device: torch.device,
+    optimizer_chunk_size: int,
+    clip_eps: float,
+    logprob_recompute_mode: str,
+    logprob_batch_size: int,
+    telemetry: dict | None,
+) -> int:
+    G = len(rollouts)
+    entries: list[tuple[object, torch.Tensor, int]] = []
+    for gi, traj in enumerate(rollouts):
+        A = advantages[gi].reshape(()).float()
+        n_units = len(getattr(traj, "action_chunks", []) or [])
+        if n_units <= 0:
+            raise RuntimeError("Phase11 rollout produced no action_chunks")
+        normalizer = int(n_units * G)
+        entries.extend((row, A, normalizer) for row in traj.action_chunks)
+    if not entries:
+        return 0
+
+    opt_chunk = max(int(optimizer_chunk_size), 1)
+    lp_batch = max(int(logprob_batch_size), 1)
+
+    def _recompute_row_logprob(row) -> torch.Tensor:
+        unsquashed = row.unsquashed_chunk.to(device)
+        if getattr(row, "logprob_mode", "chunk") == "step":
+            return train_wrapper.get_action_probs_from_proc_list(
+                [row.proc_snapshot],
+                unsquashed.reshape(1, -1).to(device),
+            ).sum()
+        return train_wrapper.get_action_probs_for_chunk_from_proc(
+            row.proc_snapshot,
+            unsquashed,
+        ).sum()
+
+    def _backward_entries(batch_entries, new_lp: torch.Tensor, *, forwards: int) -> None:
+        rows = [entry[0] for entry in batch_entries]
+        new_lp = new_lp.float().reshape(-1)
+        old_lp = torch.stack([row.log_prob_sum for row in rows]).to(
+            device=new_lp.device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        adv = torch.stack([entry[1].to(device=new_lp.device, dtype=torch.float32).reshape(()) for entry in batch_entries])
+        normalizers = torch.tensor(
+            [int(entry[2]) for entry in batch_entries],
+            device=new_lp.device,
+            dtype=torch.float32,
+        )
+        if new_lp.shape != old_lp.shape or new_lp.shape != adv.shape:
+            raise RuntimeError(
+                "new/old/adv logprob shape mismatch: "
+                f"new={tuple(new_lp.shape)} old={tuple(old_lp.shape)} adv={tuple(adv.shape)}"
+            )
+        if not torch.isfinite(new_lp).all() or not torch.isfinite(old_lp).all():
+            raise RuntimeError("non-finite logprob during Phase11 group loss")
+        losses = _phase11_clipped_row_loss(new_lp, old_lp, adv, clip_eps)
+        _record_loss_telemetry(telemetry, old_lp=old_lp, new_lp=new_lp, forwards=forwards)
+        (losses / normalizers).sum().backward()
+
+    if str(logprob_recompute_mode) == "loop":
+        for cs in range(0, len(entries), opt_chunk):
+            batch_entries = entries[cs : cs + opt_chunk]
+            new_lp = torch.stack([_recompute_row_logprob(entry[0]) for entry in batch_entries])
+            _backward_entries(batch_entries, new_lp, forwards=len(batch_entries))
+        return len(entries)
+    if str(logprob_recompute_mode) != "batched":
+        raise ValueError("logprob_recompute_mode must be 'batched' or 'loop'")
+
+    groups: dict[tuple[str, tuple[int, ...]], list[tuple[object, torch.Tensor, int]]] = {}
+    for entry in entries:
+        row = entry[0]
+        mode = str(getattr(row, "logprob_mode", "chunk"))
+        shape = tuple(row.unsquashed_chunk.reshape(-1, row.unsquashed_chunk.shape[-1]).shape)
+        groups.setdefault((mode, shape), []).append(entry)
+
+    for (mode, _shape), group_entries in groups.items():
+        for cs in range(0, len(group_entries), lp_batch):
+            batch_entries = group_entries[cs : cs + lp_batch]
+            rows = [entry[0] for entry in batch_entries]
+            if mode == "step":
+                if not hasattr(train_wrapper, "get_action_probs_step_batch_from_proc_list"):
+                    new_lp = torch.stack([_recompute_row_logprob(row) for row in rows])
+                    _backward_entries(batch_entries, new_lp, forwards=len(rows))
+                    continue
+                new_lp = train_wrapper.get_action_probs_step_batch_from_proc_list(
+                    [row.proc_snapshot for row in rows],
+                    torch.stack([row.unsquashed_chunk.reshape(-1) for row in rows], dim=0).to(device),
+                )
+                _backward_entries(batch_entries, new_lp, forwards=1)
+                continue
+            if not hasattr(train_wrapper, "get_action_probs_for_chunk_batch_from_proc_list"):
+                new_lp = torch.stack([_recompute_row_logprob(row) for row in rows])
+                _backward_entries(batch_entries, new_lp, forwards=len(rows))
+                continue
+            new_lp_steps = train_wrapper.get_action_probs_for_chunk_batch_from_proc_list(
+                [row.proc_snapshot for row in rows],
+                torch.stack([row.unsquashed_chunk for row in rows], dim=0).to(device),
+            )
+            _backward_entries(batch_entries, new_lp_steps.reshape(len(rows), -1).sum(dim=1), forwards=1)
+    return len(entries)
+
+
+def _legacy_backward_phase11_chunk_loss(
     *,
     train_wrapper,
     action_chunks,
@@ -141,6 +492,24 @@ def main() -> int:
         help="Optimizer microbatch size for logprob recompute/backward",
     )
     p.add_argument(
+        "--logprob-recompute-mode",
+        choices=("batched", "loop"),
+        default="batched",
+        help="Batched is the default fast path; loop is a slow debug fallback.",
+    )
+    p.add_argument(
+        "--logprob-batch-size",
+        type=int,
+        default=16,
+        help="Batch size for optimizer logprob recompute. Separate from --chunk-size.",
+    )
+    p.add_argument(
+        "--rollout-policy-batch-size",
+        type=int,
+        default=32,
+        help="SmolVLA forward batch during vector rollout. Independent of --group-size and --logprob-batch-size.",
+    )
+    p.add_argument(
         "--action-chunk-size",
         type=int,
         default=1,
@@ -164,8 +533,14 @@ def main() -> int:
         raise SystemExit("Only batch_size=1 supported (one seed context per update).")
     if int(args.chunk_size) < 1:
         raise SystemExit("--chunk-size must be >= 1")
+    if int(args.logprob_batch_size) < 1:
+        raise SystemExit("--logprob-batch-size must be >= 1")
+    if int(args.rollout_policy_batch_size) < 1:
+        raise SystemExit("--rollout-policy-batch-size must be >= 1")
     if int(args.action_chunk_size) < 1:
         raise SystemExit("--action-chunk-size must be >= 1")
+    if args.logprob_recompute_mode == "loop":
+        print("warning: loop logprob recompute is slow; use batched unless debugging", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out = args.output_dir.expanduser().resolve()
@@ -233,6 +608,9 @@ def main() -> int:
         "max_steps": args.max_steps,
         "group_size": args.group_size,
         "optimizer_chunk_size": int(args.chunk_size),
+        "logprob_recompute_mode": args.logprob_recompute_mode,
+        "logprob_batch_size": int(args.logprob_batch_size),
+        "rollout_policy_batch_size": int(args.rollout_policy_batch_size),
         "action_chunk_size": int(args.action_chunk_size),
         "loss_unit": "policy_chunk",
         "clip_eps": args.clip_eps,
@@ -245,6 +623,14 @@ def main() -> int:
     for update in range(start_u, end_u):
         update_t0 = time.perf_counter()
         reset_seed = int(args.train_seed_base) + int(update)
+        # region agent log
+        _debug_mem_log(
+            hypothesis_id="H1_H2_H5",
+            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:249",
+            message="update_start_mem",
+            data={"update": int(update), "group_size": int(args.group_size)},
+        )
+        # endregion
         rollout_t0 = time.perf_counter()
         rollouts = collect_rollout_group(
             bundle=bundle,
@@ -262,8 +648,23 @@ def main() -> int:
             async_start_method=args.async_start_method,
             action_transform=args.action_transform,
             action_chunk_size=int(args.action_chunk_size),
+            rollout_policy_batch_size=int(args.rollout_policy_batch_size),
         )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
+        # region agent log
+        _debug_mem_log(
+            hypothesis_id="H1_H2_H5",
+            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:270",
+            message="after_rollout_mem",
+            data={
+                "update": int(update),
+                "rollout_seconds": rollout_seconds,
+                "rollouts": len(rollouts),
+                "action_chunks": int(sum(len(getattr(tr, "action_chunks", []) or []) for tr in rollouts)),
+                "proc_snapshots": int(sum(len(getattr(tr, "proc_snapshots", []) or []) for tr in rollouts)),
+            },
+        )
+        # endregion
         returns = torch.tensor(
             [reward_backend.episode_return(tr) for tr in rollouts],
             dtype=torch.float32,
@@ -319,6 +720,9 @@ def main() -> int:
             "num_policy_sample_calls": num_policy_sample_calls,
             "num_loss_units": num_loss_units,
             "optimizer_chunk_size": int(args.chunk_size),
+            "logprob_recompute_mode": args.logprob_recompute_mode,
+            "logprob_batch_size": int(args.logprob_batch_size),
+            "rollout_policy_batch_size": int(args.rollout_policy_batch_size),
             "action_chunk_size": int(args.action_chunk_size),
             "loss_unit": "policy_chunk",
             "action_clip_fraction": action_clip_fraction,
@@ -335,6 +739,15 @@ def main() -> int:
                 "rollout_seconds": rollout_seconds,
                 "optimize_seconds": 0.0,
                 "update_seconds": update_seconds,
+                "num_logprob_forward_batches": 0,
+                "ratio_mean": None,
+                "ratio_min": None,
+                "ratio_max": None,
+                "ratio_clip_fraction": None,
+                "approx_kl": None,
+                "old_logprob_sum_mean": None,
+                "new_logprob_sum_mean": None,
+                **_log_std_telemetry(bundle.policy),
             }
             _append_progress(
                 progress_path,
@@ -381,6 +794,12 @@ def main() -> int:
                 f"policy_calls={num_policy_sample_calls}",
                 f"loss_units={num_loss_units}",
                 f"action_chunk_size={int(args.action_chunk_size)}",
+                f"logprob_mode={args.logprob_recompute_mode}",
+                f"logprob_bs={int(args.logprob_batch_size)}",
+                "lp_batches=0",
+                "ratio_clip=null",
+                "approx_kl=null",
+                f"log_std_mean={_fmt_metric(skipped_extra.get('log_std_mean'))}",
                 f"clip_frac={action_clip_fraction:.4f}",
                 f"clip_any_frac={action_clip_any_fraction:.4f}",
                 f"rollout_s={rollout_seconds:.2f}",
@@ -393,33 +812,44 @@ def main() -> int:
 
         bundle.policy.train()
         optimize_t0 = time.perf_counter()
+        loss_telemetry = _new_loss_telemetry(
+            mode=args.logprob_recompute_mode,
+            batch_size=int(args.logprob_batch_size),
+        )
         for _epoch in range(args.update_epochs):
             optimizer.zero_grad()
-            G = len(rollouts)
-            for gi, traj in enumerate(rollouts):
-                A = advantages[gi].reshape(()).float()
-                n_units = len(getattr(traj, "action_chunks", []) or [])
-                if n_units <= 0:
-                    raise RuntimeError("Phase11 rollout produced no action_chunks")
-                _backward_phase11_chunk_loss(
-                    train_wrapper=train_wrapper,
-                    action_chunks=traj.action_chunks,
-                    advantage=A,
-                    device=device,
-                    optimizer_chunk_size=int(args.chunk_size),
-                    clip_eps=float(args.clip_eps),
-                    normalizer=n_units * G,
-                )
+            _backward_phase11_group_loss(
+                train_wrapper=train_wrapper,
+                rollouts=rollouts,
+                advantages=advantages,
+                device=device,
+                optimizer_chunk_size=int(args.chunk_size),
+                clip_eps=float(args.clip_eps),
+                logprob_recompute_mode=args.logprob_recompute_mode,
+                logprob_batch_size=int(args.logprob_batch_size),
+                telemetry=loss_telemetry,
+            )
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
             optimizer.step()
         optimize_seconds = float(time.perf_counter() - optimize_t0)
+        loss_telemetry_row = _finalize_loss_telemetry(loss_telemetry, clip_eps=float(args.clip_eps))
+        # region agent log
+        _debug_mem_log(
+            hypothesis_id="H2_H4",
+            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:428",
+            message="after_optimize_mem",
+            data={"update": int(update), "optimize_seconds": optimize_seconds},
+        )
+        # endregion
         update_seconds = float(time.perf_counter() - update_t0)
         checkpoint_extra = {
             **metrics_common,
             "rollout_seconds": rollout_seconds,
             "optimize_seconds": optimize_seconds,
             "update_seconds": update_seconds,
+            **loss_telemetry_row,
+            **_log_std_telemetry(bundle.policy),
         }
 
         _append_progress(
@@ -435,6 +865,14 @@ def main() -> int:
         state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
         old_policy.load_state_dict(state)
         old_policy.eval()
+        # region agent log
+        _debug_mem_log(
+            hypothesis_id="H3_H4",
+            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:452",
+            message="after_old_policy_sync_mem",
+            data={"update": int(update), "state_tensors": len(state)},
+        )
+        # endregion
 
         save_grpo_checkpoint(
             ckpt_dir / "latest.pt",
@@ -453,6 +891,14 @@ def main() -> int:
                 args=_json_ready_args(args),
                 extra=checkpoint_extra,
             )
+        # region agent log
+        _debug_mem_log(
+            hypothesis_id="H3",
+            location="scripts/grpo/train_phase11_env_on_policy_grpo.py:473",
+            message="after_checkpoint_mem",
+            data={"update": int(update), "save_every": int(args.save_every)},
+        )
+        # endregion
         print(
             "phase111_grpo_update",
             f"update={update}",
@@ -467,6 +913,12 @@ def main() -> int:
             f"policy_calls={num_policy_sample_calls}",
             f"loss_units={num_loss_units}",
             f"action_chunk_size={int(args.action_chunk_size)}",
+            f"logprob_mode={args.logprob_recompute_mode}",
+            f"logprob_bs={int(args.logprob_batch_size)}",
+            f"lp_batches={checkpoint_extra.get('num_logprob_forward_batches')}",
+            f"ratio_clip={_fmt_metric(checkpoint_extra.get('ratio_clip_fraction'))}",
+            f"approx_kl={_fmt_metric(checkpoint_extra.get('approx_kl'))}",
+            f"log_std_mean={_fmt_metric(checkpoint_extra.get('log_std_mean'))}",
             f"clip_frac={action_clip_fraction:.4f}",
             f"clip_any_frac={action_clip_any_fraction:.4f}",
             f"rollout_s={rollout_seconds:.2f}",
