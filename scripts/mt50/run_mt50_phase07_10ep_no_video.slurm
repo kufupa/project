@@ -38,14 +38,10 @@ else
   export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 fi
 
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
-MAIN_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py310"
-if [[ -n "${SMOLVLA_LEROBOT_ENV_DIR:-}" && -x "${SMOLVLA_LEROBOT_ENV_DIR}/bin/python" ]]; then
-  PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
-elif [[ -x "${MAIN_ENV_DIR}/bin/python" ]]; then
-  if [[ "${SMOLVLA_LEROBOT_ENV_DIR}" != "${MAIN_ENV_DIR}" ]]; then
-    echo "[mt50:phase07] fallback: SMOLVLA_LEROBOT_ENV_DIR invalid, using ${MAIN_ENV_DIR}" >&2
-  fi
+# Always use canonical venv; ignore inherited SMOLVLA_LEROBOT_ENV_DIR from login/sbatch --export.
+MAIN_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py312"
+export SMOLVLA_LEROBOT_ENV_DIR="${MAIN_ENV_DIR}"
+if [[ -x "${MAIN_ENV_DIR}/bin/python" ]]; then
   PYTHON_BIN="${MAIN_ENV_DIR}/bin/python"
 else
   PYTHON_BIN=""
@@ -100,6 +96,7 @@ export SMOLVLA_LOCAL_FILES_ONLY="${SMOLVLA_LOCAL_FILES_ONLY:-true}"
 export SMOLVLA_PREFER_LOCAL_HF_SNAPSHOT="${SMOLVLA_PREFER_LOCAL_HF_SNAPSHOT:-true}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
 
 if [[ -z "${MT50_PHASE07_CHECKPOINT}" ]]; then
   echo "error: MT50_PHASE07_CHECKPOINT is empty" >&2
@@ -120,9 +117,15 @@ echo "episodes=${MT50_PHASE07_EPISODES}"
 echo "seed=${MT50_PHASE07_SEED}"
 echo "max_steps=${MT50_PHASE07_MAX_STEPS}"
 echo "video=${MT50_PHASE07_VIDEO}"
+echo "SMOLVLA_LEROBOT_ENV_DIR=${SMOLVLA_LEROBOT_ENV_DIR}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+echo "MUJOCO_GL=${MUJOCO_GL}"
+if ! "${PYTHON_BIN}" -c "import transformers as _t; print('transformers', _t.__version__)" 2>/dev/null; then
+  echo "warn: could not print transformers version (import failed)" >&2
+fi
 
 _cache_root="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
-export MPLCONFIGDIR="${SMOLVLA_MPLCONFIGDIR:-${_cache_root}/matplotlib_smolvla_parity}"
+export MPLCONFIGDIR="${SMOLVLA_MPLCONFIGDIR:-${_cache_root}/matplotlib_mt50_phase07}"
 mkdir -p "${MPLCONFIGDIR}"
 export MPLBACKEND="${MPLBACKEND:-Agg}"
 XVFB_ERR="${MT50_PHASE07_OUTPUT_ROOT}/mt50_phase07_campaign_xvfb.err"
