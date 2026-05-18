@@ -257,6 +257,8 @@ def _first_success(value: Any) -> bool | None:
     if isinstance(value, dict):
         if "is_success" in value:
             return _coerce_success_value(value["is_success"])
+        if "success" in value:
+            return _coerce_success_value(value["success"])
         for item in value.values():
             found = _first_success(item)
             if found is not None:
@@ -315,6 +317,36 @@ def _successes_from_vector_info(info: dict[str, Any], n_envs: int) -> np.ndarray
             elif isinstance(v, (list, tuple)) and len(v) == n_envs:
                 chunk[k] = v[i]
         out[i] = bool(_first_success(chunk) or False)
+    return out
+
+
+def _restore_vector_final_obs(
+    obs: dict[str, Any],
+    info: dict[str, Any],
+    terminal: np.ndarray,
+    n_envs: int,
+) -> dict[str, Any]:
+    """Replace SAME_STEP autoreset observations with terminal observations where available."""
+    final_obs = info.get("final_obs") if isinstance(info, dict) else None
+    if final_obs is None or not isinstance(obs, dict):
+        return obs
+
+    out = {key: np.array(value, copy=True) if isinstance(value, np.ndarray) else value for key, value in obs.items()}
+    for i in range(int(n_envs)):
+        if not bool(terminal[i]):
+            continue
+        if isinstance(final_obs, dict):
+            item = {
+                key: (value[i] if isinstance(value, np.ndarray) and value.shape[0] == n_envs else value)
+                for key, value in final_obs.items()
+            }
+        else:
+            item = final_obs[i]
+        if not isinstance(item, dict):
+            continue
+        for key, value in item.items():
+            if key in out and isinstance(out[key], np.ndarray):
+                out[key][i] = value
     return out
 
 
@@ -588,13 +620,18 @@ class OfficialLeRobotMetaWorldGRPORollout:
         obs, reward, terminated, truncated, info = self.vec_env.step(action_np)
         info_d = info if isinstance(info, dict) else {}
         success = _successes_from_vector_info(info_d, self.n_envs)
+        terminated_np = np.asarray(terminated, dtype=np.bool_).reshape(self.n_envs)
+        truncated_np = np.asarray(truncated, dtype=np.bool_).reshape(self.n_envs)
+        success_np = success.reshape(self.n_envs)
+        terminal = np.logical_or(np.logical_or(terminated_np, truncated_np), success_np)
+        obs = _restore_vector_final_obs(obs, info_d, terminal, self.n_envs)
 
         return OfficialBatchStep(
             observation=obs,
             reward=np.asarray(reward, dtype=np.float64).reshape(self.n_envs),
-            terminated=np.asarray(terminated, dtype=np.bool_).reshape(self.n_envs),
-            truncated=np.asarray(truncated, dtype=np.bool_).reshape(self.n_envs),
-            success=success.reshape(self.n_envs),
+            terminated=terminated_np,
+            truncated=truncated_np,
+            success=success_np,
             info=info_d,
         )
 
