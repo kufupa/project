@@ -12,7 +12,13 @@ from smolvla_grpo.lerobot_metaworld_adapter import (
     OfficialLeRobotMetaWorldGRPORollout,
     resolve_lerobot_horizon,
 )
-from smolvla_grpo.phase11_rollout import RolloutTrajectory, _action_bounds, detach_proc_snapshot
+from smolvla_grpo.phase11_rollout import (
+    RolloutTrajectory,
+    _action_bounds,
+    _record_executed_chunk,
+    _validate_action_chunk_size,
+    detach_proc_snapshot,
+)
 from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
 from smolvla_pipeline.evaluator import (
     _SmolVLABundle,
@@ -39,6 +45,23 @@ def slice_proc_row(proc: dict[str, Any], row: int) -> dict[str, Any]:
     return out
 
 
+def select_proc_rows(proc: dict[str, Any], rows: list[int], *, batch_size: int) -> dict[str, Any]:
+    """Compact full vector preprocessor output down to active rows."""
+    if not rows:
+        raise ValueError("rows must be non-empty")
+    out: dict[str, Any] = {}
+    for key, value in proc.items():
+        if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = value[rows]
+        elif isinstance(value, np.ndarray) and value.ndim > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = np.asarray(value[rows])
+        elif isinstance(value, (list, tuple)) and len(value) == int(batch_size):
+            out[key] = [value[int(row)] for row in rows]
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
 def collect_official_lerobot_vector_rollout_group(
     *,
     bundle: _SmolVLABundle,
@@ -54,6 +77,7 @@ def collect_official_lerobot_vector_rollout_group(
     rollout_execution: str,
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
+    action_chunk_size: int = 1,
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` one-episode trajectories with one vector env step per timestep."""
     if rollout_execution not in ("vector_sync", "vector_async"):
@@ -62,6 +86,7 @@ def collect_official_lerobot_vector_rollout_group(
         raise ValueError("group_size must be >= 1")
 
     requested_max_steps = int(max_steps)
+    action_chunk_size_i = _validate_action_chunk_size(action_chunk_size)
     use_async = rollout_execution == "vector_async"
     env_h = OfficialLeRobotMetaWorldGRPORollout(
         task=task,
@@ -102,6 +127,8 @@ def collect_official_lerobot_vector_rollout_group(
             tr.metadata["async_start_method"] = async_start_method if use_async else "none"
             tr.metadata["requested_max_steps"] = requested_max_steps
             tr.metadata["resolved_max_steps"] = max_steps_i
+            tr.metadata["action_chunk_size"] = action_chunk_size_i
+            tr.metadata["policy_sample_calls"] = 0
 
         obs = env_h.reset(int(reset_seed))
         policy_reset = getattr(policy_old, "reset", None)
@@ -115,36 +142,108 @@ def collect_official_lerobot_vector_rollout_group(
         rngs = [torch.Generator(device=device) for _ in range(group_size)]
         for r, gen in enumerate(rngs):
             gen.manual_seed(int(reset_seed) * 1000003 + r * 7919)
-        for _step in range(max_steps_i):
+        step_count = 0
+        while step_count < max_steps_i:
             if not bool(np.any(active)):
                 break
-            proc = env_h.build_proc(obs, bundle=bundle)
+            active_rows = [idx for idx in range(group_size) if bool(active[idx])]
+            proc_full = env_h.build_proc(obs, bundle=bundle)
+            proc = select_proc_rows(proc_full, active_rows, batch_size=group_size)
+            effective_chunk = min(action_chunk_size_i, int(max_steps_i) - int(step_count))
             with torch.no_grad():
-                batch = old_wrapper.sample_action_batch_from_proc(
-                    proc,
-                    n_envs=int(group_size),
-                    rngs=rngs,
+                if action_chunk_size_i == 1:
+                    batch = old_wrapper.sample_action_batch_from_proc(
+                        proc,
+                        n_envs=len(active_rows),
+                        rngs=[rngs[row] for row in active_rows],
+                    )
+                    chunk_exec_actions = batch.exec_action_np[:, None, :].astype(np.float32, copy=False)
+                    chunk_unsquashed = batch.unsquashed.detach().cpu().reshape(len(active_rows), 1, -1)
+                    chunk_log_probs = batch.log_prob.detach().cpu().reshape(len(active_rows), 1)
+                    chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
+                        len(active_rows), 1
+                    )
+                    chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(len(active_rows), 1)
+                else:
+                    batch = old_wrapper.sample_action_chunk_batch_from_proc(
+                        proc,
+                        n_envs=len(active_rows),
+                        chunk_len=effective_chunk,
+                        rngs=[rngs[row] for row in active_rows],
+                    )
+                    chunk_exec_actions = batch.exec_action_np.astype(np.float32, copy=False).reshape(
+                        len(active_rows), effective_chunk, -1
+                    )
+                    chunk_unsquashed = batch.unsquashed_chunk.detach().cpu().reshape(
+                        len(active_rows), effective_chunk, -1
+                    )
+                    chunk_log_probs = batch.log_prob_steps.detach().cpu().reshape(len(active_rows), effective_chunk)
+                    chunk_clip_fraction = np.asarray(batch.action_clip_fraction, dtype=np.float64).reshape(
+                        len(active_rows), effective_chunk
+                    )
+                    chunk_clip_any = np.asarray(batch.action_clip_any, dtype=np.bool_).reshape(
+                        len(active_rows), effective_chunk
+                    )
+
+            active_proc_snapshots = [
+                detach_proc_snapshot(slice_proc_row(proc, batch_row)) for batch_row in range(len(active_rows))
+            ]
+            executed_by_batch_row = np.zeros((len(active_rows),), dtype=np.int64)
+            chunk_start_step = int(step_count)
+            for batch_row, row in enumerate(active_rows):
+                rollouts[row].metadata["policy_sample_calls"] = (
+                    int(rollouts[row].metadata.get("policy_sample_calls", 0)) + 1
                 )
-            env_batch = env_h.step_batch(batch.exec_action_np.astype(np.float32, copy=False))
-            obs = env_batch.observation
 
-            for i in range(group_size):
-                if not active[i]:
-                    continue
-                row_proc = slice_proc_row(proc, i)
-                rollouts[i].proc_snapshots.append(detach_proc_snapshot(row_proc))
-                rollouts[i].exec_actions.append(batch.exec_action_np[i].reshape(-1).tolist())
-                rollouts[i].unsquashed_actions.append(batch.unsquashed[i].detach().cpu())
-                rollouts[i].log_probs.append(batch.log_prob[i].detach().cpu())
-                rollouts[i].action_clip_fractions.append(float(batch.action_clip_fraction[i]))
-                rollouts[i].action_clip_any.append(bool(batch.action_clip_any[i]))
-                rollouts[i].rewards.append(float(env_batch.reward[i]))
-                rollouts[i].successes.append(bool(env_batch.success[i]))
+            for chunk_step in range(effective_chunk):
+                if not bool(np.any(active)):
+                    break
+                active_before_step = active.copy()
+                action_matrix = np.zeros((group_size, int(action_dim)), dtype=np.float32)
+                for batch_row, row in enumerate(active_rows):
+                    if bool(active_before_step[row]):
+                        action_matrix[row] = chunk_exec_actions[batch_row, chunk_step]
 
-                if env_batch.success[i] or env_batch.terminated[i] or env_batch.truncated[i]:
-                    active[i] = False
-                    rollouts[i].terminated = bool(env_batch.terminated[i])
-                    rollouts[i].truncated = bool(env_batch.truncated[i])
+                env_batch = env_h.step_batch(action_matrix)
+                obs = env_batch.observation
+
+                for batch_row, row in enumerate(active_rows):
+                    if not bool(active_before_step[row]):
+                        continue
+                    rollouts[row].proc_snapshots.append(detach_proc_snapshot(active_proc_snapshots[batch_row]))
+                    rollouts[row].exec_actions.append(
+                        chunk_exec_actions[batch_row, chunk_step].reshape(-1).tolist()
+                    )
+                    rollouts[row].unsquashed_actions.append(
+                        chunk_unsquashed[batch_row, chunk_step : chunk_step + 1].detach().cpu()
+                    )
+                    rollouts[row].log_probs.append(
+                        chunk_log_probs[batch_row, chunk_step : chunk_step + 1].detach().cpu()
+                    )
+                    rollouts[row].action_clip_fractions.append(float(chunk_clip_fraction[batch_row, chunk_step]))
+                    rollouts[row].action_clip_any.append(bool(chunk_clip_any[batch_row, chunk_step]))
+                    rollouts[row].rewards.append(float(env_batch.reward[row]))
+                    rollouts[row].successes.append(bool(env_batch.success[row]))
+                    executed_by_batch_row[batch_row] += 1
+
+                    if env_batch.success[row] or env_batch.terminated[row] or env_batch.truncated[row]:
+                        active[row] = False
+                        rollouts[row].terminated = bool(env_batch.terminated[row])
+                        rollouts[row].truncated = bool(env_batch.truncated[row])
+                step_count += 1
+                if step_count >= int(max_steps_i):
+                    break
+
+            for batch_row, row in enumerate(active_rows):
+                _record_executed_chunk(
+                    rollouts[row],
+                    proc_snapshot=active_proc_snapshots[batch_row],
+                    unsquashed_chunk=chunk_unsquashed[batch_row],
+                    log_prob_steps=chunk_log_probs[batch_row],
+                    start_step=chunk_start_step,
+                    executed_steps=int(executed_by_batch_row[batch_row]),
+                    logprob_mode="step" if action_chunk_size_i == 1 else "chunk",
+                )
 
         return rollouts
     finally:
