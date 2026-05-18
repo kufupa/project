@@ -134,6 +134,8 @@ def _sample_policy_for_active_rows(
                     rngs=[rngs[active_rows[row]] for row in sub_rows],
                 )
             )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         batch = concat_sampled_action_batches(parts)
         chunk_exec_actions = batch.exec_action_np[:, None, :].astype(np.float32, copy=False)
         chunk_unsquashed = batch.unsquashed.detach().cpu().reshape(n_active, 1, -1)
@@ -155,6 +157,8 @@ def _sample_policy_for_active_rows(
                     rngs=[rngs[active_rows[row]] for row in sub_rows],
                 )
             )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         batch = concat_sampled_action_chunk_batches(parts)
         chunk_exec_actions = batch.exec_action_np.astype(np.float32, copy=False).reshape(
             n_active, effective_chunk, -1
