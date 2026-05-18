@@ -240,6 +240,24 @@ def test_sample_action_chunk_batch_from_proc_returns_batch_shapes() -> None:
     assert chunk.action_clip_any.shape == (2, 3)
 
 
+def test_reshape_chunk_params_batch_slices_flat_full_chunks_per_env() -> None:
+    wrapper, _policy, _bundle = _batch_wrapper()
+    base = torch.arange(2 * 5 * 4, dtype=torch.float32).reshape(2, 5, 4)
+    flat = base.reshape(2 * 5, 4)
+
+    mean, log_std = wrapper._reshape_chunk_params_batch(
+        flat,
+        torch.full_like(flat, -0.5),
+        n_envs=2,
+        chunk_len=2,
+    )
+
+    assert mean.shape == (2, 2, 4)
+    torch.testing.assert_close(mean[0], base[0, :2])
+    torch.testing.assert_close(mean[1], base[1, :2])
+    torch.testing.assert_close(log_std, torch.full((2, 2, 4), -0.5))
+
+
 def test_sample_action_chunk_batch_is_seed_deterministic_per_row() -> None:
     wrapper, _policy, _bundle = _batch_wrapper()
     proc = {"x": torch.zeros(2, 1)}

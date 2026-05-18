@@ -258,6 +258,9 @@ class MetaWorldSmolVLAGRPOPolicy:
                 out = x.reshape(b, t, a)
             elif x.ndim == 2 and int(x.shape[0]) == b and int(x.shape[1]) == a:
                 out = x.unsqueeze(1).expand(b, t, a)
+            elif x.ndim == 2 and int(x.shape[1]) == a and int(x.shape[0]) % b == 0 and int(x.shape[0]) // b >= t:
+                total_t = int(x.shape[0]) // b
+                out = x.reshape(b, total_t, a)[:, :t, :]
             elif x.ndim == 2 and int(x.shape[0]) >= b * t and int(x.shape[1]) == a:
                 out = x[: b * t].reshape(b, t, a)
             else:
