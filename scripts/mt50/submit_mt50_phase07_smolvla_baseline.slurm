@@ -27,7 +27,7 @@ slurm_export_pythonpath
 slurm_export_hf_torch_cache "mt50-phase07-smolvla-baseline"
 
 export WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 export MT50_PHASE07_OUTPUT_ROOT="${MT50_PHASE07_OUTPUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase07}"
 export MT50_INCLUDE_DIFFICULTIES="${MT50_INCLUDE_DIFFICULTIES:-easy,medium,hard,very_hard,unclassified}"
 export MT50_PHASE07_EPISODES="${MT50_PHASE07_EPISODES:-10}"

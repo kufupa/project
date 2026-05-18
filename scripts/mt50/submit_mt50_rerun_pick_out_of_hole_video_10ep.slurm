@@ -48,7 +48,7 @@ export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
 export WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 
 # --- Rerun-specific (do not rely on sbatch environment) ---
 export SMOLVLA_PARITY_TASK="pick-out-of-hole-v3"
