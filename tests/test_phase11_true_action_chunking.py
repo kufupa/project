@@ -734,6 +734,49 @@ def test_phase11_group_loss_matches_closed_form_per_trajectory_normalizer():
     assert not torch.allclose(wrapper.scale.grad, wrong_global_denominator)
 
 
+def test_phase11_group_loss_uses_explicit_grpo_group_size_not_rollout_count():
+    train = _load_phase11_train_module()
+    rollouts = [
+        SimpleNamespace(action_chunks=[_action_chunk("a0", steps=5)]),
+        SimpleNamespace(action_chunks=[_action_chunk("a1", steps=5)]),
+        SimpleNamespace(action_chunks=[_action_chunk("b0", steps=5)]),
+        SimpleNamespace(action_chunks=[_action_chunk("b1", steps=5)]),
+    ]
+    advantages = torch.tensor([2.0, 1.0, 3.0, 0.0], dtype=torch.float32)
+
+    explicit_group = FakeChunkTrainWrapper(init=-0.1)
+    train._backward_phase11_group_loss(
+        train_wrapper=explicit_group,
+        rollouts=rollouts,
+        advantages=advantages,
+        device=torch.device("cpu"),
+        optimizer_chunk_size=1,
+        clip_eps=0.2,
+        logprob_recompute_mode="batched",
+        logprob_batch_size=16,
+        grpo_group_size=2,
+        telemetry=None,
+    )
+
+    rollout_count_group = FakeChunkTrainWrapper(init=-0.1)
+    train._backward_phase11_group_loss(
+        train_wrapper=rollout_count_group,
+        rollouts=rollouts,
+        advantages=advantages,
+        device=torch.device("cpu"),
+        optimizer_chunk_size=1,
+        clip_eps=0.2,
+        logprob_recompute_mode="batched",
+        logprob_batch_size=16,
+        grpo_group_size=None,
+        telemetry=None,
+    )
+
+    assert explicit_group.scale.grad is not None
+    assert rollout_count_group.scale.grad is not None
+    assert not torch.allclose(explicit_group.scale.grad, rollout_count_group.scale.grad)
+
+
 def test_phase11_clipped_row_loss_positive_advantage_clamp_saturates_grad():
     train = _load_phase11_train_module()
     new_lp = torch.tensor([1.0], dtype=torch.float32, requires_grad=True)
