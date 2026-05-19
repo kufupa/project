@@ -318,6 +318,42 @@ def test_phase11_serial_official_action_chunk_samples_once_per_chunk(monkeypatch
     assert traj.metadata["action_chunk_size"] == 2
 
 
+def test_collect_rollout_seed_batch_calls_group_per_seed(monkeypatch):
+    calls: list[int] = []
+
+    def fake_collect_rollout_group(**kwargs):
+        reset_seed = int(kwargs["reset_seed"])
+        calls.append(reset_seed)
+        return [
+            phase11_rollout.RolloutTrajectory(
+                reset_seed=reset_seed,
+                rollout_index=r,
+            )
+            for r in range(int(kwargs["group_size"]))
+        ]
+
+    monkeypatch.setattr(phase11_rollout, "collect_rollout_group", fake_collect_rollout_group)
+
+    out = phase11_rollout.collect_rollout_seed_batch(
+        bundle=FakeBundle(),
+        policy_old=SimpleNamespace(),
+        task="push-v3",
+        task_text="push",
+        reset_seeds=[2000, 2001],
+        episode_index=7,
+        max_steps=10,
+        group_size=3,
+        action_dim=4,
+        device=torch.device("cpu"),
+    )
+
+    assert calls == [2000, 2001]
+    assert len(out) == 6
+    assert [tr.reset_seed for tr in out] == [2000, 2000, 2000, 2001, 2001, 2001]
+    assert [tr.metadata["seed_batch_index"] for tr in out] == [0, 0, 0, 1, 1, 1]
+    assert {tr.metadata["seed_batch_size"] for tr in out} == {2}
+
+
 def test_phase11_action_chunk_size_one_records_degenerate_chunks(monkeypatch):
     _install_common_fakes(monkeypatch, FakeCustomEnv)
 

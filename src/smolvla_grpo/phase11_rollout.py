@@ -8,6 +8,7 @@ import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -351,6 +352,59 @@ def collect_rollout_group(
         rollouts.append(traj)
     env_h.close()
     return rollouts
+
+
+def collect_rollout_seed_batch(
+    *,
+    bundle: _SmolVLABundle,
+    policy_old: torch.nn.Module,
+    task: str,
+    task_text: str,
+    reset_seeds: Sequence[int],
+    episode_index: int,
+    max_steps: int,
+    group_size: int,
+    action_dim: int,
+    device: torch.device,
+    env_backend: str = "custom",
+    rollout_execution: str = "serial",
+    async_start_method: str = "forkserver",
+    action_transform: str = "no_tanh",
+    action_chunk_size: int = 1,
+    rollout_policy_batch_size: int = 32,
+) -> list[RolloutTrajectory]:
+    """Collect seed-major GRPO groups for multiple reset seeds."""
+    seeds = [int(seed) for seed in reset_seeds]
+    if not seeds:
+        raise ValueError("reset_seeds must be non-empty")
+    if int(group_size) < 1:
+        raise ValueError("group_size must be >= 1")
+
+    merged: list[RolloutTrajectory] = []
+    for batch_index, reset_seed in enumerate(seeds):
+        group = collect_rollout_group(
+            bundle=bundle,
+            policy_old=policy_old,
+            task=task,
+            task_text=task_text,
+            reset_seed=reset_seed,
+            episode_index=episode_index,
+            max_steps=max_steps,
+            group_size=group_size,
+            action_dim=action_dim,
+            device=device,
+            env_backend=env_backend,
+            rollout_execution=rollout_execution,
+            async_start_method=async_start_method,
+            action_transform=action_transform,
+            action_chunk_size=action_chunk_size,
+            rollout_policy_batch_size=rollout_policy_batch_size,
+        )
+        for traj in group:
+            traj.metadata["seed_batch_index"] = int(batch_index)
+            traj.metadata["seed_batch_size"] = len(seeds)
+        merged.extend(group)
+    return merged
 
 
 def _action_bounds(env_h: Any) -> tuple[np.ndarray, np.ndarray]:
