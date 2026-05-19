@@ -399,8 +399,12 @@ def main() -> int:
     from torch import nn
 
     from smolvla_grpo.checkpointing import load_grpo_checkpoint, save_grpo_checkpoint
-    from smolvla_grpo.grpo_math import compute_group_advantages
-    from smolvla_grpo.phase11_rollout import collect_rollout_group, load_bundle_for_grpo
+    from smolvla_grpo.grpo_math import compute_group_advantages, compute_seed_batch_advantages
+    from smolvla_grpo.phase11_rollout import (
+        collect_rollout_group,
+        collect_rollout_seed_batch,
+        load_bundle_for_grpo,
+    )
     from smolvla_grpo.policy_wrapper import (
         MetaWorldSmolVLAGRPOPolicy,
         freeze_all_but_grpo_trainables,
@@ -436,7 +440,12 @@ def main() -> int:
     p.add_argument("--resume", type=Path, default=None, help="Path to .pt from save_grpo_checkpoint")
     p.add_argument("--max-steps", type=int, default=120, help="Use 0 with official_lerobot to use LeRobot env horizon")
     p.add_argument("--group-size", type=int, default=4)
-    p.add_argument("--batch-size", type=int, default=1, help="Must be 1 for single-seed group")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of reset seeds per update; each seed gets group_size rollouts.",
+    )
     p.add_argument("--update-epochs", type=int, default=1)
     p.add_argument(
         "--chunk-size",
@@ -482,8 +491,10 @@ def main() -> int:
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--grad-clip", type=float, default=1.0)
     args = p.parse_args()
-    if args.batch_size != 1:
-        raise SystemExit("Only batch_size=1 supported (one seed context per update).")
+    if int(args.batch_size) < 1:
+        raise SystemExit("--batch-size must be >= 1")
+    if int(args.group_size) < 2:
+        raise SystemExit("--group-size must be >= 2 for GRPO advantage normalization")
     if int(args.chunk_size) < 1:
         raise SystemExit("--chunk-size must be >= 1")
     if int(args.logprob_batch_size) < 1:
@@ -560,6 +571,7 @@ def main() -> int:
         "end_update": end_u,
         "max_steps": args.max_steps,
         "group_size": args.group_size,
+        "batch_size": int(args.batch_size),
         "optimizer_chunk_size": int(args.chunk_size),
         "logprob_recompute_mode": args.logprob_recompute_mode,
         "logprob_batch_size": int(args.logprob_batch_size),
@@ -575,27 +587,51 @@ def main() -> int:
 
     for update in range(start_u, end_u):
         update_t0 = time.perf_counter()
-        reset_seed = int(args.train_seed_base) + int(update)
+        group_size_i = int(args.group_size)
+        batch_size_i = int(args.batch_size)
+        seed_batch_base = int(args.train_seed_base) + int(update) * batch_size_i
+        reset_seeds = [seed_batch_base + b for b in range(batch_size_i)]
+        reset_seed = int(reset_seeds[0])
         proc_mem_update_start = _proc_mem_fields("update_start")
         rollout_t0 = time.perf_counter()
-        rollouts = collect_rollout_group(
-            bundle=bundle,
-            policy_old=old_policy,
-            task=args.task,
-            task_text=task_text,
-            reset_seed=reset_seed,
-            episode_index=update,
-            max_steps=args.max_steps,
-            group_size=args.group_size,
-            action_dim=action_dim,
-            device=device,
-            env_backend=args.env_backend,
-            rollout_execution=args.rollout_execution,
-            async_start_method=args.async_start_method,
-            action_transform=args.action_transform,
-            action_chunk_size=int(args.action_chunk_size),
-            rollout_policy_batch_size=int(args.rollout_policy_batch_size),
-        )
+        if batch_size_i == 1:
+            rollouts = collect_rollout_group(
+                bundle=bundle,
+                policy_old=old_policy,
+                task=args.task,
+                task_text=task_text,
+                reset_seed=reset_seed,
+                episode_index=update,
+                max_steps=args.max_steps,
+                group_size=group_size_i,
+                action_dim=action_dim,
+                device=device,
+                env_backend=args.env_backend,
+                rollout_execution=args.rollout_execution,
+                async_start_method=args.async_start_method,
+                action_transform=args.action_transform,
+                action_chunk_size=int(args.action_chunk_size),
+                rollout_policy_batch_size=int(args.rollout_policy_batch_size),
+            )
+        else:
+            rollouts = collect_rollout_seed_batch(
+                bundle=bundle,
+                policy_old=old_policy,
+                task=args.task,
+                task_text=task_text,
+                reset_seeds=reset_seeds,
+                episode_index=update,
+                max_steps=args.max_steps,
+                group_size=group_size_i,
+                action_dim=action_dim,
+                device=device,
+                env_backend=args.env_backend,
+                rollout_execution=args.rollout_execution,
+                async_start_method=args.async_start_method,
+                action_transform=args.action_transform,
+                action_chunk_size=int(args.action_chunk_size),
+                rollout_policy_batch_size=int(args.rollout_policy_batch_size),
+            )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
         proc_mem_after_rollout = _proc_mem_fields("after_rollout")
         returns = torch.tensor(
@@ -630,6 +666,10 @@ def main() -> int:
         action_clip_any_fraction = float(
             sum(1 for v in clip_any_values if v) / max(len(clip_any_values), 1)
         )
+        per_seed_success_rate = [
+            float(sum(1 for s in successes[i * group_size_i : (i + 1) * group_size_i] if s) / group_size_i)
+            for i in range(batch_size_i)
+        ]
         resolved_max_steps = int(args.max_steps)
         if rollouts:
             resolved_max_steps = int(
@@ -640,6 +680,9 @@ def main() -> int:
             "rollout_execution": args.rollout_execution,
             "action_transform": args.action_transform,
             "run_label": args.run_label,
+            "batch_size": batch_size_i,
+            "reset_seeds": reset_seeds,
+            "per_seed_success_rate": per_seed_success_rate,
             "async_start_method": (
                 args.async_start_method if args.rollout_execution == "vector_async" else None
             ),
@@ -663,7 +706,10 @@ def main() -> int:
             "terminated": terminated_flags,
             "truncated": truncated_flags,
         }
-        advantages = compute_group_advantages(returns)
+        if batch_size_i == 1:
+            advantages = compute_group_advantages(returns)
+        else:
+            advantages = compute_seed_batch_advantages(returns, group_size=group_size_i)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             update_seconds = float(time.perf_counter() - update_t0)
             proc_mem_after_optimize = _proc_mem_fields("after_optimize")
@@ -723,7 +769,7 @@ def main() -> int:
                 f"mode={args.rollout_execution}",
                 f"label={args.run_label}",
                 f"action_transform={args.action_transform}",
-                f"seed={reset_seed}",
+                f"seeds={reset_seeds}",
                 f"avg_return={avg_ret:.6g}",
                 f"success_rate={success_rate:.3f}",
                 f"episode_lengths={episode_lengths}",
@@ -767,7 +813,7 @@ def main() -> int:
                 logprob_recompute_mode=args.logprob_recompute_mode,
                 logprob_batch_size=int(args.logprob_batch_size),
                 telemetry=loss_telemetry,
-                grpo_group_size=int(args.group_size),
+                grpo_group_size=group_size_i,
             )
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
@@ -825,7 +871,7 @@ def main() -> int:
             f"mode={args.rollout_execution}",
             f"label={args.run_label}",
             f"action_transform={args.action_transform}",
-            f"seed={reset_seed}",
+            f"seeds={reset_seeds}",
             f"avg_return={avg_ret:.6g}",
             f"success_rate={success_rate:.3f}",
             f"episode_lengths={episode_lengths}",
