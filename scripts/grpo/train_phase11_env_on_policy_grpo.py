@@ -245,8 +245,15 @@ def _backward_phase11_group_loss(
     logprob_recompute_mode: str,
     logprob_batch_size: int,
     telemetry: dict | None,
+    grpo_group_size: int | None = None,
 ) -> int:
-    G = len(rollouts)
+    G = int(grpo_group_size if grpo_group_size is not None else len(rollouts))
+    if G < 1:
+        raise ValueError("grpo_group_size must be >= 1")
+    if len(rollouts) % G != 0:
+        raise ValueError(
+            f"rollout count {len(rollouts)} must be a multiple of grpo_group_size={G}"
+        )
     entries: list[tuple[object, torch.Tensor, int]] = []
     for gi, traj in enumerate(rollouts):
         A = advantages[gi].reshape(()).float()
@@ -760,6 +767,7 @@ def main() -> int:
                 logprob_recompute_mode=args.logprob_recompute_mode,
                 logprob_batch_size=int(args.logprob_batch_size),
                 telemetry=loss_telemetry,
+                grpo_group_size=int(args.group_size),
             )
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
