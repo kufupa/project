@@ -895,6 +895,17 @@ def test_phase11_train_script_exposes_action_chunk_size_static():
     assert '"rollout_policy_batch_size": int(args.rollout_policy_batch_size)' in script
 
 
+def test_phase11_train_script_supports_seed_batch_size_static():
+    script = (_REPO / "scripts" / "grpo" / "train_phase11_env_on_policy_grpo.py").read_text(
+        encoding="utf-8"
+    )
+    assert "collect_rollout_seed_batch" in script
+    assert "compute_seed_batch_advantages" in script
+    assert "reset_seeds" in script
+    assert "per_seed_success_rate" in script
+    assert "Only batch_size=1 supported" not in script
+
+
 def test_phase11_json_ready_args_converts_path_values():
     train = _load_phase11_train_module()
     args = SimpleNamespace(
