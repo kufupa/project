@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase072 official LeRobot MT50 - one GPU shard per qsub (10-way split).
+# Variant: 4 CPU, 32 GB RAM, 1 GPU, 12h walltime.
+# Submit all 10 from repo root:
+#   bash scripts/mt50/submit_mt50_phase072_10ep_all_10x1gpu_32gb_pbs.sh
+#
+# Each job: 5 tasks x 10 episodes, seed 1030, no videos. Distinct artifact root.
+# Shard index: MT50_PHASE072_SHARD_INDEX=0..9.
+#PBS -N mt50p072g32
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if command -v module >/dev/null 2>&1; then
+  module purge >/dev/null 2>&1 || true
+  module load tools/prod
+  module load Python/3.12.3-GCCcore-13.3.0
+fi
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+  cd "${PROJECT_ROOT}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+  cd "${PROJECT_ROOT}"
+fi
+
+export PROJECT_ROOT
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+export WORKSPACE_ROOT
+
+unset SMOLVLA_LEROBOT_ENV_DIR SMOLVLA_PYTHON_BIN 2>/dev/null || true
+export SMOLVLA_LEROBOT_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py312"
+export SMOLVLA_PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN}"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: python executable not found: ${PYTHON_BIN}" >&2
+  exit 2
+fi
+
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
+mkdir -p "${XDG_CACHE_HOME}"
+
+CPU_THREADS="${MT50_PHASE072_CPU_THREADS:-4}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${CPU_THREADS}}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${CPU_THREADS}}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-${CPU_THREADS}}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-${CPU_THREADS}}"
+
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+
+export MT50_PHASE071_EPISODES=10
+export MT50_PHASE071_SEED=1030
+export MT50_LEROBOT_MAX_EPISODES_RENDERED=0
+
+PARENT_ROOT="${PROJECT_ROOT}/artifacts/MT50_Phase072_official_lerobot_10ep_s1030_10x1gpu_32g12h"
+
+shard_idx="${MT50_PHASE072_SHARD_INDEX:-}"
+if [[ ! "${shard_idx}" =~ ^([0-9])$ ]]; then
+  echo "error: MT50_PHASE072_SHARD_INDEX must be one of 0..9; got '${shard_idx}'" >&2
+  exit 2
+fi
+
+export MT50_PHASE071_OUTPUT_ROOT="${PARENT_ROOT}/shard${shard_idx}"
+
+case "${shard_idx}" in
+  0)
+    export MT50_PHASE071_TASK='assembly-v3,basketball-v3,bin-picking-v3,box-close-v3,button-press-topdown-v3'
+    ;;
+  1)
+    export MT50_PHASE071_TASK='button-press-topdown-wall-v3,button-press-v3,button-press-wall-v3,coffee-button-v3,coffee-pull-v3'
+    ;;
+  2)
+    export MT50_PHASE071_TASK='coffee-push-v3,dial-turn-v3,disassemble-v3,door-close-v3,door-lock-v3'
+    ;;
+  3)
+    export MT50_PHASE071_TASK='door-open-v3,door-unlock-v3,drawer-close-v3,drawer-open-v3,faucet-close-v3'
+    ;;
+  4)
+    export MT50_PHASE071_TASK='faucet-open-v3,hammer-v3,hand-insert-v3,handle-press-side-v3,handle-press-v3'
+    ;;
+  5)
+    export MT50_PHASE071_TASK='handle-pull-side-v3,handle-pull-v3,lever-pull-v3,peg-insert-side-v3,peg-unplug-side-v3'
+    ;;
+  6)
+    export MT50_PHASE071_TASK='pick-out-of-hole-v3,pick-place-v3,pick-place-wall-v3,plate-slide-back-side-v3,plate-slide-back-v3'
+    ;;
+  7)
+    export MT50_PHASE071_TASK='plate-slide-side-v3,plate-slide-v3,push-back-v3,push-v3,push-wall-v3'
+    ;;
+  8)
+    export MT50_PHASE071_TASK='reach-v3,reach-wall-v3,shelf-place-v3,soccer-v3,stick-pull-v3'
+    ;;
+  9)
+    export MT50_PHASE071_TASK='stick-push-v3,sweep-into-v3,sweep-v3,window-open-v3,window-close-v3'
+    ;;
+  *)
+    echo "error: invalid shard_idx=${shard_idx}" >&2
+    exit 2
+    ;;
+esac
+
+LOGDIR="${PROJECT_ROOT}/logs/pbs/mt50/phase072_10ep_10x1gpu_32g12h"
+mkdir -p "${LOGDIR}"
+LOG="${LOGDIR}/shard${shard_idx}_${PBS_JOBID:-local}.log"
+
+echo "[mt50-p072-10e-10x1gpu-32g] host=$(hostname) job=${PBS_JOBID:-local} shard=${shard_idx}"
+echo "[mt50-p072-10e-10x1gpu-32g] PROJECT_ROOT=${PROJECT_ROOT}"
+echo "[mt50-p072-10e-10x1gpu-32g] SMOLVLA_LEROBOT_ENV_DIR=${SMOLVLA_LEROBOT_ENV_DIR}"
+echo "[mt50-p072-10e-10x1gpu-32g] PYTHON_BIN=${PYTHON_BIN}"
+echo "[mt50-p072-10e-10x1gpu-32g] MUJOCO_GL=${MUJOCO_GL} CPU_THREADS=${CPU_THREADS}"
+echo "[mt50-p072-10e-10x1gpu-32g] tee_log=${LOG}"
+if ! "${PYTHON_BIN}" -c "import transformers as _t; print('transformers', _t.__version__)" 2>/dev/null; then
+  echo "warn: could not print transformers version (import failed)" >&2
+fi
+echo "[mt50-p072-10e-10x1gpu-32g] output_root=${MT50_PHASE071_OUTPUT_ROOT}"
+echo "[mt50-p072-10e-10x1gpu-32g] episodes=${MT50_PHASE071_EPISODES} seed=${MT50_PHASE071_SEED} max_episodes_rendered=${MT50_LEROBOT_MAX_EPISODES_RENDERED}"
+echo "[mt50-p072-10e-10x1gpu-32g] tasks=${MT50_PHASE071_TASK}"
+
+set -o pipefail
+bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh" 2>&1 | tee -a "${LOG}"
