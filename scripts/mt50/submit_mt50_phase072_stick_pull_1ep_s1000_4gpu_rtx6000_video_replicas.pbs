@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase072 official LeRobot MT50 stick-pull video replicas.
+# One PBS job requests 4 RTX6000 GPUs and runs the same one-episode eval 4 times in parallel.
+#
+# Run shape:
+#   task=stick-pull-v3, episodes=1, seed=1000, videos on, random reset mode.
+#   Each worker gets one GPU and its own output directory to avoid video overwrite.
+#
+# Submit from repo root:
+#   qsub scripts/mt50/submit_mt50_phase072_stick_pull_1ep_s1000_4gpu_rtx6000_video_replicas.pbs
+#PBS -N mt50spv4
+#PBS -l select=1:ncpus=16:mem=48gb:ngpus=4:gpu_type=RTX6000
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o logs/pbs/mt50/phase072_stick_pull_1ep_s1000_4gpu_rtx6000_video_replicas/packed.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if command -v module >/dev/null 2>&1; then
+  module purge >/dev/null 2>&1 || true
+  module load tools/prod
+  module load Python/3.12.3-GCCcore-13.3.0
+fi
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+  cd "${PROJECT_ROOT}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+  cd "${PROJECT_ROOT}"
+fi
+
+export PROJECT_ROOT
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+export WORKSPACE_ROOT
+
+unset SMOLVLA_LEROBOT_ENV_DIR SMOLVLA_PYTHON_BIN 2>/dev/null || true
+export SMOLVLA_LEROBOT_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py312"
+export SMOLVLA_PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN}"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: python executable not found: ${PYTHON_BIN}" >&2
+  exit 2
+fi
+
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
+mkdir -p "${XDG_CACHE_HOME}"
+
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+export MT50_PHASE071_TASK="stick-pull-v3"
+export MT50_PHASE071_EPISODES=1
+export MT50_PHASE071_SEED=1000
+# LeRobot defaults to rendering up to 10 episodes; this run has 1 episode, so video is enabled.
+unset MT50_LEROBOT_MAX_EPISODES_RENDERED MT50_METAWORLD_FREEZE_RAND_VEC 2>/dev/null || true
+
+PARENT_ROOT="${PROJECT_ROOT}/artifacts/MT50_Phase072_stick_pull_1ep_s1000_4gpu_rtx6000_video_replicas"
+LOGDIR="${PROJECT_ROOT}/logs/pbs/mt50/phase072_stick_pull_1ep_s1000_4gpu_rtx6000_video_replicas"
+mkdir -p "${PARENT_ROOT}" "${LOGDIR}"
+
+replicas=(0 1 2 3)
+
+IFS=',' read -r -a visible_gpus <<< "${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+if (( ${#visible_gpus[@]} < ${#replicas[@]} )); then
+  echo "error: expected at least ${#replicas[@]} visible GPUs; CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-}'" >&2
+  exit 2
+fi
+
+echo "[mt50-stick-pull-video-pack] host=$(hostname) job=${PBS_JOBID:-local}"
+echo "[mt50-stick-pull-video-pack] PROJECT_ROOT=${PROJECT_ROOT}"
+echo "[mt50-stick-pull-video-pack] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "[mt50-stick-pull-video-pack] output_parent=${PARENT_ROOT}"
+echo "[mt50-stick-pull-video-pack] task=${MT50_PHASE071_TASK} episodes=${MT50_PHASE071_EPISODES} seed=${MT50_PHASE071_SEED}"
+echo "[mt50-stick-pull-video-pack] videos=lerobot_default freeze_rand_vec=lerobot_default_false"
+
+pids=()
+for idx in "${!replicas[@]}"; do
+  replica="${replicas[$idx]}"
+  gpu="${visible_gpus[$idx]}"
+  out_dir="${PARENT_ROOT}/replica_${replica}"
+  log_file="${LOGDIR}/replica_${replica}_${PBS_JOBID:-local}.log"
+  mkdir -p "${out_dir}"
+
+  echo "[mt50-stick-pull-video-pack] launch replica=${replica} gpu=${gpu} out=${out_dir} log=${log_file}"
+  (
+    set -euo pipefail
+    export CUDA_VISIBLE_DEVICES="${gpu}"
+    export OMP_NUM_THREADS=4
+    export MKL_NUM_THREADS=4
+    export OPENBLAS_NUM_THREADS=4
+    export NUMEXPR_NUM_THREADS=4
+    export MPLCONFIGDIR="${LOGDIR}/mpl_replica_${replica}"
+    mkdir -p "${MPLCONFIGDIR}"
+    export MT50_PHASE071_TASK="stick-pull-v3"
+    export MT50_PHASE071_EPISODES=1
+    export MT50_PHASE071_SEED=1000
+    export MT50_PHASE071_OUTPUT_ROOT="${out_dir}"
+    unset MT50_LEROBOT_MAX_EPISODES_RENDERED MT50_METAWORLD_FREEZE_RAND_VEC 2>/dev/null || true
+
+    echo "[mt50-stick-pull-video-worker] host=$(hostname) replica=${replica} gpu=${CUDA_VISIBLE_DEVICES} task=${MT50_PHASE071_TASK}"
+    echo "[mt50-stick-pull-video-worker] episodes=${MT50_PHASE071_EPISODES} seed=${MT50_PHASE071_SEED} freeze=lerobot_default_false videos=lerobot_default"
+    echo "[mt50-stick-pull-video-worker] output_root=${MT50_PHASE071_OUTPUT_ROOT}"
+    exec bash "${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
+  ) >"${log_file}" 2>&1 &
+  pids+=("$!")
+done
+
+status=0
+for i in "${!pids[@]}"; do
+  pid="${pids[$i]}"
+  replica="${replicas[$i]}"
+  if wait "${pid}"; then
+    echo "[mt50-stick-pull-video-pack] complete replica=${replica} pid=${pid}"
+  else
+    rc=$?
+    echo "[mt50-stick-pull-video-pack] failed replica=${replica} pid=${pid} rc=${rc}" >&2
+    status=1
+  fi
+done
+
+exit "${status}"
