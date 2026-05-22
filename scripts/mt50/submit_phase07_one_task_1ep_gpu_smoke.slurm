@@ -16,6 +16,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=smolvla_phase07_one_task_1ep_%j.out
 #SBATCH --error=smolvla_phase07_one_task_1ep_%j.err
+#SBATCH --export=NIL
 
 set -euo pipefail
 export PYTHONUNBUFFERED=1
@@ -49,10 +50,12 @@ export SMOLVLA_PREFER_LOCAL_HF_SNAPSHOT="${SMOLVLA_PREFER_LOCAL_HF_SNAPSHOT:-tru
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
-export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
 
 export WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+unset SMOLVLA_LEROBOT_ENV_DIR SMOLVLA_PYTHON_BIN 2>/dev/null || true
+export SMOLVLA_LEROBOT_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py312"
+export SMOLVLA_PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
 
 # Match MT50 phase07 defaults for I/O flags
 export SMOLVLA_SAVE_FRAMES="${SMOLVLA_SAVE_FRAMES:-false}"
