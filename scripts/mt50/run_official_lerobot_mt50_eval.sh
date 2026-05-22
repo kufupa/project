@@ -10,7 +10,10 @@
 #   MT50_PHASE071_CHECKPOINT  — directory with train_config.json + pretrained weights
 #   MT50_PHASE071_DRY_RUN     — if true, print command and exit
 #   MT50_LEROBOT_MAX_EPISODES_RENDERED — optional render limit; set 0 for no videos
-#   SMOLVLA_LEROBOT_ENV_DIR   — venv with lerobot (default: ${WORKSPACE_ROOT}/.envs/lerobot_mw_py310)
+#   MT50_METAWORLD_FREEZE_RAND_VEC   — optional bool; if set, force MetaWorld _freeze_rand_vec (true/false)
+#   MT50_XVFB_SERVER_NUM — when MUJOCO_GL=glfw, xvfb-run uses this display number (e.g. 100..103 per worker).
+#                          Avoid xvfb-run -a race on :99 when multiple workers start together.
+#   SMOLVLA_LEROBOT_ENV_DIR   — venv with lerobot (default: ${WORKSPACE_ROOT}/.envs/lerobot_mw_py312)
 #
 set -euo pipefail
 export PYTHONUNBUFFERED=1
@@ -32,7 +35,7 @@ export WORKSPACE_ROOT
 slurm_export_pythonpath
 slurm_export_hf_torch_cache "mt50-phase071-official"
 
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "error: python executable not found: ${PYTHON_BIN}" >&2
@@ -60,9 +63,18 @@ TASK="${MT50_PHASE071_TASK:-assembly-v3}"
 EPISODES="${MT50_PHASE071_EPISODES:-1}"
 SEED="${MT50_PHASE071_SEED:-1000}"
 RENDER_LIMIT="${MT50_LEROBOT_MAX_EPISODES_RENDERED:-}"
+FREEZE_RAND_VEC_RAW="${MT50_METAWORLD_FREEZE_RAND_VEC:-}"
 if [[ -n "${RENDER_LIMIT}" && ! "${RENDER_LIMIT}" =~ ^[0-9]+$ ]]; then
   echo "error: MT50_LEROBOT_MAX_EPISODES_RENDERED must be a non-negative integer: ${RENDER_LIMIT}" >&2
   exit 2
+fi
+if [[ -n "${FREEZE_RAND_VEC_RAW}" ]]; then
+  FREEZE_RAND_VEC_NORMALIZED="$(printf '%s' "${FREEZE_RAND_VEC_RAW}" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "${FREEZE_RAND_VEC_NORMALIZED}" =~ ^(true|false|1|0|yes|no|on|off)$ ]]; then
+    echo "error: MT50_METAWORLD_FREEZE_RAND_VEC must be one of true|false|1|0|yes|no|on|off: ${FREEZE_RAND_VEC_RAW}" >&2
+    exit 2
+  fi
+  export MT50_METAWORLD_FREEZE_RAND_VEC="${FREEZE_RAND_VEC_NORMALIZED}"
 fi
 
 if [[ "${TASK}" == "all" ]]; then
@@ -88,7 +100,7 @@ fi
 OUTPUT_ROOT="${MT50_PHASE071_OUTPUT_ROOT:-${DEFAULT_OUT}}"
 mkdir -p "${OUTPUT_ROOT}"
 
-if [[ -n "${RENDER_LIMIT}" ]]; then
+if [[ -n "${RENDER_LIMIT}" || -n "${FREEZE_RAND_VEC_RAW}" ]]; then
   cmd=(
     "${PYTHON_BIN}" "${SCRIPT_DIR}/lerobot_eval_configurable_rendering.py"
     --policy.path="${SNAPSHOT}"
@@ -122,14 +134,31 @@ echo "[mt50:phase071] task=${TASK}"
 echo "[mt50:phase071] episodes=${EPISODES}"
 echo "[mt50:phase071] seed=${SEED}"
 echo "[mt50:phase071] max_episodes_rendered=${RENDER_LIMIT:-lerobot_default_10}"
+echo "[mt50:phase071] metaworld_freeze_rand_vec=${MT50_METAWORLD_FREEZE_RAND_VEC:-lerobot_default_false}"
 echo "[mt50:phase071] expected_horizon=500 via LeRobot MetaWorld _max_episode_steps"
 
 if [[ "${MT50_PHASE071_DRY_RUN:-false}" == "true" ]]; then
   exit 0
 fi
 
-if command -v xvfb-run >/dev/null 2>&1; then
-  exec xvfb-run -a -s "-screen 0 1280x1024x24" "${cmd[@]}"
-else
+MUJOCO_GL_LOWER="$(printf '%s' "${MUJOCO_GL:-egl}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${MUJOCO_GL_LOWER}" == "egl" ]]; then
+  export MUJOCO_GL="egl"
   exec "${cmd[@]}"
 fi
+
+if [[ "${MUJOCO_GL_LOWER}" == "glfw" ]]; then
+  export MUJOCO_GL="glfw"
+  if ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "warn: MUJOCO_GL=glfw but xvfb-run missing; running without Xvfb (may fail headless)" >&2
+    exec "${cmd[@]}"
+  fi
+  srv="${MT50_XVFB_SERVER_NUM:-}"
+  if [[ -z "${srv}" ]]; then
+    echo "error: MUJOCO_GL=glfw headless needs xvfb-run with fixed display; set MT50_XVFB_SERVER_NUM (e.g. 100 per parallel worker)" >&2
+    exit 2
+  fi
+  exec xvfb-run -n "${srv}" -s "-screen 0 1280x1024x24" "${cmd[@]}"
+fi
+
+exec "${cmd[@]}"
