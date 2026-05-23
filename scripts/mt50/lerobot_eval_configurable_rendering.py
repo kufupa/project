@@ -27,6 +27,18 @@ def parse_max_episodes_rendered(raw: str | None) -> int:
     return value
 
 
+def parse_freeze_rand_vec(raw: str | None) -> bool | None:
+    """Parse MT50_METAWORLD_FREEZE_RAND_VEC."""
+    if raw is None or raw == "":
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError("MT50_METAWORLD_FREEZE_RAND_VEC must be a boolean value")
+
+
 def with_configurable_rendering(
     eval_policy_all: Callable[..., dict[str, Any]],
     *,
@@ -44,15 +56,35 @@ def with_configurable_rendering(
     return wrapped
 
 
+def apply_metaworld_freeze_rand_vec(value: bool) -> None:
+    """Monkeypatch MetaWorld env creation with fixed freeze flag."""
+    from lerobot.envs import metaworld as _mw
+
+    _orig = _mw.MetaworldEnv._make_envs_task
+
+    def _patched(self: Any, env_name: str) -> Any:
+        env = _orig(self, env_name)
+        env._freeze_rand_vec = bool(value)
+        return env
+
+    _mw.MetaworldEnv._make_envs_task = _patched
+
+
 def main() -> None:
-    render_limit = parse_max_episodes_rendered(os.environ.get("MT50_LEROBOT_MAX_EPISODES_RENDERED"))
+    render_limit_raw = os.environ.get("MT50_LEROBOT_MAX_EPISODES_RENDERED")
+    freeze_rand_vec = parse_freeze_rand_vec(os.environ.get("MT50_METAWORLD_FREEZE_RAND_VEC"))
 
     from lerobot.scripts import lerobot_eval
 
-    lerobot_eval.eval_policy_all = with_configurable_rendering(
-        lerobot_eval.eval_policy_all,
-        max_episodes_rendered=render_limit,
-    )
+    if render_limit_raw is not None and render_limit_raw != "":
+        render_limit = parse_max_episodes_rendered(render_limit_raw)
+        lerobot_eval.eval_policy_all = with_configurable_rendering(
+            lerobot_eval.eval_policy_all,
+            max_episodes_rendered=render_limit,
+        )
+    if freeze_rand_vec is not None:
+        apply_metaworld_freeze_rand_vec(freeze_rand_vec)
+        print(f"[mt50:adapter] metaworld_freeze_rand_vec={freeze_rand_vec}")
     lerobot_eval.main()
 
 
