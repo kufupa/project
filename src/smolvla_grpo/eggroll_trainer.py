@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 from statistics import mean
 from time import perf_counter
 from typing import Any
@@ -62,7 +63,8 @@ class EggrollTrainerConfig:
     episodes_per_member: int = 1
     num_iterations: int = 100
     max_steps: int = 120
-    rollout_execution: str = "vector_sync"
+    action_chunk_size: int = 5
+    rollout_execution: str = "vector_async"
     async_start_method: str = "forkserver"
     train_scope: str = "action_expert"
     train_seed_base: int = 2000
@@ -74,6 +76,8 @@ class EggrollTrainerConfig:
     write_oracle_video: bool = False
     resume: Path | None = None
     abort_update_norm: float = 0.05
+    seed_mode: str = "member_offset"
+    checkpoint_sync_dir: Path | None = None
 
 
 def compute_baseline(values: list[float], baseline_type: str) -> float:
@@ -193,6 +197,33 @@ def cuda_memory_metrics() -> dict[str, float | bool]:
     }
 
 
+def sync_checkpoint_artifacts(source_dir: Path, sync_dir: Path | None) -> None:
+    if sync_dir is None:
+        return
+    source = Path(source_dir)
+    target = Path(sync_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    for rel in (
+        Path("train_manifest.json"),
+        Path("progress.jsonl"),
+        Path("timings.jsonl"),
+        Path("smoke_manifest.json"),
+    ):
+        src = source / rel
+        if src.exists():
+            dst = target / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    ckpt_src = source / "checkpoints"
+    if ckpt_src.exists():
+        ckpt_dst = target / "checkpoints"
+        ckpt_dst.mkdir(parents=True, exist_ok=True)
+        for src in ckpt_src.glob("*.pt"):
+            shutil.copy2(src, ckpt_dst / src.name)
+        for src in ckpt_src.glob("*.pt.meta.json"):
+            shutil.copy2(src, ckpt_dst / src.name)
+
+
 def _policy_state(policy: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {k: v.detach().cpu() for k, v in policy.state_dict().items()}
 
@@ -280,13 +311,15 @@ class EggrollTrainer:
 
     def run(self) -> dict[str, Any]:
         cfg = self.config
+        if int(cfg.action_chunk_size) < 1:
+            raise ValueError("action_chunk_size must be >= 1")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         t0 = perf_counter()
         bundle, action_dim = load_bundle_for_grpo(
             cfg.checkpoint,
             task=cfg.task,
             env_backend="official_lerobot",
-            n_action_steps=1,
+            n_action_steps=int(cfg.action_chunk_size),
         )
         vla_load_seconds = perf_counter() - t0
         if cfg.resume is not None:
@@ -317,11 +350,14 @@ class EggrollTrainer:
                 "created_at": utc_now_iso(),
                 "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
                 "reset_randomization_mode": os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded"),
+                "reset_seed_mode": str(cfg.seed_mode),
+                "checkpoint_sync_dir": str(cfg.checkpoint_sync_dir) if cfg.checkpoint_sync_dir else "",
                 "action_dim": int(action_dim),
                 "layer_count": len(specs),
                 "vla_load_seconds": float(vla_load_seconds),
             }
             write_manifest(self.output_dir / "train_manifest.json", manifest)
+            sync_checkpoint_artifacts(self.output_dir, cfg.checkpoint_sync_dir)
 
             last_summary: dict[str, Any] = {}
             for iteration in range(int(cfg.num_iterations)):
@@ -338,9 +374,11 @@ class EggrollTrainer:
                         population_batch_size=int(cfg.population_batch_size),
                         iteration=iteration,
                         max_steps=int(cfg.max_steps),
+                        action_chunk_size=int(cfg.action_chunk_size),
                         train_seed_base=int(cfg.train_seed_base),
                         flow_noise_seed=int(cfg.flow_noise_seed),
                         rollout_seed_offset=episode_repeat,
+                        seed_mode=str(cfg.seed_mode),
                         noise_manager=noise_manager,
                         patch_handle=patch_handle,
                         sigma=float(cfg.sigma),
@@ -409,6 +447,7 @@ class EggrollTrainer:
                         extra=update_stats,
                     )
                 checkpoint_seconds = perf_counter() - ckpt_t0
+                sync_checkpoint_artifacts(self.output_dir, cfg.checkpoint_sync_dir)
 
                 video_path = ""
                 video_seconds = 0.0
@@ -448,6 +487,9 @@ class EggrollTrainer:
                     "iteration_seconds": float(iteration_seconds),
                     "population_size": int(cfg.population_size),
                     "population_batch_size": int(cfg.population_batch_size),
+                    "action_chunk_size": int(cfg.action_chunk_size),
+                    "seed_mode": str(cfg.seed_mode),
+                    "episodes_per_member": int(cfg.episodes_per_member),
                     "num_env_steps": int(
                         sum(len(r.rewards) for item in episode_results for r in item.rollouts)
                     ),
@@ -468,6 +510,7 @@ class EggrollTrainer:
                     "alpha": float(cfg.alpha),
                     "baseline_type": cfg.baseline_type,
                     "fitness_shaping": cfg.fitness_shaping,
+                    "checkpoint_sync_dir": str(cfg.checkpoint_sync_dir) if cfg.checkpoint_sync_dir else "",
                     "fitness_raw": [float(x) for x in fitness],
                     "fitness_shaped": [float(x) for x in shaped],
                     **stats,
@@ -491,6 +534,7 @@ class EggrollTrainer:
                 }
                 assert_smoke_manifest_contract(smoke_manifest)
                 write_manifest(self.output_dir / "smoke_manifest.json", smoke_manifest)
+                sync_checkpoint_artifacts(self.output_dir, cfg.checkpoint_sync_dir)
             return last_summary
         finally:
             patch_handle.remove()
