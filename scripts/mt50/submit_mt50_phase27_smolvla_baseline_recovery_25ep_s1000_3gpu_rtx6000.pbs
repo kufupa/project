@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase27 baseline recovery — only tasks that lacked 25 videos in old layout.
+# 11 tasks, 3 RTX6000 GPUs, 20GB RAM, per-task subprocess + resume on eval_info.json.
+# CX3: MuJoCo EGL can fail in batch (`eglQueryString` None); use GLFW via fixed Xvfb.
+#
+# Prereq: run (from repo root)
+#   python scripts/mt50/cleanup_incomplete_phase27_baseline_videos.py
+# to remove stale `shard_*/videos/<task>_0` dirs with <25 MP4s and refresh the report.
+#
+# Output: `shard_recovery_<idx>_<n>tasks/<task>/` under baseline parent.
+# Post-run merge (includes recovery shards + any per-task dirs):
+#   python scripts/mt50/merge_official_lerobot_eval_shards.py --parent "${PARENT_ROOT}" --phase27-per-task-dirs
+#
+# Submit:
+#   qsub scripts/mt50/submit_mt50_phase27_smolvla_baseline_recovery_25ep_s1000_3gpu_rtx6000.pbs
+#PBS -N mt50p27b25r3
+#PBS -l select=1:ncpus=10:mem=20gb:ngpus=3:gpu_type=RTX6000
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o logs/pbs/mt50/phase27_smolvla_baseline_recovery_25ep_s1000_3gpu_rtx6000.out
+
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if command -v module >/dev/null 2>&1; then
+  module purge >/dev/null 2>&1 || true
+  module load tools/prod
+  module load Python/3.12.3-GCCcore-13.3.0
+fi
+
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+  cd "${PROJECT_ROOT}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+  cd "${PROJECT_ROOT}"
+fi
+
+export PROJECT_ROOT
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
+export WORKSPACE_ROOT
+
+unset SMOLVLA_LEROBOT_ENV_DIR SMOLVLA_PYTHON_BIN 2>/dev/null || true
+export SMOLVLA_LEROBOT_ENV_DIR="${WORKSPACE_ROOT}/.envs/lerobot_mw_py312"
+export SMOLVLA_PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR}/bin/python"
+PYTHON_BIN="${SMOLVLA_PYTHON_BIN}"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: python executable not found: ${PYTHON_BIN}" >&2
+  exit 2
+fi
+
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
+mkdir -p "${XDG_CACHE_HOME}"
+
+export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+export MT50_PHASE071_EPISODES=25
+export MT50_PHASE071_SEED=1000
+export MT50_LEROBOT_MAX_EPISODES_RENDERED=25
+unset MT50_METAWORLD_FREEZE_RAND_VEC 2>/dev/null || true
+
+PARENT_ROOT="${PROJECT_ROOT}/artifacts/MT50_Phase27_smolvla_baseline_official_lerobot_25ep_s1000_4gpu_rtx6000"
+LOGDIR="${PROJECT_ROOT}/logs/pbs/mt50/phase27_smolvla_baseline_recovery_25ep_s1000_3gpu_rtx6000"
+mkdir -p "${PARENT_ROOT}" "${LOGDIR}"
+
+# Subset of MT50 (alphabetic contiguous block gaps from original Phase27 run).
+tasks=(
+  "disassemble-v3"
+  "plate-slide-back-side-v3"
+  "plate-slide-back-v3"
+  "plate-slide-side-v3"
+  "plate-slide-v3"
+  "push-back-v3"
+  "stick-push-v3"
+  "sweep-into-v3"
+  "sweep-v3"
+  "window-close-v3"
+  "window-open-v3"
+)
+
+join_tasks() {
+  local start="$1"
+  local count="$2"
+  local end=$((start + count))
+  local csv=""
+  local i
+  for ((i = start; i < end; i++)); do
+    if [[ -n "${csv}" ]]; then
+      csv+=","
+    fi
+    csv+="${tasks[$i]}"
+  done
+  printf '%s\n' "${csv}"
+}
+
+worker_count=3
+task_count="${#tasks[@]}"
+base_count=$((task_count / worker_count))
+remainder=$((task_count % worker_count))
+
+IFS=',' read -r -a visible_gpus <<< "${CUDA_VISIBLE_DEVICES:-0,1,2}"
+if (( ${#visible_gpus[@]} < worker_count )); then
+  echo "error: expected at least ${worker_count} visible GPUs; CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES:-}'" >&2
+  exit 2
+fi
+
+echo "[mt50-phase27-recovery] host=$(hostname) job=${PBS_JOBID:-local}"
+echo "[mt50-phase27-recovery] PROJECT_ROOT=${PROJECT_ROOT}"
+echo "[mt50-phase27-recovery] output_parent=${PARENT_ROOT}"
+echo "[mt50-phase27-recovery] tasks=${task_count} workers=${worker_count} split=4/4/3"
+echo "[mt50-phase27-recovery] MUJOCO_GL=${MUJOCO_GL}"
+
+pids=()
+start=0
+for idx in $(seq 0 $((worker_count - 1))); do
+  count="${base_count}"
+  if (( idx < remainder )); then
+    count=$((count + 1))
+  fi
+
+  task_csv="$(join_tasks "${start}" "${count}")"
+  first_task="${tasks[$start]}"
+  last_task="${tasks[$((start + count - 1))]}"
+  gpu="${visible_gpus[$idx]}"
+  out_dir="${PARENT_ROOT}/shard_recovery_${idx}_${count}tasks"
+  log_file="${LOGDIR}/shard_recovery_${idx}_${PBS_JOBID:-local}.log"
+  mkdir -p "${out_dir}"
+
+  echo "[mt50-phase27-recovery] launch shard_recovery=${idx} gpu=${gpu} tasks=${count} first=${first_task} last=${last_task}"
+  echo "[mt50-phase27-recovery] task_csv=${task_csv}"
+  (
+    set -uo pipefail
+    export MUJOCO_GL="${MUJOCO_GL:-glfw}"
+    export MT50_XVFB_SERVER_NUM=$((200 + idx))
+    export CUDA_VISIBLE_DEVICES="${gpu}"
+    export OMP_NUM_THREADS=3
+    export MKL_NUM_THREADS=3
+    export OPENBLAS_NUM_THREADS=3
+    export NUMEXPR_NUM_THREADS=3
+    export MPLCONFIGDIR="${LOGDIR}/mpl_shard_recovery_${idx}"
+    mkdir -p "${MPLCONFIGDIR}"
+    unset MT50_METAWORLD_FREEZE_RAND_VEC 2>/dev/null || true
+
+    WRAP="${PROJECT_ROOT}/scripts/mt50/run_official_lerobot_mt50_eval.sh"
+    FAIL_LOG="${LOGDIR}/failed_tasks_${PBS_JOBID:-local}_shard_recovery_${idx}.txt"
+    shard_rc=0
+
+    for ((j = 0; j < count; j++)); do
+      ti=$((start + j))
+      tname="${tasks[$ti]}"
+      task_out="${out_dir}/${tname}"
+      mkdir -p "${task_out}"
+      if [[ -f "${task_out}/eval_info.json" ]]; then
+        echo "[mt50-phase27-recovery-worker] skip shard_recovery=${idx} task=${tname} (eval_info.json exists)"
+        continue
+      fi
+      ok=0
+      for attempt in 1 2; do
+        echo "[mt50-phase27-recovery-worker] run shard_recovery=${idx} task=${tname} attempt=${attempt}/2 out=${task_out}"
+        export MT50_PHASE071_TASK="${tname}"
+        export MT50_PHASE071_OUTPUT_ROOT="${task_out}"
+        if bash "${WRAP}"; then
+          ok=1
+          break
+        fi
+        echo "[mt50-phase27-recovery-worker] warn shard_recovery=${idx} task=${tname} attempt=${attempt} failed"
+      done
+      if [[ "${ok}" -ne 1 ]]; then
+        echo "[mt50-phase27-recovery] FAILED shard_recovery=${idx} task=${tname}" | tee -a "${FAIL_LOG}"
+        shard_rc=1
+      fi
+    done
+    exit "${shard_rc}"
+  ) >"${log_file}" 2>&1 &
+  pids+=("$!")
+
+  start=$((start + count))
+done
+
+status=0
+for i in "${!pids[@]}"; do
+  pid="${pids[$i]}"
+  if wait "${pid}"; then
+    echo "[mt50-phase27-recovery] complete shard_recovery=${i} pid=${pid}"
+  else
+    rc=$?
+    echo "[mt50-phase27-recovery] failed shard_recovery=${i} pid=${pid} rc=${rc}" >&2
+    status=1
+  fi
+done
+
+exit "${status}"
