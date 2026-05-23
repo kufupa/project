@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# PBS (CX3): EGGROLL one-GPU smoke for SmolVLA push-v3.
+# PBS (CX3): EGGROLL seeded one-GPU smoke for SmolVLA push-v3.
 # Submit from repo root:
 #   cd /rds/general/user/aa6622/home/project && /opt/pbs/bin/qsub scripts/eggroll/submit_phase50_eggroll_smoke.pbs
-#PBS -N p50eggsmoke
+#PBS -N p50eggseedsmk
 #PBS -l select=1:ncpus=8:mem=48gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=04:00:00
 #PBS -j oe
-#PBS -o phase50_eggroll_smoke_pbs.out
+#PBS -o phase50_eggroll_seeded_smoke_pbs.out
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ source "${_COMMON}"
 slurm_resolve_project_root "scripts/eggroll/train_smolvla_eggroll.py"
 cd "${PROJECT_ROOT}"
 slurm_export_pythonpath
-slurm_export_hf_torch_cache "phase50-eggroll-smoke"
+slurm_export_hf_torch_cache "phase50-eggroll-seeded-smoke"
 
 export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
@@ -86,10 +86,12 @@ SIGMA="${PHASE50_SIGMA:-0.005}"
 ALPHA="${PHASE50_ALPHA:-0.01}"
 NUM_ITERATIONS="${PHASE50_NUM_ITERATIONS:-1}"
 MAX_STEPS="${PHASE50_MAX_STEPS:-5}"
-OUT="${PHASE50_OUT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_smoke/${TASK}/pop${POPULATION_SIZE}_b${POPULATION_BATCH_SIZE}_r${RANK}}"
+ACTION_CHUNK_SIZE="${PHASE50_ACTION_CHUNK_SIZE:-5}"
+ROLLOUT_EXECUTION="${PHASE50_ROLLOUT_EXECUTION:-vector_async}"
+OUT="${PHASE50_OUT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_seeded_smoke/${TASK}/pop${POPULATION_SIZE}_b${POPULATION_BATCH_SIZE}_r${RANK}}"
 
-echo "[eggroll-smoke] python=${EGGROLL_PYTHON}"
-echo "[eggroll-smoke] out=${OUT}"
+echo "[eggroll-seeded-smoke] reset_mode=${SMOLVLA_METAWORLD_RESET_MODE} python=${EGGROLL_PYTHON}"
+echo "[eggroll-seeded-smoke] action_chunk_size=${ACTION_CHUNK_SIZE} rollout_execution=${ROLLOUT_EXECUTION} out=${OUT}"
 
 "${EGGROLL_PYTHON}" scripts/eggroll/train_smolvla_eggroll.py \
   --checkpoint "${CHECKPOINT}" \
@@ -102,7 +104,8 @@ echo "[eggroll-smoke] out=${OUT}"
   --alpha "${ALPHA}" \
   --num-iterations "${NUM_ITERATIONS}" \
   --max-steps "${MAX_STEPS}" \
-  --rollout-execution vector_sync \
+  --action-chunk-size "${ACTION_CHUNK_SIZE}" \
+  --rollout-execution "${ROLLOUT_EXECUTION}" \
   --save-every 1 \
   --video-every 1 \
   --write-oracle-video
@@ -114,4 +117,4 @@ test -f "${OUT}/checkpoints/latest.pt"
 test -f "${OUT}/checkpoints/update_0001.pt"
 test -f "${OUT}/smoke_manifest.json"
 
-echo "PHASE50_EGGROLL_SMOKE_DONE out=${OUT}"
+echo "PHASE50_EGGROLL_SEEDED_SMOKE_DONE out=${OUT}"
