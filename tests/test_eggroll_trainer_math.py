@@ -4,7 +4,19 @@ import torch
 import torch.nn as nn
 
 from smolvla_grpo.eggroll_noise import EggrollLayerSpec, EggrollNoiseManager
-from smolvla_grpo.eggroll_trainer import apply_es_update, compute_baseline, compute_fitness_stats, shape_fitness
+from smolvla_grpo.eggroll_trainer import (
+    EggrollTrainerConfig,
+    apply_es_update,
+    compute_baseline,
+    compute_fitness_stats,
+    shape_fitness,
+)
+
+
+def test_eggroll_trainer_config_defaults_action_chunk_size_to_five(tmp_path) -> None:
+    cfg = EggrollTrainerConfig(checkpoint="checkpoint", output_dir=tmp_path)
+
+    assert cfg.action_chunk_size == 5
 
 
 def test_baseline_and_centered_fitness() -> None:

@@ -16,6 +16,7 @@ from smolvla_grpo.lerobot_metaworld_adapter import (
     resolve_lerobot_horizon,
 )
 from smolvla_grpo.phase11_rollout import _action_bounds
+from smolvla_grpo.phase12_vector_eval import select_proc_rows
 from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
 from smolvla_pipeline.evaluator import (
     _SmolVLABundle,
@@ -50,6 +51,27 @@ class EggrollPopulationRolloutResult:
     @property
     def fitness(self) -> list[float]:
         return [item.fitness for item in sorted(self.rollouts, key=lambda r: r.member_id)]
+
+
+def build_eggroll_reset_seeds(
+    *,
+    train_seed_base: int,
+    iteration: int,
+    rollout_seed_offset: int,
+    member_ids: list[int],
+    seed_mode: str,
+) -> list[int]:
+    """Build MetaWorld reset seeds for EGGROLL population fitness evaluation."""
+
+    if seed_mode == "member_offset":
+        return [
+            int(train_seed_base) + int(iteration) * 100003 + int(rollout_seed_offset) * 1009 + int(mid)
+            for mid in member_ids
+        ]
+    if seed_mode == "shared_per_iteration":
+        seed = int(train_seed_base) + int(iteration) * 2 + int(rollout_seed_offset)
+        return [seed for _mid in member_ids]
+    raise ValueError("seed_mode must be 'member_offset' or 'shared_per_iteration'")
 
 
 def _proc_to_device(proc: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -153,13 +175,15 @@ def collect_eggroll_population_rollouts(
     population_batch_size: int,
     iteration: int,
     max_steps: int,
+    action_chunk_size: int = 5,
     train_seed_base: int,
     flow_noise_seed: int,
     rollout_seed_offset: int = 0,
+    seed_mode: str = "member_offset",
     noise_manager: EggrollNoiseManager,
     patch_handle: EggrollLinearPatchHandle,
     sigma: float,
-    rollout_execution: str = "vector_sync",
+    rollout_execution: str = "vector_async",
     async_start_method: str = "forkserver",
     video_member_id: int = 0,
 ) -> EggrollPopulationRolloutResult:
@@ -169,6 +193,8 @@ def collect_eggroll_population_rollouts(
         raise ValueError("population_batch_size must be >= 1")
     if int(population_size) < 1:
         raise ValueError("population_size must be >= 1")
+    if int(action_chunk_size) < 1:
+        raise ValueError("action_chunk_size must be >= 1")
 
     timings = {
         "env_init_seconds": 0.0,
@@ -215,10 +241,13 @@ def collect_eggroll_population_rollouts(
                 action_low=action_low,
                 action_high=action_high,
             )
-            reset_seeds = [
-                int(train_seed_base) + int(iteration) * 100003 + int(rollout_seed_offset) * 1009 + mid
-                for mid in member_ids_py
-            ]
+            reset_seeds = build_eggroll_reset_seeds(
+                train_seed_base=int(train_seed_base),
+                iteration=int(iteration),
+                rollout_seed_offset=int(rollout_seed_offset),
+                member_ids=member_ids_py,
+                seed_mode=str(seed_mode),
+            )
             reset_t0 = perf_counter()
             obs = env_h.reset_many(reset_seeds)
             timings["reset_seconds"] += perf_counter() - reset_t0
@@ -229,21 +258,34 @@ def collect_eggroll_population_rollouts(
             ]
             member_ids = torch.as_tensor(member_ids_py, device=device, dtype=torch.long)
 
-            for step_idx in range(int(resolved_max_steps)):
+            reset_frame_idx = member_ids_py.index(int(video_member_id)) if int(video_member_id) in member_ids_py else -1
+            if reset_frame_idx >= 0:
+                frame = _frame_from_vector_obs(obs, reset_frame_idx)
+                if frame is not None:
+                    selected_frames.append(frame)
+
+            step_count = 0
+            policy_call_idx = 0
+            while step_count < int(resolved_max_steps):
                 if not bool(np.any(active)):
                     break
+                active_rows = [idx for idx in range(wave_size) if bool(active[idx])]
+                active_member_ids = [member_ids_py[idx] for idx in active_rows]
                 proc_t0 = perf_counter()
-                proc = _proc_to_device(env_h.build_proc(obs, bundle=bundle), device)
+                proc = _proc_to_device(
+                    select_proc_rows(env_h.build_proc(obs, bundle=bundle), active_rows, batch_size=wave_size),
+                    device,
+                )
                 timings["proc_build_seconds"] += perf_counter() - proc_t0
 
                 noise = _flow_noise(
-                    member_ids=member_ids_py,
+                    member_ids=active_member_ids,
                     action_chunk=int(getattr(policy.config, "chunk_size", 1)),
                     action_dim=int(policy.config.max_action_dim),
                     seed=int(flow_noise_seed)
                     + int(iteration) * 100003
                     + int(rollout_seed_offset) * 1009
-                    + step_idx,
+                    + int(policy_call_idx),
                     device=device,
                     dtype=flow_dtype,
                 )
@@ -252,42 +294,68 @@ def collect_eggroll_population_rollouts(
                     noise_manager=noise_manager,
                     iteration=int(iteration),
                     sigma=float(sigma),
-                    member_ids=member_ids,
+                    member_ids=member_ids[active_rows],
                 )
                 with eggroll_linear_context(ctx), torch.inference_mode():
                     chunk = stateless_smolvla_action_chunk(policy, proc, flow_noise=noise)
                 timings["forward_seconds"] += perf_counter() - fwd_t0
+                if chunk.ndim != 3:
+                    raise RuntimeError(f"SmolVLA EGGROLL action chunk must be rank 3, got shape {tuple(chunk.shape)}")
+                if int(chunk.shape[0]) != len(active_rows):
+                    raise RuntimeError(
+                        f"SmolVLA EGGROLL active batch mismatch: got {int(chunk.shape[0])}, expected {len(active_rows)}"
+                    )
+                effective_chunk = min(
+                    int(action_chunk_size),
+                    int(chunk.shape[1]),
+                    int(resolved_max_steps) - int(step_count),
+                )
+                if effective_chunk < 1:
+                    break
 
-                post_t0 = perf_counter()
-                first_actions = chunk[:, 0, :].detach()
-                exec_rows: list[np.ndarray] = []
-                for row_idx in range(wave_size):
-                    _raw, exec_np, _clip_fraction, _clip_any = _postprocess_row(wrapper, first_actions[row_idx])
-                    exec_rows.append(exec_np)
-                action_batch = np.stack(exec_rows, axis=0).astype(np.float32, copy=False)
-                timings["postprocess_seconds"] += perf_counter() - post_t0
+                for chunk_step in range(effective_chunk):
+                    if not bool(np.any(active)):
+                        break
+                    active_before_step = active.copy()
+                    action_matrix = np.zeros((wave_size, int(action_dim)), dtype=np.float32)
+                    action_by_row: dict[int, np.ndarray] = {}
+                    for compact_idx, row_idx in enumerate(active_rows):
+                        if not active_before_step[row_idx]:
+                            continue
+                        post_t0 = perf_counter()
+                        _raw, exec_np, _clip_fraction, _clip_any = _postprocess_row(
+                            wrapper,
+                            chunk[compact_idx, chunk_step, :].detach(),
+                        )
+                        exec_action = exec_np.reshape(-1).astype(np.float32, copy=False)
+                        timings["postprocess_seconds"] += perf_counter() - post_t0
+                        action_matrix[row_idx] = exec_action
+                        action_by_row[row_idx] = exec_action
 
-                step_t0 = perf_counter()
-                env_batch = env_h.step_batch(action_batch)
-                timings["env_step_seconds"] += perf_counter() - step_t0
-                obs = env_batch.observation
+                    if not action_by_row:
+                        break
+                    step_t0 = perf_counter()
+                    env_batch = env_h.step_batch(action_matrix)
+                    timings["env_step_seconds"] += perf_counter() - step_t0
+                    obs = env_batch.observation
 
-                for row_idx, rollout in enumerate(wave_rollouts):
-                    if not active[row_idx]:
-                        continue
-                    rollout.actions.append(action_batch[row_idx].reshape(-1).tolist())
-                    rollout.rewards.append(float(env_batch.reward[row_idx]))
-                    rollout.successes.append(bool(env_batch.success[row_idx]))
-                    if member_ids_py[row_idx] == int(video_member_id):
-                        frame = _frame_from_vector_obs(obs, row_idx)
-                        if frame is not None:
-                            selected_frames.append(frame)
-                        selected_rewards.append(float(env_batch.reward[row_idx]))
-                        selected_successes.append(bool(env_batch.success[row_idx]))
-                    if env_batch.success[row_idx] or env_batch.terminated[row_idx] or env_batch.truncated[row_idx]:
-                        active[row_idx] = False
-                        rollout.terminated = bool(env_batch.terminated[row_idx])
-                        rollout.truncated = bool(env_batch.truncated[row_idx])
+                    for row_idx, exec_action in action_by_row.items():
+                        rollout = wave_rollouts[row_idx]
+                        rollout.actions.append(exec_action.tolist())
+                        rollout.rewards.append(float(env_batch.reward[row_idx]))
+                        rollout.successes.append(bool(env_batch.success[row_idx]))
+                        if member_ids_py[row_idx] == int(video_member_id):
+                            frame = _frame_from_vector_obs(obs, row_idx)
+                            if frame is not None:
+                                selected_frames.append(frame)
+                            selected_rewards.append(float(env_batch.reward[row_idx]))
+                            selected_successes.append(bool(env_batch.success[row_idx]))
+                        if env_batch.success[row_idx] or env_batch.terminated[row_idx] or env_batch.truncated[row_idx]:
+                            active[row_idx] = False
+                            rollout.terminated = bool(env_batch.terminated[row_idx])
+                            rollout.truncated = bool(env_batch.truncated[row_idx])
+                    step_count += 1
+                policy_call_idx += 1
 
             rollouts.extend(wave_rollouts)
         finally:
