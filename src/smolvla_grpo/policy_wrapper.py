@@ -21,6 +21,42 @@ from smolvla_pipeline.evaluator import (
 )
 
 
+def concatenate_proc_rows(proc_rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Concatenate one-row preprocessor snapshots into one batch."""
+    rows = list(proc_rows)
+    if not rows:
+        raise ValueError("proc_rows must be non-empty")
+    if not all(isinstance(row, dict) for row in rows):
+        raise TypeError("proc_rows must be dictionaries")
+    keys = tuple(rows[0].keys())
+    for row in rows[1:]:
+        if tuple(row.keys()) != keys:
+            raise ValueError("proc_rows must have identical keys")
+
+    out: dict[str, Any] = {}
+    for key in keys:
+        vals = [row[key] for row in rows]
+        first = vals[0]
+        if torch.is_tensor(first):
+            if first.dim() == 0:
+                out[key] = torch.stack(vals, dim=0)
+            else:
+                out[key] = torch.cat(vals, dim=0)
+        elif isinstance(first, np.ndarray):
+            if first.ndim == 0:
+                out[key] = np.stack(vals, axis=0)
+            else:
+                out[key] = np.concatenate(vals, axis=0)
+        elif isinstance(first, (list, tuple)):
+            merged: list[Any] = []
+            for value in vals:
+                merged.extend(list(value))
+            out[key] = merged
+        else:
+            out[key] = vals
+    return out
+
+
 @dataclass
 class SampledStep:
     """One env step: exec action for MetaWorld + tensors for GRPO."""
@@ -278,6 +314,36 @@ class MetaWorldSmolVLAGRPOPolicy:
 
         return _reshape(mean, "mean"), _reshape(log_std, "log_std")
 
+    def _get_distr_params_chunk_batch(
+        self,
+        proc: Any,
+        *,
+        n_envs: int,
+        chunk_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        policy_hook = getattr(self._policy, "_get_distr_params_chunk", None)
+        if callable(policy_hook):
+            try:
+                mean, log_std = policy_hook(proc)
+            except TypeError:
+                mean, log_std = policy_hook(proc, chunk_len=int(chunk_len))
+        else:
+            model = getattr(self._policy, "model", None)
+            model_hook = getattr(model, "_get_distr_params_chunk", None)
+            if callable(model_hook):
+                try:
+                    mean, log_std = model_hook(proc)
+                except TypeError:
+                    mean, log_std = model_hook(proc, chunk_len=int(chunk_len))
+            else:
+                mean, log_std = self._policy.select_action_distr_params(proc)
+        return self._reshape_chunk_params_batch(
+            mean,
+            log_std,
+            n_envs=int(n_envs),
+            chunk_len=int(chunk_len),
+        )
+
     def assert_grpo_api(self) -> None:
         """Raise if forked LeRobot GRPO hooks are missing."""
         pol = self._policy
@@ -468,25 +534,8 @@ class MetaWorldSmolVLAGRPOPolicy:
         if rngs is None and reset_seed is None:
             raise ValueError("Either rngs or reset_seed must be provided")
 
-        policy_hook = getattr(self._policy, "_get_distr_params_chunk", None)
-        if callable(policy_hook):
-            try:
-                mean, log_std = policy_hook(proc_d)
-            except TypeError:
-                mean, log_std = policy_hook(proc_d, chunk_len=int(chunk_len))
-        else:
-            model = getattr(self._policy, "model", None)
-            model_hook = getattr(model, "_get_distr_params_chunk", None)
-            if callable(model_hook):
-                try:
-                    mean, log_std = model_hook(proc_d)
-                except TypeError:
-                    mean, log_std = model_hook(proc_d, chunk_len=int(chunk_len))
-            else:
-                mean, log_std = self._policy.select_action_distr_params(proc_d)
-        mean, log_std = self._reshape_chunk_params_batch(
-            mean,
-            log_std,
+        mean, log_std = self._get_distr_params_chunk_batch(
+            proc_d,
             n_envs=b,
             chunk_len=int(chunk_len),
         )
@@ -588,6 +637,25 @@ class MetaWorldSmolVLAGRPOPolicy:
             return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
         return self.calculate_gaussian_log_prob(mean, log_std, u)
 
+    def get_action_probs_step_batch_from_proc_list(
+        self,
+        proc_snapshots: Sequence[Any],
+        unsquashed_actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Batched single-step log p(a|s) recompute from stored proc rows."""
+        b = len(proc_snapshots)
+        if b != int(unsquashed_actions.reshape(len(proc_snapshots), -1).shape[0]):
+            raise ValueError("proc_snapshots length must match unsquashed_actions batch dim")
+        proc = self._proc_to_device(concatenate_proc_rows(proc_snapshots))
+        mean, log_std = self._policy.select_action_distr_params(proc)
+        mean = mean.reshape(b, -1)
+        log_std = log_std.reshape(b, -1)
+        u = unsquashed_actions.to(mean.device).reshape(mean.shape)
+        if self.action_transform == "tanh_norm_ablation":
+            squished = torch.tanh(u)
+            return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        return self.calculate_gaussian_log_prob(mean, log_std, u)
+
     def get_action_probs_for_chunk_from_proc(
         self,
         proc: Any,
@@ -597,6 +665,29 @@ class MetaWorldSmolVLAGRPOPolicy:
         chunk_len = int(unsquashed_chunk.reshape(-1, self.action_dim).shape[0])
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=chunk_len)
         u = unsquashed_chunk.to(mean.device).reshape(mean.shape)
+        if self.action_transform == "tanh_norm_ablation":
+            squished = torch.tanh(u)
+            return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        return self.calculate_gaussian_log_prob(mean, log_std, u)
+
+    def get_action_probs_for_chunk_batch_from_proc_list(
+        self,
+        proc_snapshots: Sequence[Any],
+        unsquashed_chunks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Batched chunk log p(a|s) recompute from stored one-root proc rows."""
+        b = len(proc_snapshots)
+        if b < 1:
+            raise ValueError("proc_snapshots must be non-empty")
+        u = unsquashed_chunks.reshape(b, -1, self.action_dim)
+        chunk_len = int(u.shape[1])
+        proc = self._proc_to_device(concatenate_proc_rows(proc_snapshots))
+        mean, log_std = self._get_distr_params_chunk_batch(
+            proc,
+            n_envs=b,
+            chunk_len=chunk_len,
+        )
+        u = u.to(mean.device).reshape(mean.shape)
         if self.action_transform == "tanh_norm_ablation":
             squished = torch.tanh(u)
             return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)

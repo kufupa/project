@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 _REPO = Path(__file__).resolve().parents[2]
+if str(_REPO / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO / "src"))
 
 
 def _checkpoint_update(path: Path) -> int:
@@ -28,7 +30,38 @@ def _run_eval(
     task: str,
     episodes: int,
     eval_seed_start: int,
+    execution_mode: str,
+    n_envs: int,
+    rollout_execution: str,
+    max_steps: int | None,
+    chunk_len: int,
 ) -> dict[str, Any]:
+    if execution_mode == "inprocess_vector":
+        from smolvla_grpo.phase11_rollout import load_bundle_for_grpo
+        from smolvla_grpo.phase12_vector_eval import evaluate_loaded_policy_vectorized, load_policy_checkpoint_into_bundle
+
+        bundle, _action_dim = load_bundle_for_grpo(
+            base_checkpoint,
+            task=task,
+            env_backend="official_lerobot",
+            n_action_steps=int(chunk_len),
+        )
+        load_policy_checkpoint_into_bundle(bundle, checkpoint_path)
+        return evaluate_loaded_policy_vectorized(
+            bundle=bundle,
+            base_checkpoint=base_checkpoint,
+            grpo_checkpoint=checkpoint_path,
+            output_dir=output_dir,
+            task=task,
+            episodes=episodes,
+            eval_seed_start=eval_seed_start,
+            n_envs=n_envs,
+            rollout_execution=rollout_execution,
+            max_steps=0 if max_steps is None else int(max_steps),
+            chunk_len=int(chunk_len),
+        )
+    if execution_mode != "subprocess":
+        raise ValueError("execution_mode must be 'subprocess' or 'inprocess_vector'")
     cmd = [
         sys.executable,
         "scripts/grpo/eval_phase11_checkpoints.py",
@@ -45,7 +78,7 @@ def _run_eval(
         "--output-dir",
         str(output_dir),
         "--max-steps",
-        "0",
+        str(0 if max_steps is None else int(max_steps)),
         "--env-backend",
         "official_lerobot",
         "--save-official-eval-info",
@@ -67,6 +100,11 @@ def run_sweep(
     sweep_name: str = "eval_sweep",
     min_update: int | None = None,
     max_update: int | None = None,
+    execution_mode: str = "inprocess_vector",
+    n_envs: int = 4,
+    rollout_execution: str = "vector_async",
+    max_steps: int | None = None,
+    chunk_len: int = 1,
 ) -> dict[str, Any]:
     checkpoints_dir = run_dir / "checkpoints"
     ckpts = sorted(checkpoints_dir.glob("update_*.pt"), key=_checkpoint_update)
@@ -96,6 +134,11 @@ def run_sweep(
             task=task,
             episodes=episodes,
             eval_seed_start=eval_seed_start,
+            execution_mode=execution_mode,
+            n_envs=n_envs,
+            rollout_execution=rollout_execution,
+            max_steps=max_steps,
+            chunk_len=chunk_len,
         )
         rows.append(
             {
@@ -118,6 +161,11 @@ def run_sweep(
         "rows": rows_sorted,
         "min_update": int(min_update) if min_update is not None else None,
         "max_update": int(max_update) if max_update is not None else None,
+        "execution_mode": str(execution_mode),
+        "n_envs": int(n_envs),
+        "rollout_execution": str(rollout_execution),
+        "max_steps": None if max_steps is None else int(max_steps),
+        "chunk_len": int(chunk_len),
     }
 
     if top_k > 0:
@@ -136,6 +184,11 @@ def run_sweep(
                 task=task,
                 episodes=top_k_episodes,
                 eval_seed_start=eval_seed_start,
+                execution_mode=execution_mode,
+                n_envs=n_envs,
+                rollout_execution=rollout_execution,
+                max_steps=max_steps,
+                chunk_len=chunk_len,
             )
             reevaluated.append(
                 {
@@ -182,6 +235,11 @@ def main() -> int:
         default=None,
         help="If set, only evaluate checkpoints with update index <= this value.",
     )
+    parser.add_argument("--execution-mode", choices=("subprocess", "inprocess_vector"), default="inprocess_vector")
+    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--rollout-execution", choices=("vector_sync", "vector_async"), default="vector_async")
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--chunk-len", type=int, default=1)
     args = parser.parse_args()
 
     result = run_sweep(
@@ -195,6 +253,11 @@ def main() -> int:
         sweep_name=args.sweep_name,
         min_update=args.min_update,
         max_update=args.max_update,
+        execution_mode=args.execution_mode,
+        n_envs=args.n_envs,
+        rollout_execution=args.rollout_execution,
+        max_steps=args.max_steps,
+        chunk_len=args.chunk_len,
     )
     print(
         "phase111_eval_sweep_ok",

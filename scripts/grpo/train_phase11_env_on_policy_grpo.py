@@ -490,6 +490,8 @@ def main() -> int:
     p.add_argument("--run-label", type=str, default="no_tanh_main")
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--success-bonus", type=float, default=0.0)
+    p.add_argument("--clip-penalty", type=float, default=0.0)
     args = p.parse_args()
     if int(args.batch_size) < 1:
         raise SystemExit("--batch-size must be >= 1")
@@ -553,7 +555,10 @@ def main() -> int:
     old_policy = copy.deepcopy(bundle.policy).eval().to(device)
     bundle.policy.train()
 
-    reward_backend = EnvRewardBackend()
+    reward_backend = EnvRewardBackend(
+        success_bonus=float(args.success_bonus),
+        clip_penalty=float(args.clip_penalty),
+    )
     end_u = start_u + int(args.num_updates)
 
     manifest = {
@@ -580,6 +585,8 @@ def main() -> int:
         "loss_unit": "policy_chunk",
         "clip_eps": args.clip_eps,
         "lr": args.lr,
+        "success_bonus": float(args.success_bonus),
+        "clip_penalty": float(args.clip_penalty),
         "action_transform": args.action_transform,
         "run_label": args.run_label,
     }
