@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from smolvla_grpo import phase11_rollout
@@ -101,10 +102,19 @@ class FakeVectorOfficialEnv:
         self.n_envs = int(n_envs)
         self.step_count = 0
         self.actions: list[np.ndarray] = []
+        self.resets: list[list[int]] = []
         self.single_action_space = FakeActionSpace()
         FakeVectorOfficialEnv.instances.append(self)
 
     def reset(self, reset_seed: int):
+        self.resets.append([int(reset_seed)] * self.n_envs)
+        self.step_count = 0
+        return {"step": np.zeros((self.n_envs,), dtype=np.int64)}
+
+    def reset_many(self, reset_seeds):
+        seeds = [int(seed) for seed in reset_seeds]
+        assert len(seeds) == self.n_envs
+        self.resets.append(seeds)
         self.step_count = 0
         return {"step": np.zeros((self.n_envs,), dtype=np.int64)}
 
@@ -352,6 +362,90 @@ def test_collect_rollout_seed_batch_calls_group_per_seed(monkeypatch):
     assert [tr.reset_seed for tr in out] == [2000, 2000, 2000, 2001, 2001, 2001]
     assert [tr.metadata["seed_batch_index"] for tr in out] == [0, 0, 0, 1, 1, 1]
     assert {tr.metadata["seed_batch_size"] for tr in out} == {2}
+
+
+def test_collect_rollout_seed_batch_reuse_env_resets_between_seeds(monkeypatch):
+    _install_vector_fakes(monkeypatch)
+
+    out = phase11_rollout.collect_rollout_seed_batch(
+        bundle=FakeBundle(),
+        policy_old=SimpleNamespace(),
+        task="push-v3",
+        task_text="push",
+        reset_seeds=[2000, 2001],
+        episode_index=7,
+        max_steps=3,
+        group_size=2,
+        action_dim=4,
+        device=torch.device("cpu"),
+        env_backend="official_lerobot",
+        rollout_execution="vector_sync",
+        action_chunk_size=2,
+        rollout_seed_mode="reuse_env",
+    )
+
+    assert len(FakeVectorOfficialEnv.instances) == 1
+    env = FakeVectorOfficialEnv.instances[0]
+    assert env.resets == [[2000, 2000], [2001, 2001]]
+    assert [tr.reset_seed for tr in out] == [2000, 2000, 2001, 2001]
+    assert [tr.rollout_index for tr in out] == [0, 1, 0, 1]
+    assert [tr.metadata["seed_batch_index"] for tr in out] == [0, 0, 1, 1]
+    assert {tr.metadata["seed_batch_size"] for tr in out} == {2}
+    assert {tr.metadata["rollout_execution"] for tr in out} == {"vector_sync"}
+
+
+def test_collect_rollout_seed_batch_seed_wave_uses_bounded_mixed_seed_env(monkeypatch):
+    _install_vector_fakes(monkeypatch)
+
+    out = phase11_rollout.collect_rollout_seed_batch(
+        bundle=FakeBundle(),
+        policy_old=SimpleNamespace(),
+        task="push-v3",
+        task_text="push",
+        reset_seeds=[2000, 2001, 2002],
+        episode_index=7,
+        max_steps=3,
+        group_size=2,
+        action_dim=4,
+        device=torch.device("cpu"),
+        env_backend="official_lerobot",
+        rollout_execution="vector_sync",
+        action_chunk_size=2,
+        rollout_seed_mode="seed_wave",
+        seed_wave_size=2,
+        max_vector_envs=4,
+    )
+
+    assert [env.n_envs for env in FakeVectorOfficialEnv.instances] == [4, 2]
+    assert [env.resets for env in FakeVectorOfficialEnv.instances] == [
+        [[2000, 2000, 2001, 2001]],
+        [[2002, 2002]],
+    ]
+    assert [tr.reset_seed for tr in out] == [2000, 2000, 2001, 2001, 2002, 2002]
+    assert [tr.rollout_index for tr in out] == [0, 1, 0, 1, 0, 1]
+    assert [tr.metadata["seed_batch_index"] for tr in out] == [0, 0, 1, 1, 2, 2]
+
+
+def test_collect_rollout_seed_batch_seed_wave_rejects_too_small_cap(monkeypatch):
+    _install_vector_fakes(monkeypatch)
+
+    with pytest.raises(ValueError, match="max_vector_envs"):
+        phase11_rollout.collect_rollout_seed_batch(
+            bundle=FakeBundle(),
+            policy_old=SimpleNamespace(),
+            task="push-v3",
+            task_text="push",
+            reset_seeds=[2000],
+            episode_index=7,
+            max_steps=3,
+            group_size=4,
+            action_dim=4,
+            device=torch.device("cpu"),
+            env_backend="official_lerobot",
+            rollout_execution="vector_sync",
+            rollout_seed_mode="seed_wave",
+            max_vector_envs=2,
+        )
 
 
 def test_phase11_action_chunk_size_one_records_degenerate_chunks(monkeypatch):
