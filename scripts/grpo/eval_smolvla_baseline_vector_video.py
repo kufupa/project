@@ -156,7 +156,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--env-vector-mode",
         choices=("serial", "sync", "async"),
-        default="serial",
+        default="async",
         help="MetaWorld env stepping mode: serial keeps legacy per-row envs; sync/async use one vector env per wave.",
     )
     parser.add_argument("--timing-sync-cuda", action=argparse.BooleanOptionalAction, default=True)

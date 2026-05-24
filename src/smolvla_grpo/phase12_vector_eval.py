@@ -282,6 +282,22 @@ def concatenate_proc_rows(proc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def select_proc_rows(proc: dict[str, Any], rows: list[int], *, batch_size: int) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("rows must be non-empty")
+    out: dict[str, Any] = {}
+    for key, value in proc.items():
+        if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = value[rows]
+        elif isinstance(value, np.ndarray) and value.ndim > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = value[rows]
+        elif isinstance(value, (list, tuple)) and len(value) == int(batch_size):
+            out[key] = [value[int(row)] for row in rows]
+        else:
+            out[key] = value
+    return out
+
+
 def _reset_policy(policy: Any) -> None:
     reset = getattr(policy, "reset", None)
     if callable(reset):
@@ -418,8 +434,8 @@ def evaluate_loaded_policy_vectorized(
     max_steps: int,
     chunk_len: int = 1,
 ) -> dict[str, Any]:
-    if rollout_execution != "vector_sync":
-        raise ValueError("manual-pool eval currently supports rollout_execution='vector_sync' only")
+    if rollout_execution not in ("vector_sync", "vector_async"):
+        raise ValueError("vector eval supports rollout_execution='vector_sync' or 'vector_async'")
     if int(chunk_len) < 1:
         raise ValueError("chunk_len must be >= 1")
 
@@ -434,10 +450,14 @@ def evaluate_loaded_policy_vectorized(
 
     for wave in waves:
         wave_n = len(wave)
-        envs = [OfficialLeRobotMetaWorldGRPORollout(task=task, n_envs=1) for _ in range(wave_n)]
+        env = OfficialLeRobotMetaWorldGRPORollout(
+            task=task,
+            n_envs=wave_n,
+            use_async_envs=str(rollout_execution) == "vector_async",
+        )
         try:
-            resolved_steps = resolve_lerobot_horizon(envs[0], max_steps)
-            obs_by_row = [env.reset(seed) for env, (_ep, seed) in zip(envs, wave, strict=True)]
+            resolved_steps = resolve_lerobot_horizon(env, max_steps)
+            obs = env.reset_many([seed for _ep, seed in wave])
             _reset_policy(bundle.policy)
             active = np.ones((wave_n,), dtype=np.bool_)
             actions: list[list[list[float]]] = [[] for _ in range(wave_n)]
@@ -451,8 +471,7 @@ def evaluate_loaded_policy_vectorized(
                 if not bool(np.any(active)):
                     break
                 active_rows = [idx for idx in range(wave_n) if bool(active[idx])]
-                proc_rows = [envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows]
-                proc = concatenate_proc_rows(proc_rows)
+                proc = select_proc_rows(env.build_proc(obs, bundle=bundle), active_rows, batch_size=wave_n)
                 effective_chunk = min(int(chunk_len), int(resolved_steps) - int(step_count))
                 with torch.inference_mode():
                     if int(chunk_len) == 1:
@@ -480,18 +499,24 @@ def evaluate_loaded_policy_vectorized(
                 for chunk_step in range(effective_chunk):
                     if not bool(np.any(active)):
                         break
+                    active_before_step = active.copy()
+                    action_matrix = np.zeros((wave_n, int(env.action_dim)), dtype=np.float32)
                     for batch_row, row in enumerate(active_rows):
-                        if not bool(active[row]):
+                        if not bool(active_before_step[row]):
                             continue
-                        step = envs[row].step(exec_action_np[batch_row, chunk_step : chunk_step + 1])
-                        obs_by_row[row] = step.observation
+                        action_matrix[row] = exec_action_np[batch_row, chunk_step]
+                    step = env.step_batch(action_matrix)
+                    obs = step.observation
+                    for batch_row, row in enumerate(active_rows):
+                        if not bool(active_before_step[row]):
+                            continue
                         actions[row].append(exec_action_np[batch_row, chunk_step].reshape(-1).tolist())
-                        rewards[row].append(float(step.reward))
-                        successes[row].append(bool(step.success))
-                        if step.success or step.terminated or step.truncated:
+                        rewards[row].append(float(step.reward[row]))
+                        successes[row].append(bool(step.success[row]))
+                        if step.success[row] or step.terminated[row] or step.truncated[row]:
                             active[row] = False
-                            terminated[row] = bool(step.terminated)
-                            truncated[row] = bool(step.truncated)
+                            terminated[row] = bool(step.terminated[row])
+                            truncated[row] = bool(step.truncated[row])
                     step_count += 1
                     if step_count >= int(resolved_steps):
                         break
@@ -510,8 +535,7 @@ def evaluate_loaded_policy_vectorized(
                     )
                 )
         finally:
-            for env in envs:
-                env.close()
+            env.close()
 
     summary = write_eval_artifacts(
         base_checkpoint=base_checkpoint,
@@ -525,6 +549,7 @@ def evaluate_loaded_policy_vectorized(
     summary["n_envs"] = int(n_envs)
     summary["max_steps"] = int(max_steps)
     summary["chunk_len"] = int(chunk_len)
+    summary["rollout_execution"] = str(rollout_execution)
     (output_dir / "eval_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 

@@ -42,7 +42,7 @@ slurm_export_hf_torch_cache "grpo_api_gate"
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
+GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python}"
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 
 if [[ ! -x "${GRPO_PYTHON}" ]]; then
@@ -59,8 +59,8 @@ import lerobot.policies.smolvla.modeling_smolvla as m
 
 print("[grpo_api_gate] executable", sys.executable)
 print("[grpo_api_gate] modeling", m.__file__)
-assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/")
-assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/" in m.__file__
+assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/")
+assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/" in m.__file__
 PY
 
 exec "${GRPO_PYTHON}" -u scripts/grpo/check_smolvla_grpo_forward.py --checkpoint "${CHECKPOINT}"

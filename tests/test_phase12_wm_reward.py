@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
-from smolvla_grpo.phase12_wm_reward import score_phase12_chunk_with_wm
+from smolvla_grpo.phase12_wm_reward import score_phase12_chunk_with_wm, score_phase12_chunks_with_wm
 
 
 class FakeWM:
@@ -153,3 +154,177 @@ def test_phase12_wm_reward_module_does_not_import_old_concat_scorer() -> None:
 
     assert "score_chunk_by_goal_latent" not in source
     assert "wm_scoring_latent" not in source
+
+
+def _score_numbers(score):
+    return (
+        score.candidate_index,
+        score.start_combined_distance,
+        score.final_combined_distance,
+        score.wm_latent_progress,
+        score.latent_return,
+    )
+
+
+class BatchableFakeWM(FakeWM):
+    class Model:
+        action_dim = 4
+
+        def __init__(self) -> None:
+            self.encode_calls = 0
+            self.unroll_batch_sizes: list[int] = []
+
+        def encode(self, obs):
+            self.encode_calls += 1
+            proprio = obs["proprio"].clone()
+            visual = proprio.sum(dim=-1, keepdim=True)
+            return {"visual": visual, "proprio": proprio}
+
+        def unroll(self, z, *, act_suffix, debug=False):
+            del debug
+            self.unroll_batch_sizes.append(int(act_suffix.shape[1]))
+            start_visual = z["visual"].permute(1, 0, *range(2, z["visual"].dim())).contiguous()
+            start_proprio = z["proprio"].permute(1, 0, *range(2, z["proprio"].dim())).contiguous()
+            delta = act_suffix.float().sum(dim=-1, keepdim=True)
+            final_visual = start_visual + delta.cumsum(dim=0)
+            final_proprio = start_proprio + delta.cumsum(dim=0)
+            return {
+                "visual": torch.cat([start_visual, final_visual], dim=0),
+                "proprio": torch.cat([start_proprio, final_proprio], dim=0),
+            }
+
+    def __init__(self) -> None:
+        self.model = self.Model()
+
+
+def _batched_inputs():
+    image = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
+    proprio = np.array([0.25, -0.5], dtype=np.float32)
+    goal = {
+        "visual": torch.full((1, 1, 1), 3.0),
+        "proprio": torch.full((1, 1, 2), 3.0),
+    }
+    actions = [
+        np.array([[0.1, 0.2, 0.3, 0.4], [0.0, 0.1, 0.0, 0.1]], dtype=np.float32),
+        np.array([[1.0, -0.5, 0.25, 0.0], [0.2, 0.2, 0.2, 0.2]], dtype=np.float32),
+        np.array([[-0.3, 0.4, -0.5, 0.6], [0.7, -0.8, 0.9, -1.0]], dtype=np.float32),
+        np.array([[0.5, 0.0, 0.0, 0.0], [0.0, 0.5, 0.0, 0.0]], dtype=np.float32),
+    ]
+    return image, proprio, goal, actions
+
+
+def test_score_phase12_chunks_batched_matches_serial_scores() -> None:
+    image, proprio, goal, actions = _batched_inputs()
+    candidate_indices = [10, 11, 12, 13]
+
+    serial = [
+        score_phase12_chunk_with_wm(
+            wm_bundle=BatchableFakeWM(),
+            image=image,
+            proprio=proprio,
+            chunk_actions=chunk,
+            goal=goal,
+            candidate_index=candidate_index,
+            proprio_alpha=0.1,
+            mode="visual_proprio",
+        )
+        for candidate_index, chunk in zip(candidate_indices, actions, strict=True)
+    ]
+
+    wm = BatchableFakeWM()
+    batched = score_phase12_chunks_with_wm(
+        wm_bundle=wm,
+        image=image,
+        proprio=proprio,
+        chunk_actions=actions,
+        candidate_indices=candidate_indices,
+        goal=goal,
+        proprio_alpha=0.1,
+        mode="visual_proprio",
+        batch_size=4,
+    )
+
+    for got, want in zip(batched, serial, strict=True):
+        assert _score_numbers(got) == pytest.approx(_score_numbers(want))
+    assert wm.model.encode_calls == 1
+    assert max(wm.model.unroll_batch_sizes) == 4
+
+
+def test_score_phase12_chunks_batch_size_microbatch_equivalent_and_permutation_invariant() -> None:
+    image, proprio, goal, actions = _batched_inputs()
+    candidate_indices = [7, 3, 99, 42]
+    expected_by_id = None
+
+    for batch_size in [1, 2, 3, 99]:
+        telemetry: dict[str, object] = {}
+        scores = score_phase12_chunks_with_wm(
+            wm_bundle=BatchableFakeWM(),
+            image=image,
+            proprio=proprio,
+            chunk_actions=actions,
+            candidate_indices=candidate_indices,
+            goal=goal,
+            proprio_alpha=0.1,
+            mode="visual_proprio",
+            batch_size=batch_size,
+            telemetry=telemetry,
+        )
+        by_id = {score.candidate_index: _score_numbers(score) for score in scores}
+        if expected_by_id is None:
+            expected_by_id = by_id
+        assert by_id == pytest.approx(expected_by_id)
+        assert telemetry["wm_score_candidate_count"] == len(actions)
+        assert telemetry["wm_score_batch_size"] == batch_size
+        assert telemetry["wm_score_mode"] == "batched"
+
+    order = [2, 0, 3, 1]
+    permuted = score_phase12_chunks_with_wm(
+        wm_bundle=BatchableFakeWM(),
+        image=image,
+        proprio=proprio,
+        chunk_actions=[actions[i] for i in order],
+        candidate_indices=[candidate_indices[i] for i in order],
+        goal=goal,
+        proprio_alpha=0.1,
+        mode="visual_proprio",
+        batch_size=2,
+    )
+
+    assert {score.candidate_index: _score_numbers(score) for score in permuted} == pytest.approx(expected_by_id)
+
+
+def test_score_phase12_chunks_accumulates_telemetry_across_segments() -> None:
+    image, proprio, goal, actions = _batched_inputs()
+    telemetry: dict[str, object] = {}
+
+    score_phase12_chunks_with_wm(
+        wm_bundle=BatchableFakeWM(),
+        image=image,
+        proprio=proprio,
+        chunk_actions=actions[:3],
+        candidate_indices=[0, 1, 2],
+        goal=goal,
+        proprio_alpha=0.1,
+        mode="visual_proprio",
+        batch_size=2,
+        telemetry=telemetry,
+    )
+    first_seconds = float(telemetry["wm_score_seconds"])
+    score_phase12_chunks_with_wm(
+        wm_bundle=BatchableFakeWM(),
+        image=image,
+        proprio=proprio,
+        chunk_actions=actions[3:],
+        candidate_indices=[3],
+        goal=goal,
+        proprio_alpha=0.1,
+        mode="visual_proprio",
+        batch_size=2,
+        telemetry=telemetry,
+    )
+
+    assert telemetry["wm_score_mode"] == "batched"
+    assert telemetry["wm_score_candidate_count"] == 4
+    assert telemetry["wm_score_batch_count"] == 3
+    assert telemetry["wm_score_batch_sizes"] == [2, 1, 1]
+    assert float(telemetry["wm_score_seconds"]) >= first_seconds

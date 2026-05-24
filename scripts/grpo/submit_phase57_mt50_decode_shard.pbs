@@ -132,6 +132,7 @@ EPISODES="${PHASE57_EPISODES:-25}"
 N_ENVS="${PHASE57_N_ENVS:-3}"
 CHUNK_LEN="${PHASE57_CHUNK_LEN:-50}"
 MAX_STEPS="${PHASE57_MAX_STEPS:-180}"
+ENV_VECTOR_MODE="${PHASE57_ENV_VECTOR_MODE:-async}"
 SEED_START="${PHASE57_EVAL_SEED_START:-1000}"
 OUT_ROOT="${PHASE57_OUT_ROOT:-${PROJECT_ROOT}/artifacts/MT50_Phase57_raw_vs_bounded_decode_25ep_s1000_max180_5x1gpu}"
 OUT="${OUT_ROOT}/shard_${SHARD_INDEX}_${COUNT}tasks"
@@ -146,7 +147,7 @@ fi
 mkdir -p "${OUT}" logs/pbs/grpo
 echo "[phase57] job=${PBS_JOBID:-local} shard=${SHARD_INDEX}/${SHARD_COUNT} count=${COUNT} out=${OUT}"
 echo "[phase57] tasks=${TASKS}"
-echo "[phase57] episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max_steps=${MAX_STEPS}"
+echo "[phase57] episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max_steps=${MAX_STEPS} env_vector_mode=${ENV_VECTOR_MODE}"
 
 "${PYTHON_BIN}" scripts/grpo/phase57_mt50_raw_vs_bounded_decode.py \
   --checkpoint "${CHECKPOINT}" \
@@ -159,6 +160,7 @@ echo "[phase57] episodes=${EPISODES} n_envs=${N_ENVS} chunk_len=${CHUNK_LEN} max
   --n-envs "${N_ENVS}" \
   --chunk-len "${CHUNK_LEN}" \
   --max-steps "${MAX_STEPS}" \
+  --env-vector-mode "${ENV_VECTOR_MODE}" \
   --goal-latent-mode visual_proprio \
   --action-transform no_tanh \
   --fps "${PHASE57_FPS:-20}" \
