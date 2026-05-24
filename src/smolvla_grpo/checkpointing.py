@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import torch
+
+
+def _fsync_parent(path: Path) -> None:
+    try:
+        fd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def save_grpo_checkpoint(
@@ -26,15 +38,26 @@ def save_grpo_checkpoint(
         "args": args,
         "extra": extra or {},
     }
-    torch.save(payload, path)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    torch.save(payload, tmp_path)
+    with tmp_path.open("ab") as f:
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
     meta = path.with_suffix(path.suffix + ".meta.json")
-    meta.write_text(
+    tmp_meta = meta.with_name(f".{meta.name}.{os.getpid()}.tmp")
+    tmp_meta.write_text(
         json.dumps(
             {"update_index": int(update_index), "path": str(path)},
             indent=2,
         ),
         encoding="utf-8",
     )
+    with tmp_meta.open("ab") as f:
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_meta, meta)
+    _fsync_parent(path)
 
 
 def load_grpo_checkpoint(path: Path, *, map_location: str | torch.device | None = None) -> dict[str, Any]:

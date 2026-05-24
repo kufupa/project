@@ -62,6 +62,11 @@ SWEEP_NAME="${8:-eval_sweep_current}"
 # `--export=NIL` only. Env fallbacks only help when submitter used a non-NIL export.
 SWEEP_MIN_UPDATE="${PHASE111_SWEEP_MIN_UPDATE:-}"
 SWEEP_MAX_UPDATE="${PHASE111_SWEEP_MAX_UPDATE:-}"
+EXECUTION_MODE="${PHASE111_EVAL_EXECUTION_MODE:-inprocess_vector}"
+N_ENVS="${PHASE111_EVAL_N_ENVS:-4}"
+ROLLOUT_EXECUTION="${PHASE111_EVAL_ROLLOUT_EXECUTION:-vector_async}"
+MAX_STEPS="${PHASE111_EVAL_MAX_STEPS:-}"
+CHUNK_LEN="${PHASE111_EVAL_CHUNK_LEN:-1}"
 if [[ $# -ge 9 && -n "${9:-}" ]]; then SWEEP_MIN_UPDATE="${9}"; fi
 if [[ $# -ge 10 && -n "${10:-}" ]]; then SWEEP_MAX_UPDATE="${10}"; fi
 
@@ -84,6 +89,7 @@ echo "[phase111-eval-sweep] top_k_episodes=${TOP_K_EPISODES}"
 echo "[phase111-eval-sweep] sweep_name=${SWEEP_NAME}"
 echo "[phase111-eval-sweep] min_update=${SWEEP_MIN_UPDATE:-<none>}"
 echo "[phase111-eval-sweep] max_update=${SWEEP_MAX_UPDATE:-<none>}"
+echo "[phase111-eval-sweep] execution_mode=${EXECUTION_MODE} n_envs=${N_ENVS} rollout_execution=${ROLLOUT_EXECUTION} max_steps=${MAX_STEPS:-<default>} chunk_len=${CHUNK_LEN}"
 
 SWEEP_PY_ARGS=(
   scripts/grpo/eval_phase111_grpo_sweep.py
@@ -95,12 +101,19 @@ SWEEP_PY_ARGS=(
   --top-k "${TOP_K}"
   --top-k-episodes "${TOP_K_EPISODES}"
   --sweep-name "${SWEEP_NAME}"
+  --execution-mode "${EXECUTION_MODE}"
+  --n-envs "${N_ENVS}"
+  --rollout-execution "${ROLLOUT_EXECUTION}"
+  --chunk-len "${CHUNK_LEN}"
 )
 if [[ -n "${SWEEP_MIN_UPDATE}" ]]; then
   SWEEP_PY_ARGS+=(--min-update "${SWEEP_MIN_UPDATE}")
 fi
 if [[ -n "${SWEEP_MAX_UPDATE}" ]]; then
   SWEEP_PY_ARGS+=(--max-update "${SWEEP_MAX_UPDATE}")
+fi
+if [[ -n "${MAX_STEPS}" ]]; then
+  SWEEP_PY_ARGS+=(--max-steps "${MAX_STEPS}")
 fi
 
 "${GRPO_PYTHON}" "${SWEEP_PY_ARGS[@]}"

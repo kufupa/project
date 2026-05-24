@@ -1,0 +1,110 @@
+% Paste-ready LaTeX for the Phase11 GRPO experiment report.
+% Suggested packages in the host document preamble:
+% \usepackage{booktabs}
+% \usepackage{amsmath}
+
+\subsection{Phase11 GRPO on Meta-World \texttt{push-v3}}
+\label{sec:phase11-grpo-pushv3}
+
+I fine-tuned the SmolVLA Meta-World checkpoint on \texttt{push-v3} with on-policy GRPO.  All completed runs used the official LeRobot Meta-World environment, dense rewards, \texttt{random\_seeded} resets, \texttt{no\_tanh} action handling, 5-step action chunks, and held-out evaluation seeds starting at 1000.  The best confirmed 100-episode GRPO checkpoints reached 30--33\% success, compared with 21\% for the unfine-tuned SmolVLA baseline on the same 100 evaluation seeds.
+
+\paragraph{Objective.}
+For each update, I sample a group of $G$ trajectories from the current policy.  Each trajectory $i$ receives dense return
+\[
+R_i = \sum_{t=0}^{T_i-1} r_{i,t},
+\]
+where $r_{i,t}$ is the Meta-World dense reward at environment step $t$.  I use group-normalized returns as advantages,
+\[
+\hat{A}_i = \frac{R_i - \mu_R}{\sigma_R + \epsilon},
+\qquad
+\mu_R = \frac{1}{G}\sum_{j=1}^{G}R_j,
+\]
+so the update is relative to the other candidates in the same on-policy group and does not use a critic/value head.
+
+For each stored action chunk $c$ from trajectory $i$, the trainer recomputes the new chunk log-probability under the updated policy and compares it with the old sampled chunk log-probability:
+\[
+\rho_{i,c}(\theta) =
+\exp\!\left(
+\log \pi_{\theta}(a_{i,c}\mid o_{i,c})
+- \log \pi_{\theta_{\mathrm{old}}}(a_{i,c}\mid o_{i,c})
+\right).
+\]
+The Phase11 loss is a PPO-style clipped surrogate over chunks,
+\[
+\mathcal{L}_{\mathrm{GRPO}}(\theta)
+=
+-\frac{1}{G}\sum_{i=1}^{G}
+\frac{1}{N_i}\sum_{c=1}^{N_i}
+\min\!\left(
+\rho_{i,c}(\theta)\hat{A}_i,\,
+\mathrm{clip}(\rho_{i,c}(\theta), 1-\epsilon_{\mathrm{clip}}, 1+\epsilon_{\mathrm{clip}})\hat{A}_i
+\right),
+\]
+where $N_i$ is the number of action chunks in trajectory $i$.  The important implementation detail is that each chunk keeps its own trajectory advantage and its own per-trajectory normalizer $N_iG$; flattening all chunks with one global denominator would change the objective.
+
+\paragraph{Fixed protocol.}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.22\linewidth}p{0.30\linewidth}p{0.38\linewidth}}
+\toprule
+Setting & Value & Why it matters \\
+\midrule
+Environment & \texttt{official\_lerobot} \texttt{push-v3} & Same task family as the SmolVLA Meta-World checkpoint. \\
+Reward & Dense sum over steps & Optimizes shaped progress, not sparse success only. \\
+Action execution & \texttt{no\_tanh}, chunk length 5 & True action chunking; each policy sample provides a 5-step action chunk. \\
+Evaluation & 100 episodes, \texttt{n\_envs=25}, seeds 1000--1099 & Main decision metric; runs in about four minutes. \\
+Training reset & \texttt{random\_seeded}, seed $2000+\mathrm{update}$ & Reproducible but separate from held-out eval seeds. \\
+Log-prob recompute & Batched, batch size 16 where available & Preserves the objective while reducing optimizer walltime. \\
+\bottomrule
+\end{tabular}
+\caption{Common Phase11 GRPO protocol for completed runs.}
+\label{tab:phase11-protocol}
+\end{table}
+
+\paragraph{Main result.}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrrl}
+\toprule
+Checkpoint & Group & LR & Clip & 100-ep success & Note \\
+\midrule
+Baseline SmolVLA & -- & -- & -- & 21\% & No GRPO update. \\
+G8 update 10 & 8 & $1{\times}10^{-5}$ & 0.20 & 33\% & Best confirmed result, but 25-ep sweep overstated it at 48\%. \\
+Run A update 6 & 32 & $5{\times}10^{-6}$ & 0.10 & 30\% & Highest average return among tied 30\% checkpoints. \\
+Run A update 14 & 32 & $5{\times}10^{-6}$ & 0.10 & 26\% & Later checkpoint was weaker than early checkpoint. \\
+R1 update 8 & 32 & $2{\times}10^{-6}$ & 0.05 & 22\% & Conservative lr/clip was stable but did not improve much. \\
+R1 update 15 & 32 & $2{\times}10^{-6}$ & 0.05 & 21\% & Essentially baseline. \\
+R2 update 11 & 32 & $5{\times}10^{-6}$ & 0.10 & 29\% & Low-noise setting nearly matched best. \\
+R2 update 18 & 32 & $5{\times}10^{-6}$ & 0.10 & 30\% & Tied best G32 success; lower reward than Run A update 6. \\
+\bottomrule
+\end{tabular}
+\caption{Completed Phase11 checkpoints on the 100-episode held-out evaluation.  Evaluation uses seeds 1000--1099 with \texttt{n\_envs=25}.}
+\label{tab:phase11-100ep-results}
+\end{table}
+
+\paragraph{Why the hyperparameters moved.}
+The first G8 run used a small group ($G=8$), a relatively high learning rate ($10^{-5}$), and a PPO clip of 0.2 to test whether dense-reward GRPO could move \texttt{push-v3} at all.  It produced a real early signal: update 10 reached 33\% on the 100-episode confirm, above the 21\% baseline.  However, later checkpoints degraded strongly, so the next runs reduced update size and increased group size.
+
+G16 kept the PPO clip at 0.2 but reduced the learning rate to $5{\times}10^{-6}$ and doubled the group to 16.  It reached 44\% on 25-episode sweeps, with a high dense return at update 20, but it still needs a 100-episode confirmation before being treated as a stable result.
+
+Run A used $G=32$, learning rate $5{\times}10^{-6}$, and clip 0.1.  The rationale was to reduce gradient noise through a larger GRPO candidate set while making each PPO-style step less destructive.  It reached 30\% on 100 episodes at update 6, and the later update 14 checkpoint fell to 26\%, suggesting early checkpoint selection matters.
+
+R1 tested whether instability was mainly due to update size by lowering the learning rate to $2{\times}10^{-6}$ and clip to 0.05.  This was operationally stable, but the 100-episode confirms were only 21--22\%, so simply making the update conservative was not enough.
+
+R2 kept Run A's learning rate and clip but reduced exploration noise (\texttt{init\_log\_std=-2.5}, \texttt{euler\_step\_noise\_std=0.1}).  It tied Run A at 30\% on the 100-episode confirm and produced a second near-best checkpoint at 29\%.  This makes $G=32$, learning rate $5{\times}10^{-6}$, clip 0.1, and lower rollout noise the current best recipe.
+
+\paragraph{Short sweeps were too noisy.}
+The 20--25 episode sweeps were useful for triage but not reliable enough for final claims.  G8 update 10 dropped from 48\% on 25 episodes to 33\% on 100 episodes, Run A update 6 dropped from 45\% to 30\%, and R2 update 18 dropped from 40\% to 30\%.  Training rollout success was noisier still: R2 reached 96.9\% on one training group at update 49, but that was one seed group ($2000+49$), not a held-out success probability.  I therefore use 100-episode evaluation on seeds 1000--1099 as the decision metric.
+
+\paragraph{Next experiments.}
+\begin{enumerate}
+  \item \textbf{Continue the R2/Run A recipe with early stopping.}  Train 50--80 updates with $G=32$, learning rate $5{\times}10^{-6}$, clip 0.1, \texttt{init\_log\_std=-2.5}, \texttt{euler\_step\_noise\_std=0.1}, and promote only checkpoints that win a 100-episode top-$k$ evaluation.  Success would be a sustained 32--38\% 100-episode success rate rather than another isolated 30\% point.
+  \item \textbf{Confirm G16 update 10/update 20 on 100 episodes.}  This is cheap and resolves whether the 44\% 25-episode G16 signal was real or another short-eval peak.
+  \item \textbf{Compare Run A update 6 and R2 update 18 by per-episode reward and success.}  Both reach 30\% success, but Run A update 6 has higher average return (83.65 vs.\ 71.15), so it may be the stronger checkpoint depending on the target metric.
+  \item \textbf{Ablate noise versus update size at $G=32$.}  R1 showed that reducing lr/clip alone is too conservative, while R2 improved with lower exploration noise.  A small two-run ablation can isolate which knob is doing the work.
+\end{enumerate}
+
+\paragraph{Sources.}
+The full ledger with artifact paths, PBS logs, and per-run manifests is \texttt{docs/findings/2026-05-19-phase11-recent-run-ledger.md}.  The key result files are under \texttt{artifacts/phase11\_pushv3\_chunk5\_g8\_vecasync\_u100/}, \texttt{artifacts/phase11\_pushv3\_chunk5\_g32\_lr5e6\_clip01\_u30/}, \texttt{artifacts/phase11\_pushv3\_chunk5\_g32\_lr2e6\_clip005\_u50/}, \texttt{artifacts/phase11\_pushv3\_chunk5\_g32\_lr5e6\_clip01\_lownoise\_u50/}, and \texttt{artifacts/phase11\_baseline\_pushv3\_100ep\_s1000\_nenv25\_chunk5/}.

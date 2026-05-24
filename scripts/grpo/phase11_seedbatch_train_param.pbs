@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#PBS -N p11sdbtr
+#PBS -l select=1:ncpus=48:mem=64gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase11_seedbatch_train_param.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+cd /rds/general/user/aa6622/home/project
+
+BASE_CKPT="${PHASE11_BASE_CKPT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+RUN_DIR="${PHASE11_RUN_DIR:?set PHASE11_RUN_DIR}"
+RUN_LABEL="${PHASE11_RUN_LABEL:?set PHASE11_RUN_LABEL}"
+
+BATCH_SIZE="${PHASE11_BATCH_SIZE:?set PHASE11_BATCH_SIZE}"
+GROUP_SIZE="${PHASE11_GROUP_SIZE:?set PHASE11_GROUP_SIZE}"
+NUM_UPDATES="${PHASE11_NUM_UPDATES:?set PHASE11_NUM_UPDATES}"
+START_UPDATE="${PHASE11_START_UPDATE:-0}"
+RESUME="${PHASE11_RESUME:-}"
+SAVE_EVERY="${PHASE11_SAVE_EVERY:-2}"
+LR="${PHASE11_LR:?set PHASE11_LR}"
+CLIP_EPS="${PHASE11_CLIP_EPS:?set PHASE11_CLIP_EPS}"
+INIT_LOG_STD="${PHASE11_INIT_LOG_STD:--2.0}"
+EULER_NOISE="${PHASE11_EULER_NOISE:-0.2}"
+SUCCESS_BONUS="${PHASE11_SUCCESS_BONUS:-0.0}"
+CLIP_PENALTY="${PHASE11_CLIP_PENALTY:-0.0}"
+ROLLOUT_POLICY_BATCH_SIZE="${PHASE11_ROLLOUT_POLICY_BATCH_SIZE:-16}"
+LOGPROB_BATCH_SIZE="${PHASE11_LOGPROB_BATCH_SIZE:-16}"
+CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
+CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train"
+source scripts/grpo/phase11_cpu_mem_telemetry.sh
+
+mkdir -p logs/pbs/grpo "${RUN_DIR}" "${CPU_MEM_TELEMETRY_DIR}"
+
+export PYTHONPATH=src
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export SMOLVLA_GRPO_ASYNC_MP_CONTEXT=forkserver
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: missing PYTHON_BIN=${PYTHON_BIN}" >&2
+  exit 2
+fi
+if [[ ! -d "${BASE_CKPT}" ]]; then
+  echo "error: missing BASE_CKPT=${BASE_CKPT}" >&2
+  exit 2
+fi
+
+cleanup_phase11_cpu_mem_telemetry() {
+  local status=$?
+  stop_cpu_mem_telemetry
+  exit "${status}"
+}
+trap cleanup_phase11_cpu_mem_telemetry EXIT
+
+echo "[phase11-seedbatch-param] label=${RUN_LABEL} b=${BATCH_SIZE} g=${GROUP_SIZE} updates=${NUM_UPDATES} job=${PBS_JOBID:-local}"
+TRAIN_EXTRA=()
+if [[ -n "${RESUME}" ]]; then
+  TRAIN_EXTRA+=(--resume "${RESUME}")
+fi
+run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" scripts/grpo/train_phase11_env_on_policy_grpo.py \
+  --checkpoint "${BASE_CKPT}" \
+  --output-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --env-backend official_lerobot \
+  --rollout-execution vector_async \
+  --async-start-method forkserver \
+  --start-update "${START_UPDATE}" \
+  --batch-size "${BATCH_SIZE}" \
+  --group-size "${GROUP_SIZE}" \
+  --max-steps 120 \
+  --num-updates "${NUM_UPDATES}" \
+  --save-every "${SAVE_EVERY}" \
+  --action-chunk-size 5 \
+  --chunk-size 5 \
+  --lr "${LR}" \
+  --clip-eps "${CLIP_EPS}" \
+  --init-log-std "${INIT_LOG_STD}" \
+  --euler-step-noise-std "${EULER_NOISE}" \
+  --success-bonus "${SUCCESS_BONUS}" \
+  --clip-penalty "${CLIP_PENALTY}" \
+  --logprob-recompute-mode batched \
+  --logprob-batch-size "${LOGPROB_BATCH_SIZE}" \
+  --rollout-policy-batch-size "${ROLLOUT_POLICY_BATCH_SIZE}" \
+  --run-label "${RUN_LABEL}" \
+  "${TRAIN_EXTRA[@]}"
+
+test -f "${RUN_DIR}/train_manifest.json"
+test -f "${RUN_DIR}/progress.jsonl"
+printf -v final_ckpt "update_%04d.pt" "$((START_UPDATE + NUM_UPDATES))"
+test -f "${RUN_DIR}/checkpoints/${final_ckpt}"
+echo "PHASE11_SEEDBATCH_PARAM_TRAIN_DONE run_dir=${RUN_DIR}"
