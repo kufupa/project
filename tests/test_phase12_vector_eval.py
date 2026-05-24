@@ -483,33 +483,35 @@ def test_vector_eval_uses_queue_free_action_when_active_rows_shrink(tmp_path, mo
     class FakeEnv:
         action_dim = 4
 
-        def __init__(self, *, task, n_envs=1):
+        def __init__(self, *, task, n_envs=1, use_async_envs=False):
             del task
-            assert n_envs == 1
-            self.seed = None
+            self.n_envs = int(n_envs)
+            self.use_async_envs = bool(use_async_envs)
+            self.seeds = []
             self.steps = 0
 
-        def reset(self, seed):
-            self.seed = int(seed)
+        def reset_many(self, seeds):
+            self.seeds = [int(seed) for seed in seeds]
             self.steps = 0
-            return {"state": np.array([float(seed), 0.0, 0.0, 0.0], dtype=np.float32)}
+            return {"agent_pos": np.asarray([[float(seed), 0.0, 0.0, 0.0] for seed in self.seeds], dtype=np.float32)}
 
         def build_proc(self, obs, *, bundle):
             del bundle
             return {
-                "observation.state": torch.tensor([[obs["state"][0], 0.0, 0.0, 0.0]], dtype=torch.float32),
-                "task": [f"seed-{self.seed}"],
+                "observation.state": torch.as_tensor(obs["agent_pos"], dtype=torch.float32),
+                "task": [f"seed-{seed}" for seed in self.seeds],
             }
 
-        def step(self, action):
+        def step_batch(self, action):
+            del action
             self.steps += 1
-            success = self.seed == 1001 and self.steps == 1
+            success = np.asarray([seed == 1001 and self.steps == 1 for seed in self.seeds], dtype=bool)
             return SimpleNamespace(
-                observation={"state": np.array([float(self.seed), float(self.steps), 0.0, 0.0], dtype=np.float32)},
-                reward=1.0,
+                observation={"agent_pos": np.asarray([[float(seed), float(self.steps), 0.0, 0.0] for seed in self.seeds], dtype=np.float32)},
+                reward=np.ones((self.n_envs,), dtype=np.float32),
                 success=success,
-                terminated=False,
-                truncated=False,
+                terminated=success.copy(),
+                truncated=np.zeros((self.n_envs,), dtype=bool),
             )
 
         def close(self):
@@ -583,32 +585,33 @@ def test_vector_eval_chunked_execution_samples_once_per_chunk(tmp_path, monkeypa
     class FakeEnv:
         action_dim = 4
 
-        def __init__(self, *, task, n_envs=1):
+        def __init__(self, *, task, n_envs=1, use_async_envs=False):
             del task
-            assert n_envs == 1
-            self.seed = None
+            self.n_envs = int(n_envs)
+            self.use_async_envs = bool(use_async_envs)
+            self.seeds = []
             self.steps = 0
 
-        def reset(self, seed):
-            self.seed = int(seed)
+        def reset_many(self, seeds):
+            self.seeds = [int(seed) for seed in seeds]
             self.steps = 0
-            return {"state": np.array([float(seed), 0.0, 0.0, 0.0], dtype=np.float32)}
+            return {"agent_pos": np.asarray([[float(seed), 0.0, 0.0, 0.0] for seed in self.seeds], dtype=np.float32)}
 
         def build_proc(self, obs, *, bundle):
             del bundle
             return {
-                "observation.state": torch.tensor([[obs["state"][0], obs["state"][1], 0.0, 0.0]], dtype=torch.float32),
-                "task": [f"seed-{self.seed}"],
+                "observation.state": torch.as_tensor(obs["agent_pos"], dtype=torch.float32),
+                "task": [f"seed-{seed}" for seed in self.seeds],
             }
 
-        def step(self, action):
+        def step_batch(self, action):
             self.steps += 1
             return SimpleNamespace(
-                observation={"state": np.array([float(self.seed), float(self.steps), 0.0, 0.0], dtype=np.float32)},
-                reward=float(np.asarray(action).reshape(-1)[0]),
-                success=False,
-                terminated=False,
-                truncated=False,
+                observation={"agent_pos": np.asarray([[float(seed), float(self.steps), 0.0, 0.0] for seed in self.seeds], dtype=np.float32)},
+                reward=np.asarray(action, dtype=np.float32)[:, 0],
+                success=np.zeros((self.n_envs,), dtype=bool),
+                terminated=np.zeros((self.n_envs,), dtype=bool),
+                truncated=np.zeros((self.n_envs,), dtype=bool),
             )
 
         def close(self):
@@ -680,6 +683,7 @@ def test_baseline_vector_video_parse_accepts_chunk_len(tmp_path):
     assert args.n_envs == 3
     assert args.max_steps == 180
     assert args.chunk_len == 20
+    assert args.env_vector_mode == "async"
     assert args.timing_sync_cuda is True
 
 
@@ -845,6 +849,8 @@ def test_baseline_vector_video_writes_timing_artifacts(tmp_path, monkeypatch) ->
             "2",
             "--chunk-len",
             "1",
+            "--env-vector-mode",
+            "serial",
             "--no-timing-sync-cuda",
         ],
     )

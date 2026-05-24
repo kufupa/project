@@ -438,7 +438,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
-PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}/bin/python"
+PYTHON_BIN="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}/bin/python"
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 OUTPUT_ROOT="${SMOLVLA_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts}/phase07_smolvla_baseline"
 
@@ -616,7 +616,7 @@ Per-run files:
 ```bash
 # SmolVLA evaluation
 export SMOLVLA_INIT_CHECKPOINT="jadechoghari/smolvla_metaworld"
-export SMOLVLA_LEROBOT_ENV_DIR="/vol/bitbucket/aa6622/.envs/lerobot_mw_py310"
+export SMOLVLA_LEROBOT_ENV_DIR="/vol/bitbucket/aa6622/.envs/lerobot_mw_py312"
 export SMOLVLA_ARTIFACT_ROOT="/vol/bitbucket/aa6622/project/artifacts"
 ```
 

@@ -2,34 +2,34 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Execute task-by-task. Use checkbox steps for tracking. Use `/caveman` style for user-visible updates: terse, technical, low-token.
 
-**Goal:** Build and test Phase11 env-on-policy GRPO for SmolVLA on MetaWorld Push-v3, starting with a **patched `lerobot_mw_py310` LeRobot API gate** (see amendment), then one-update smoke, checkpoint reload, short continuation, and baseline-aligned eval.
+**Goal:** Build and test Phase11 env-on-policy GRPO for SmolVLA on MetaWorld Push-v3, starting with a **patched `lerobot_mw_py312` LeRobot API gate** (see amendment), then one-update smoke, checkpoint reload, short continuation, and baseline-aligned eval.
 
 **Architecture:** First prove the LeRobot GRPO hooks work in the **chosen training venv** (see amendment below). Then implement true on-policy GRPO: same seed context, `GROUP_SIZE=4` rollouts, group-normalized returns, clipped log-prob ratio objective, checkpoint every 5 updates. Phase12 WM reward stays a later reward-backend swap.
 
-**Tech Stack:** Python 3.12 **MetaWorld venv** [`lerobot_mw_py310`](/vol/bitbucket/aa6622/.envs/lerobot_mw_py310) (patched `site-packages/lerobot`), LeRobot SmolVLA, MetaWorld Push-v3, PyTorch, Slurm, `scripts/slurm/common_env.sh`, checkpoint `jadechoghari/smolvla_metaworld`.
+**Tech Stack:** Python 3.12 **MetaWorld venv** [`lerobot_mw_py312`](/vol/bitbucket/aa6622/.envs/lerobot_mw_py312) (patched `site-packages/lerobot`), LeRobot SmolVLA, MetaWorld Push-v3, PyTorch, Slurm, `scripts/slurm/common_env.sh`, checkpoint `jadechoghari/smolvla_metaworld`.
 
 ---
 
 ## Amendment 2026-05-01 (runtime and Task 1)
 
-**Decision:** Phase11 GRPO uses **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`** as the primary interpreter. The SmolVLA GRPO patch is applied under that venv’s **`site-packages/lerobot`**, with **package-local git** in that package directory for rollback. Any older “second venv only for patches” workflow has been **dropped** from active instructions.
+**Decision:** Phase11 GRPO uses **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`** as the primary interpreter. The SmolVLA GRPO patch is applied under that venv’s **`site-packages/lerobot`**, with **package-local git** in that package directory for rollback. Any older “second venv only for patches” workflow has been **dropped** from active instructions.
 
-**`sys.executable` (what it means):** In any Slurm or local run, `import sys; print(sys.executable)` is the **path to the Python binary running that process**. Together with `lerobot.policies.smolvla.modeling_smolvla.__file__`, it proves you are not on `/usr/bin/python3` and that SmolVLA is loaded from **`.../lerobot_mw_py310/.../site-packages`**. Slurm smokes and checker scripts should **assert** both paths share that prefix before heavy jobs.
+**`sys.executable` (what it means):** In any Slurm or local run, `import sys; print(sys.executable)` is the **path to the Python binary running that process**. Together with `lerobot.policies.smolvla.modeling_smolvla.__file__`, it proves you are not on `/usr/bin/python3` and that SmolVLA is loaded from **`.../lerobot_mw_py312/.../site-packages`**. Slurm smokes and checker scripts should **assert** both paths share that prefix before heavy jobs.
 
-**Task 1 status:** **API + GPU import:** Slurm job `237046` — see [`docs/slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md`](./slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md). **`from_pretrained` + GPU forward + GRPO paths:** Slurm job **`237048`** — see [`docs/slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md`](./slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md) and log `smolvla_pretrained_gpu_forward_smoke_237048.out` (`predict_action_chunk` + `select_action_distr_params`, real hub checkpoint, `LEROBOT_MW_PYTHON` = `lerobot_mw_py310`). Optional follow-up: checker scripts and manifests under `scripts/grpo/` and `artifacts/phase11_env_on_policy_grpo/api_gate/` for **repeatability**, not as a hard blocker for **CPU Task 2** (pure math).
+**Task 1 status:** **API + GPU import:** Slurm job `237046` — see [`docs/slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md`](./slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md). **`from_pretrained` + GPU forward + GRPO paths:** Slurm job **`237048`** — see [`docs/slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md`](./slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md) and log `smolvla_pretrained_gpu_forward_smoke_237048.out` (`predict_action_chunk` + `select_action_distr_params`, real hub checkpoint, `LEROBOT_MW_PYTHON` = `lerobot_mw_py312`). Optional follow-up: checker scripts and manifests under `scripts/grpo/` and `artifacts/phase11_env_on_policy_grpo/api_gate/` for **repeatability**, not as a hard blocker for **CPU Task 2** (pure math).
 
 ---
 
 ## Non-Negotiable Rules
 
-- LeRobot SmolVLA GRPO patch lives only under **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/.../site-packages/lerobot`**; keep **package-local git** there for rollback. Do not hand-edit without recording a commit in that package repo.
+- LeRobot SmolVLA GRPO patch lives only under **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/.../site-packages/lerobot`**; keep **package-local git** there for rollback. Do not hand-edit without recording a commit in that package repo.
 - Do not delete or overwrite phase07/phase08/phase09 artifacts.
 - Do not run long Phase11 jobs until LeRobot API + **GPU forward** gate, one-update smoke, checkpoint reload, and 3-seed eval pass.
 - If a gate fails, debug that gate. Do not abandon; do not launch downstream jobs.
 - Commit after each passing gate. Do not commit copied env, checkpoints, videos, caches, or large artifacts.
 - Use artifact root: `/vol/bitbucket/aa6622/project/artifacts/phase11_env_on_policy_grpo/`.
 - Use base checkpoint: `jadechoghari/smolvla_metaworld`.
-- Use Phase11 Python: **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`** (set `GRPO_PYTHON` or `LEROBOT_MW_PYTHON` in Slurm scripts to this path; never bare `python`).
+- Use Phase11 Python: **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`** (set `GRPO_PYTHON` or `LEROBOT_MW_PYTHON` in Slurm scripts to this path; never bare `python`).
 - Use baseline-aligned eval: seed `1000`, `20` episodes (`1000..1019`).
 - Use train seed schedule: update `u` uses seed `2000 + u`.
 - No local GPU assumption on `gpucluster3`. Anything requiring real SmolVLA GPU forward, MetaWorld rollout, training, or eval must run through Slurm/sbatch.
@@ -47,18 +47,18 @@ scripts/slurm/common_env.sh
 
 scripts/smolvla/submit_smolvla_parity_eval.slurm
   owns: baseline/parity eval launcher
-  default Python: /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python via run_pushv3_smolvla_parity_benchmark.sh
+  default Python: /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python via run_pushv3_smolvla_parity_benchmark.sh
   copied-env override exists: SMOLVLA_LEROBOT_ENV_DIR or SMOLVLA_PYTHON_BIN
   Phase11 rule: do not rely on this submitter for GRPO unless override is explicit and logged
 
 scripts/grpo/submit_api_gate_smoke.slurm
 scripts/grpo/submit_phase11_grpo.slurm
   own: all patched-LeRobot API gate, GRPO rollout, GRPO train, GRPO eval
-  required Python: /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python
-  required runtime check: sys.executable and lerobot.policies.smolvla.modeling_smolvla.__file__ must both live under /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/
+  required Python: /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python
+  required runtime check: sys.executable and lerobot.policies.smolvla.modeling_smolvla.__file__ must both live under /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/
 ```
 
-Safe rule: every file that imports patched SmolVLA GRPO APIs (`select_action_distr_params`, `_get_distr_params_chunk`, `log_std`, `euler_step_noise_std`) must execute under the **Phase11 Python** (`lerobot_mw_py310` as above), never bare `python` and never an interpreter whose `site-packages/lerobot` is unpatched.
+Safe rule: every file that imports patched SmolVLA GRPO APIs (`select_action_distr_params`, `_get_distr_params_chunk`, `log_std`, `euler_step_noise_std`) must execute under the **Phase11 Python** (`lerobot_mw_py312` as above), never bare `python` and never an interpreter whose `site-packages/lerobot` is unpatched.
 
 ## Existing WIP To Inspect First
 
@@ -84,8 +84,8 @@ These files were created prematurely. Treat them as WIP, not trusted. Inspect, f
 - Missing but required by this plan: `scripts/grpo/submit_api_gate_smoke.slurm`
 - Missing but required by this plan: `scripts/grpo/smoke_phase11_rollout.py`
 
-Known WIP issue: default `/usr/bin/python3` lacks `torch`; run tests with Phase11 venv Python (`lerobot_mw_py310/bin/python`).
-Known WIP issue: `scripts/grpo/submit_phase11_grpo.slurm` currently uses bare `python`; fix to explicit `GRPO_PYTHON=/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`.
+Known WIP issue: default `/usr/bin/python3` lacks `torch`; run tests with Phase11 venv Python (`lerobot_mw_py312/bin/python`).
+Known WIP issue: `scripts/grpo/submit_phase11_grpo.slurm` currently uses bare `python`; fix to explicit `GRPO_PYTHON=/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`.
 Known WIP issue: `scripts/grpo/submit_phase11_chain.sh` currently omits `--chdir`; add `--chdir=/vol/bitbucket/aa6622/project` to every `sbatch`.
 Known WIP issue: `src/smolvla_grpo/policy_wrapper.py` currently calls `Normal.rsample(generator=...)`; fix to explicit noise sampling because common PyTorch versions do not support that `generator` argument.
 Known WIP issue: `scripts/grpo/eval_phase11_checkpoints.py` currently defaults `--eval-seed-start` to `3000`; change default to `1000`.
@@ -146,12 +146,12 @@ artifacts/
 *.png frame dumps
 ```
 
-## Task 1: LeRobot API gate (modified `lerobot_mw_py310` env)
+## Task 1: LeRobot API gate (modified `lerobot_mw_py312` env)
 
-**As of amendment 2026-05-01:** The SmolVLA GRPO patch lives in **`lerobot_mw_py310`** `site-packages/lerobot` with package-local git. The former **copy-to-second-venv** workflow has been **removed** from this plan; do not reintroduce a parallel patch tree unless you consciously fork the approach.
+**As of amendment 2026-05-01:** The SmolVLA GRPO patch lives in **`lerobot_mw_py312`** `site-packages/lerobot` with package-local git. The former **copy-to-second-venv** workflow has been **removed** from this plan; do not reintroduce a parallel patch tree unless you consciously fork the approach.
 
 **Files:**
-- Patched file: `.../lerobot_mw_py310/lib/python3.12/site-packages/lerobot/policies/smolvla/modeling_smolvla.py` (rollback via package-local git tag `baseline-production-lerobot`).
+- Patched file: `.../lerobot_mw_py312/lib/python3.12/site-packages/lerobot/policies/smolvla/modeling_smolvla.py` (rollback via package-local git tag `baseline-production-lerobot`).
 - Optional: `*.orig` backup beside `modeling_smolvla.py` only if you are not using package-local git (not recommended when git is present).
 - Create/replace: `scripts/grpo/check_lerobot_grpo_api.py`
 - Create/replace: `scripts/grpo/check_smolvla_grpo_forward.py`
@@ -162,22 +162,22 @@ artifacts/
 Run (login node or Slurm prolog):
 
 ```bash
-PHASE11_PY=/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python
+PHASE11_PY=/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python
 "${PHASE11_PY}" - <<'PY'
 import sys
 import lerobot.policies.smolvla.modeling_smolvla as m
 print("executable", sys.executable)
 print("modeling_smolvla", m.__file__)
-assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/")
-assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/" in m.__file__
+assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/")
+assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/" in m.__file__
 PY
 ```
 
-Expected: `sys.executable` and `modeling_smolvla.__file__` both under `lerobot_mw_py310` (evidence you are on the patched venv, not system Python).
+Expected: `sys.executable` and `modeling_smolvla.__file__` both under `lerobot_mw_py312` (evidence you are on the patched venv, not system Python).
 
-**Evidence:** Import-only: job **`237046`** (log + [`docs/slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md`](./slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md)). Pretrained forward + distr: job **`237048`** ([`docs/slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md`](./slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md)); log shows `using PYTHON=.../lerobot_mw_py310/bin/python` and ends with `smolvla_pretrained_gpu_forward_smoke_ok`.
+**Evidence:** Import-only: job **`237046`** (log + [`docs/slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md`](./slurm/2026-05-01-smolvla-lerobot-pkg-import-gpu-smoke-237046.md)). Pretrained forward + distr: job **`237048`** ([`docs/slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md`](./slurm/2026-05-04-smolvla-pretrained-gpu-forward-smoke-237048.md)); log shows `using PYTHON=.../lerobot_mw_py312/bin/python` and ends with `smolvla_pretrained_gpu_forward_smoke_ok`.
 
-- [ ] **Step 2: Fetch safe-robot fork file** (optional reference for diffs; patch is already applied in py310)
+- [ ] **Step 2: Fetch safe-robot fork file** (optional reference for diffs; patch is already applied in the MetaWorld venv)
 
 Run:
 
@@ -197,7 +197,7 @@ Expected: fork checkout at pinned commit.
 
 - [ ] **Step 3: (Removed)** Patch application and `.orig` backup are **superseded** by package-local git under `site-packages/lerobot`; use `git -C …/lerobot log` / `reset --hard baseline-production-lerobot` instead of ad hoc copies.
 
-- [ ] **Step 4: (Removed)** Full-file replace from fork into venv is **not** the active procedure once the py310 patch is committed in the package-local repo.
+- [ ] **Step 4: (Removed)** Full-file replace from fork into venv is **not** the active procedure once the MetaWorld venv patch is committed in the package-local repo.
 
 - [ ] **Step 5: Replace API checker with exact code**
 
@@ -236,7 +236,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python scripts/grpo/check_lerobot_grpo_api.py
+PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python scripts/grpo/check_lerobot_grpo_api.py
 ```
 
 Expected:
@@ -287,7 +287,7 @@ slurm_export_hf_torch_cache "grpo_api_gate"
 
 export SMOLVLA_POLICY_DEVICE="${SMOLVLA_POLICY_DEVICE:-cuda}"
 export SMOLVLA_MAX_STEPS="${SMOLVLA_MAX_STEPS:-20}"
-GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
+GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python}"
 CHECKPOINT="${SMOLVLA_INIT_CHECKPOINT:-jadechoghari/smolvla_metaworld}"
 MODE="${1:-forward}"
 shift || true
@@ -298,8 +298,8 @@ import sys
 import lerobot.policies.smolvla.modeling_smolvla as m
 print("[grpo_api_gate] executable", sys.executable)
 print("[grpo_api_gate] modeling", m.__file__)
-assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/")
-assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/" in m.__file__
+assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/")
+assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/" in m.__file__
 PY
 
 if [[ "${MODE}" == "forward" ]]; then
@@ -396,7 +396,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python -m pytest tests/test_grpo_math.py -v
+PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python -m pytest tests/test_grpo_math.py -v
 ```
 
 Expected: all tests pass.
@@ -489,7 +489,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python -m pytest tests/test_grpo_policy_wrapper_static.py -v
+/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python -m pytest tests/test_grpo_policy_wrapper_static.py -v
 ```
 
 Expected: both tests pass.
@@ -666,7 +666,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-PY=/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python
+PY=/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python
 PYTHONPATH="${PWD}:${PWD}/src" "${PY}" - <<'PY'
 from pathlib import Path
 from smolvla_grpo.checkpointing import load_grpo_checkpoint
@@ -760,7 +760,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python -m pytest tests/test_grpo_checkpointing.py -v
+PYTHONPATH="${PWD}:${PWD}/src" /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python -m pytest tests/test_grpo_checkpointing.py -v
 ```
 
 Expected: test passes.
@@ -772,7 +772,7 @@ Expected: test passes.
 - source `scripts/slurm/common_env.sh`
 - source via `SLURM_SUBMIT_DIR` first, then `BASH_SOURCE` fallback, matching `scripts/smolvla/submit_smolvla_parity_eval.slurm`
 - `slurm_resolve_project_root "scripts/grpo/train_phase11_env_on_policy_grpo.py"`
-- use `GRPO_PYTHON=/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`
+- use `GRPO_PYTHON=/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`
 - set `#SBATCH --partition=t4`, `#SBATCH --output=logs/...`, and `mkdir -p logs` after `cd "${PROJECT_ROOT}"`
 - default eval seed start is `1000`, not `3000`
 - support worker modes: `train`, `eval`, and `rollout-smoke`
@@ -806,7 +806,7 @@ mkdir -p logs
 slurm_export_pythonpath
 slurm_export_hf_torch_cache "phase11_grpo"
 
-GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
+GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python}"
 MODE="${1:-train}"
 shift || true
 
@@ -816,8 +816,8 @@ import sys
 import lerobot.policies.smolvla.modeling_smolvla as m
 print("[phase11_grpo] executable", sys.executable)
 print("[phase11_grpo] modeling", m.__file__)
-assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/")
-assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/" in m.__file__
+assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/")
+assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/" in m.__file__
 PY
 
 if [[ "${MODE}" == "train" ]]; then
@@ -873,12 +873,12 @@ from pathlib import Path
 def test_phase11_worker_uses_explicit_env_python_and_safe_root_resolution():
     src = Path("scripts/grpo/submit_phase11_grpo.slurm").read_text(encoding="utf-8")
     assert "GRPO_PYTHON" in src
-    assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python" in src
+    assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python" in src
     assert "exec python" not in src
     assert "SLURM_SUBMIT_DIR" in src
     assert "BASH_SOURCE[0]:-$0" in src
     assert "sys.executable.startswith" in src
-    assert "lerobot_mw_py310" in src
+    assert "lerobot_mw_py312" in src
     assert 'EVAL_START="${4:-1000}"' in src
     assert "#SBATCH --partition=t4" in src
     assert "mkdir -p logs" in src
@@ -895,7 +895,7 @@ Run:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python -m pytest tests/test_phase11_slurm_scripts.py -v
+/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python -m pytest tests/test_phase11_slurm_scripts.py -v
 ```
 
 Expected: both tests pass.

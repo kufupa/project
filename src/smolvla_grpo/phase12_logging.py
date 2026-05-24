@@ -47,15 +47,32 @@ def assert_smoke_manifest_contract(manifest: dict[str, Any], *, base_dir: Path |
     )
     for key in required:
         assert key in manifest, f"smoke manifest missing {key}"
+    oracle_status = str(manifest.get("oracle_baseline_video_status", "")).strip().lower()
+    status_by_key = {
+        "rollout_validation_video": str(manifest.get("rollout_validation_video_status", "")).strip().lower(),
+        "selected_action_rollout_video": str(manifest.get("selected_action_rollout_video_status", "")).strip().lower(),
+        "oracle_baseline_video": oracle_status,
+    }
     for key in (
         "rollout_validation_video",
         "selected_action_rollout_video",
         "oracle_baseline_video",
     ):
         value = manifest[key]
+        status = status_by_key.get(key, "")
+        if value == "" and (status == "disabled" or (not status and oracle_status == "disabled")):
+            continue
         assert isinstance(value, str) and value.strip(), f"smoke manifest {key} must be a non-empty path"
         _assert_nonempty_file(_resolve_manifest_path(value, base_dir), key)
-    assert manifest["oracle_baseline_video_status"] == "ok"
+    for status_key in (
+        "rollout_validation_video_status",
+        "selected_action_rollout_video_status",
+        "oracle_baseline_video_status",
+    ):
+        if status_key in manifest:
+            status = str(manifest[status_key]).strip()
+            if status:
+                assert status in {"ok", "disabled"}
     if manifest.get("wm_decode_status") == "ok":
         for key in ("wm_decode_selected_strip_path", "wm_real_vs_pred_selected_strip_path"):
             assert key in manifest, f"smoke manifest missing {key}"

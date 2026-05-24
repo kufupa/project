@@ -6,7 +6,7 @@
 
 **Architecture:** Reuse the existing evaluator (`run_smolvla_eval` in [`project/src/smolvla_pipeline/evaluator.py`](project/src/smolvla_pipeline/evaluator.py)), target runner ([`project/scripts/smolvla/run_smolvla_target_episode.sh`](project/scripts/smolvla/run_smolvla_target_episode.sh)), and campaign summarizer (inline Python in [`project/scripts/smolvla/run_oracle_topk_smolvla_full.sh`](project/scripts/smolvla/run_oracle_topk_smolvla_full.sh)). Sequential episodes already hold **one** episode’s frame list in RAM at a time; the smoke test validated the stack. Fix **campaign creation vs Slurm submission** so the full orchestrator does not submit a 15-way array **and** run the same work on the submit host. Submit **one** `sbatch` job that runs the full bash loop on a GPU node with the same resource profile that succeeded for the 1-episode pilot (`t4`, ~32G RAM, 4 CPUs, 8h wall).
 
-**Tech Stack:** Bash, Slurm (`sbatch`), Python 3.10+ (`lerobot_mw_py310`), Meta-World + LeRobot SmolVLA evaluator, existing `pick_best_episode` in [`project/src/smolvla_pipeline/topk_selection.py`](project/src/smolvla_pipeline/topk_selection.py).
+**Tech Stack:** Bash, Slurm (`sbatch`), Python 3.10+ (`lerobot_mw_py312`), Meta-World + LeRobot SmolVLA evaluator, existing `pick_best_episode` in [`project/src/smolvla_pipeline/topk_selection.py`](project/src/smolvla_pipeline/topk_selection.py).
 
 ---
 
@@ -14,7 +14,7 @@
 
 - **Where to run:** Submit `sbatch` from a **cluster login / submit node** with Slurm. Do **not** run the full 15×4 rollout on the small no-GPU lab VM (OOM / policy).
 - **Filesystem:** `PROJECT_ROOT` and `ORACLE_RUN_DIR` must be visible **identical paths** on compute nodes (shared NFS/bitbucket mount). If paths differ, set `ORACLE_RUN_DIR` explicitly in the environment before `sbatch`.
-- **Python:** Compute node must execute `SMOLVLA_LEROBOT_ENV_DIR/bin/python` (default `…/workspace/.envs/lerobot_mw_py310/bin/python`). If that path is wrong on the cluster, set `SMOLVLA_LEROBOT_ENV_DIR` or `SMOLVLA_PYTHON_BIN` in the Slurm script.
+- **Python:** Compute node must execute `SMOLVLA_LEROBOT_ENV_DIR/bin/python` (default `…/workspace/.envs/lerobot_mw_py312/bin/python`). If that path is wrong on the cluster, set `SMOLVLA_LEROBOT_ENV_DIR` or `SMOLVLA_PYTHON_BIN` in the Slurm script.
 - **HF / checkpoints:** SmolVLA + VLM weights must resolve on the node (local HF cache or network). Unauthenticated Hub is OK but slower.
 - **Launch stdout contract:** [`launch_pushv3_smolvla_topk15.sh`](project/scripts/smolvla/launch_pushv3_smolvla_topk15.sh) prints **four** lines at the end (not the raw Python prints): `campaign_dir=…`, `targets_json=…`, `targets_count=…`, `array=…`. [`run_oracle_topk_smolvla_full.sh`](project/scripts/smolvla/run_oracle_topk_smolvla_full.sh) parses `INFO[0]`/`INFO[1]` with `${var#campaign_dir=}` style strips — do **not** change launch to print only bare paths without updating the full script.
 
@@ -128,7 +128,7 @@ export SMOLVLA_TOPK_LAUNCH_MODE="${SMOLVLA_TOPK_LAUNCH_MODE:-dry-run}"
 export SMOLVLA_SAVE_FRAMES=false
 export EPISODES_PER_TARGET="${EPISODES_PER_TARGET:-4}"
 export ORACLE_RUN_DIR="${ORACLE_RUN_DIR:-/vol/bitbucket/aa6622/project/artifacts/phase06_oracle_baseline/run_20260411T131839Z_ep60_voracle_tpush_v3_s1000_r402093}"
-export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py310}"
+export SMOLVLA_LEROBOT_ENV_DIR="${SMOLVLA_LEROBOT_ENV_DIR:-${WORKSPACE_ROOT}/.envs/lerobot_mw_py312}"
 
 bash "${PROJECT_ROOT}/scripts/smolvla/run_oracle_topk_smolvla_full.sh"
 ```
