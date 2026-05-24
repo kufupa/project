@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+EXPECTED_N_ACTION_STEPS = 4
+
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -37,7 +39,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise SystemExit(f"bad state shape: {state_shape}")
     if action_shape != [7]:
         raise SystemExit(f"bad action shape: {action_shape}")
-    if int(config["n_action_steps"]) != 1:
+    if int(config["n_action_steps"]) != EXPECTED_N_ACTION_STEPS:
         raise SystemExit(f"bad n_action_steps: {config['n_action_steps']}")
     if int(config["chunk_size"]) != 50:
         raise SystemExit(f"bad chunk_size: {config['chunk_size']}")

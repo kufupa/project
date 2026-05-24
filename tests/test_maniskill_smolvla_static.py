@@ -29,7 +29,8 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         assert "artifacts/smolvla_maniskill" in text
 
     assert "#PBS -q v1_gpu72" in _read("01_data_probe.pbs")
-    assert "#PBS -q v1_gpu72" in _read("02_data_full.pbs")
+    assert "#PBS -q v1_large72" in _read("02_data_full.pbs")
+    assert "ngpus" not in _read("02_data_full.pbs")
     assert "#PBS -q v1_gpu72" in _read("04_sft_smoke.pbs")
     assert "#PBS -q v1_gpu72" in _read("05_sft_train.pbs")
     assert "#PBS -q v1_gpu72" in _read("06_benchmark.pbs")
@@ -86,7 +87,7 @@ def test_sft_uses_explicit_one_camera_7d_policy_contract() -> None:
     assert "observation.images.front" in args
     assert '"shape":[3,480,640]' in args.replace(" ", "")
     assert '"shape":[7]' in args.replace(" ", "")
-    assert "--policy.n_action_steps=1" in args
+    assert "--policy.n_action_steps=4" in args
     assert "--policy.chunk_size=50" in args
     assert "--policy.max_state_dim=32" in args
     assert "--policy.max_action_dim=32" in args
@@ -130,6 +131,15 @@ def test_autopilot_supports_host_retry_and_exit_status() -> None:
     assert "exceeded max_retries" in autopilot
 
 
+def test_afterok_gpu_tail_queues_all_gpu_stages() -> None:
+    queue_tail = _read("queue_afterok_gpu_tail.sh")
+    assert 'qsub -W "depend=afterok:${dep}"' in queue_tail
+    assert "04_sft_smoke.pbs" in queue_tail
+    assert "05_sft_train.pbs" in queue_tail
+    assert "06_benchmark.pbs" in queue_tail
+    assert "afterok_gpu_tail.env" in queue_tail
+
+
 def test_audit_full_runs_on_cpu_pbs() -> None:
     audit = _read("03a_audit_full.pbs")
     assert "#PBS -q v1_small24" in audit
@@ -168,6 +178,23 @@ def test_data_full_seed_is_configurable_and_manifested() -> None:
     assert 'MSM_FULL_SEED="${MSM_FULL_SEED:-100}"' in data_full
     assert '--seed "${MSM_FULL_SEED}"' in data_full
     assert '"seed=${MSM_FULL_SEED}"' in data_full
+
+
+def test_data_full_uses_cpu124_record_dir_and_purges_stale() -> None:
+    data_full = _read("02_data_full.pbs")
+    convert = _read("03_convert_full.pbs")
+    audit = _read("03a_audit_full.pbs")
+    purge = _read("purge_stale_record_dir.sh")
+    assert "ncpus=124" in data_full
+    assert "mem=256gb" in data_full
+    assert 'MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-124}"' in data_full
+    assert 'MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"' in data_full
+    assert 'MSM_STALE_RECORD_DIR="${MSM_STALE_RECORD_DIR:-${MSM_RAW_ROOT}/full}"' in data_full
+    assert "purge_stale_record_dir.sh" in data_full
+    assert "--stale" in data_full and "--new" in data_full
+    assert "stale equals new record dir" in purge
+    assert "full_cpu124_v1" in convert
+    assert "full_cpu124_v1" in audit
 
 
 def test_cleanup_requires_verified_replacement_before_delete() -> None:
