@@ -2,7 +2,7 @@
 # PBS (CX3): EGGROLL seeded checkpoint eval sweep using Phase12 vector eval.
 #PBS -N p50eggseval
 #PBS -l select=1:ncpus=8:mem=32gb:ngpus=1:gpu_type=RTX6000
-#PBS -l walltime=00:35:00
+#PBS -l walltime=02:00:00
 #PBS -j oe
 #PBS -o phase50_eggroll_seeded_eval_sweep_pbs.out
 
@@ -79,21 +79,27 @@ EVAL_CHUNK_LEN="${PHASE50_EVAL_CHUNK_LEN:-5}"
 
 echo "[eggroll-seeded-eval] reset_mode=${SMOLVLA_METAWORLD_RESET_MODE} episodes=${EPISODES} chunk_len=${EVAL_CHUNK_LEN} min_update=${MIN_UPDATE} max_update=${MAX_UPDATE} sweep=${SWEEP_NAME}"
 
-"${EGGROLL_PYTHON}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
-  --base-checkpoint "${BASE_CKPT}" \
-  --run-dir "${RUN_DIR}" \
-  --task "${TASK}" \
-  --episodes "${EPISODES}" \
-  --eval-seed-start "${PHASE50_EVAL_SEED_START:-1000}" \
-  --sweep-name "${SWEEP_NAME}" \
-  --min-update "${MIN_UPDATE}" \
-  --max-update "${MAX_UPDATE}" \
-  --stride "${STRIDE}" \
-  --execution-mode "${PHASE50_EVAL_EXECUTION_MODE:-inprocess_vector}" \
-  --n-envs "${PHASE50_EVAL_N_ENVS:-3}" \
-  --rollout-execution "${PHASE50_EVAL_ROLLOUT_EXECUTION:-vector_async}" \
-  --chunk-len "${EVAL_CHUNK_LEN}" \
+EVAL_ARGS=(
+  scripts/grpo/eval_phase12_checkpoint_sweep.py
+  --base-checkpoint "${BASE_CKPT}"
+  --run-dir "${RUN_DIR}"
+  --task "${TASK}"
+  --episodes "${EPISODES}"
+  --eval-seed-start "${PHASE50_EVAL_SEED_START:-1000}"
+  --sweep-name "${SWEEP_NAME}"
+  --min-update "${MIN_UPDATE}"
+  --max-update "${MAX_UPDATE}"
+  --stride "${STRIDE}"
+  --execution-mode "${PHASE50_EVAL_EXECUTION_MODE:-inprocess_vector}"
+  --n-envs "${PHASE50_EVAL_N_ENVS:-3}"
+  --rollout-execution "${PHASE50_EVAL_ROLLOUT_EXECUTION:-vector_async}"
+  --chunk-len "${EVAL_CHUNK_LEN}"
   --max-steps "${PHASE50_EVAL_MAX_STEPS:-120}"
+)
+if [[ "${PHASE50_EVAL_SKIP_EXISTING:-0}" == "1" ]]; then
+  EVAL_ARGS+=(--skip-existing)
+fi
+"${EGGROLL_PYTHON}" "${EVAL_ARGS[@]}"
 
 test -f "${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
 echo "PHASE50_EGGROLL_SEEDED_EVAL_SWEEP_DONE run_dir=${RUN_DIR} sweep=${SWEEP_NAME}"
