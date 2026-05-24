@@ -160,6 +160,12 @@ if [[ "${MAX_UPDATE}" -lt 1 ]]; then
   exit 3
 fi
 
+if [[ "${PHASE50_SKIP_FINAL_EVAL:-0}" == "1" || -f "${PERSIST_OUT}/.phase50_skip_final_eval" ]]; then
+  echo "[phase50-eggroll-overnight] skip final eval run=${RUN_NAME} persist=${PERSIST_OUT}"
+  echo "PHASE50_EGGROLL_OVERNIGHT_TRAIN_DONE run_name=${RUN_NAME} out=${PERSIST_OUT} max_update=${MAX_UPDATE}"
+  exit 0
+fi
+
 "${EGGROLL_PYTHON}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
   --base-checkpoint "${PHASE50_EVAL_BASE_CHECKPOINT:-${CHECKPOINT}}" \
   --run-dir "${PERSIST_OUT}" \
