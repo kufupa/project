@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # PBS (CX3): EGGROLL one-GPU train + eval for SmolVLA push-v3.
 #PBS -N p50eggfull
-#PBS -l select=1:ncpus=24:mem=64gb:ngpus=1:gpu_type=RTX6000
+#PBS -l select=1:ncpus=64:mem=192gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=18:00:00
 #PBS -j oe
 
@@ -91,7 +91,7 @@ trap cleanup EXIT
 echo "[phase50-eggroll-overnight] submit_root=${SUBMIT_ROOT} project_root=${PROJECT_ROOT} HF_HOME=${HF_HOME:-} TORCH_HOME=${TORCH_HOME:-} host=$(hostname) job=${PBS_JOBID:-local}"
 echo "[phase50-eggroll-overnight] run=${RUN_NAME} work=${WORK_OUT} persist=${PERSIST_OUT} source=${WORK_SRC}"
 echo "[phase50-eggroll-overnight] reset_mode=${SMOLVLA_METAWORLD_RESET_MODE} python=${EGGROLL_PYTHON}"
-echo "[phase50-eggroll-overnight] pop=${PHASE50_POPULATION_SIZE:-32} batch=${PHASE50_POPULATION_BATCH_SIZE:-16} rank=${PHASE50_RANK:-2} sigma=${PHASE50_SIGMA:-0.01} alpha=${PHASE50_ALPHA:-0.01} episodes_per_member=${PHASE50_EPISODES_PER_MEMBER:-2}"
+echo "[phase50-eggroll-overnight] pop=${PHASE50_POPULATION_SIZE:-32} batch=${PHASE50_POPULATION_BATCH_SIZE:-32} rank=${PHASE50_RANK:-2} sigma=${PHASE50_SIGMA:-0.01} alpha=${PHASE50_ALPHA:-0.01} episodes_per_member=${PHASE50_EPISODES_PER_MEMBER:-2}"
 echo "[phase50-eggroll-overnight] resume=${RESUME:-none}"
 
 sync_loop() {
@@ -110,7 +110,7 @@ train_args=(
   --checkpoint-sync-dir "${PERSIST_OUT}"
   --task "${TASK}"
   --population-size "${PHASE50_POPULATION_SIZE:-32}"
-  --population-batch-size "${PHASE50_POPULATION_BATCH_SIZE:-16}"
+  --population-batch-size "${PHASE50_POPULATION_BATCH_SIZE:-32}"
   --rank "${PHASE50_RANK:-2}"
   --sigma "${PHASE50_SIGMA:-0.01}"
   --alpha "${PHASE50_ALPHA:-0.01}"
@@ -171,7 +171,7 @@ fi
   --max-update "${MAX_UPDATE}" \
   --stride "${PHASE50_EVAL_STRIDE:-2}" \
   --execution-mode inprocess_vector \
-  --n-envs "${PHASE50_EVAL_N_ENVS:-3}" \
+  --n-envs "${PHASE50_EVAL_N_ENVS:-25}" \
   --rollout-execution "${PHASE50_ROLLOUT_EXECUTION:-vector_async}" \
   --chunk-len "${PHASE50_ACTION_CHUNK_SIZE:-5}" \
   --max-steps "${PHASE50_MAX_STEPS:-120}"
