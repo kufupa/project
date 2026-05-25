@@ -86,6 +86,14 @@ def test_benchmark_uses_maniskill_rollout() -> None:
     assert "success_rate" in evaluator
 
 
+def test_autopilot_supports_host_retry_and_exit_status() -> None:
+    autopilot = _read("autopilot.sh")
+    assert "MSM_PBS_HOST" in autopilot
+    assert "host=${host}" in autopilot
+    assert 'tolower($1) ~ /exit_status' in autopilot
+    assert 'qsub -l "select=${select_spec}"' in autopilot
+
+
 def test_gitignore_covers_large_artifacts() -> None:
     gitignore = (PROJECT / ".gitignore").read_text(encoding="utf-8")
     for pattern in ["artifacts/", "*.npz", "*.safetensors", "*.pt", "*.mp4"]:

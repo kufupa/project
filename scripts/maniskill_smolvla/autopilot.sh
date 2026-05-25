@@ -24,7 +24,7 @@ job_state() {
 
 job_exit_status() {
   { qstat -xf "$1" 2>/dev/null || qstat -Hf "$1" 2>/dev/null || true; } \
-    | awk -F'= ' '/exit_status =/{print $2; exit}'
+    | awk -F'= ' 'tolower($1) ~ /exit_status[[:space:]]*$/{print $2; exit}'
 }
 
 write_rca() {
@@ -54,7 +54,22 @@ submit_stage() {
   local stage="$1"
   local script="${MSM_SCRIPT_ROOT}/${stage}"
   msm_require_file "${script}"
-  (cd "${PROJECT_ROOT}" && qsub "${script}")
+  local host="${MSM_PBS_HOST:-}"
+  local select_spec=""
+  if [[ -n "${host}" ]]; then
+    case "${stage}" in
+      01_data_probe.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:host=${host}" ;;
+      02_data_full.pbs) select_spec="1:ncpus=64:mem=256gb:ngpus=1:host=${host}" ;;
+      04_sft_smoke.pbs) select_spec="1:ncpus=32:mem=192gb:ngpus=1:host=${host}" ;;
+      05_sft_train.pbs) select_spec="1:ncpus=48:mem=256gb:ngpus=1:host=${host}" ;;
+      06_benchmark.pbs) select_spec="1:ncpus=32:mem=192gb:ngpus=1:host=${host}" ;;
+    esac
+  fi
+  if [[ -n "${select_spec}" ]]; then
+    (cd "${PROJECT_ROOT}" && qsub -l "select=${select_spec}" "${script}")
+  else
+    (cd "${PROJECT_ROOT}" && qsub "${script}")
+  fi
 }
 
 monitor_job() {
