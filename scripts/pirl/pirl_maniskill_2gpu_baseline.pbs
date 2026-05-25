@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL ManiSkill numeric baseline, video off. Jupyter GPU queue excluded by default.
+#PBS -N pirlmbase
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=384gb:ngpus=2:gpu_type=RTX6000
+#PBS -l walltime=02:30:00
+#PBS -j oe
+#PBS -o pirl_maniskill_2gpu_baseline.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+COMMON="${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_common.sh"
+# shellcheck source=pirl_maniskill_common.sh
+source "${COMMON}"
+
+pirl_setup_modules
+pirl_prepare_runtime
+
+BASELINE_ROOT="${PIRL_ARTIFACT_ROOT}/baseline_numeric/${PBS_JOBID:-local}"
+mkdir -p "${BASELINE_ROOT}"
+
+PIRL_BASELINE_ENVS="${PIRL_BASELINE_ENVS:-64}"
+echo "[pirl-baseline] numeric eval only; video disabled; v1_jupytergpu excluded."
+pirl_run_rlinf "baseline_numeric" \
+  "runner.only_eval=True" \
+  "runner.logger.log_path=${BASELINE_ROOT}" \
+  "runner.logger.experiment_name=baseline_numeric" \
+  "env.eval.total_num_envs=${PIRL_BASELINE_ENVS}" \
+  "env.eval.video_cfg.save_video=False" \
+  "env.eval.use_fixed_reset_state_ids=True" \
+  "env.eval.ignore_terminations=True" \
+  "actor.model.model_path=${PIRL_SFT_CKPT}" \
+  "rollout.model.model_path=${PIRL_SFT_CKPT}"
+
+echo "PIRL_MANISKILL_2GPU_BASELINE_DONE root=${BASELINE_ROOT}"

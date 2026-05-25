@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL ManiSkill 2-GPU profile sweep. Jupyter GPU queue excluded by default.
+#PBS -N pirlmprof
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=256gb:ngpus=2:gpu_type=RTX6000
+#PBS -l walltime=02:30:00
+#PBS -j oe
+#PBS -o pirl_maniskill_2gpu_profile.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+"${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_profile_sweep.sh"

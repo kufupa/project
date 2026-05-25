@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL ManiSkill 2.5h training chunk. Jupyter GPU queue excluded by default.
+#PBS -N pirlmchunk
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=384gb:ngpus=2:gpu_type=RTX6000
+#PBS -l walltime=02:30:00
+#PBS -j oe
+#PBS -o pirl_maniskill_2gpu_chunk.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+COMMON="${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_common.sh"
+# shellcheck source=pirl_maniskill_common.sh
+source "${COMMON}"
+
+pirl_setup_modules
+pirl_prepare_runtime
+
+CHUNK_ROOT="${PIRL_ARTIFACT_ROOT}/chunks/${PBS_JOBID:-local}"
+mkdir -p "${CHUNK_ROOT}"
+
+PIRL_TRAIN_ENVS="${PIRL_TRAIN_ENVS:-64}"
+PIRL_ROLLOUT_EPOCH="${PIRL_ROLLOUT_EPOCH:-5}"
+PIRL_MAX_STEPS="${PIRL_MAX_STEPS:-80}"
+PIRL_MICRO_BATCH="${PIRL_MICRO_BATCH:-2}"
+PIRL_GLOBAL_BATCH="${PIRL_GLOBAL_BATCH:-5120}"
+PIRL_MAX_EPOCHS="${PIRL_MAX_EPOCHS:-1000}"
+PIRL_SAVE_INTERVAL="${PIRL_SAVE_INTERVAL:-50}"
+PIRL_VAL_CHECK_INTERVAL="${PIRL_VAL_CHECK_INTERVAL:-10}"
+
+overrides=(
+  "runner.max_epochs=${PIRL_MAX_EPOCHS}"
+  "runner.save_interval=${PIRL_SAVE_INTERVAL}"
+  "runner.val_check_interval=${PIRL_VAL_CHECK_INTERVAL}"
+  "runner.logger.log_path=${CHUNK_ROOT}"
+  "runner.logger.experiment_name=chunk_${PIRL_CHUNK_INDEX:-0}"
+  "env.train.total_num_envs=${PIRL_TRAIN_ENVS}"
+  "env.eval.total_num_envs=${PIRL_TRAIN_ENVS}"
+  "env.train.max_steps_per_rollout_epoch=${PIRL_MAX_STEPS}"
+  "env.eval.max_steps_per_rollout_epoch=${PIRL_MAX_STEPS}"
+  "env.eval.video_cfg.save_video=False"
+  "algorithm.rollout_epoch=${PIRL_ROLLOUT_EPOCH}"
+  "actor.micro_batch_size=${PIRL_MICRO_BATCH}"
+  "actor.global_batch_size=${PIRL_GLOBAL_BATCH}"
+  "actor.model.model_path=${PIRL_SFT_CKPT}"
+  "rollout.model.model_path=${PIRL_SFT_CKPT}"
+)
+
+if [[ -n "${PIRL_RESUME_DIR:-}" ]]; then
+  overrides+=("runner.resume_dir=${PIRL_RESUME_DIR}")
+fi
+
+echo "[pirl-chunk] train_envs=${PIRL_TRAIN_ENVS} rollout_epoch=${PIRL_ROLLOUT_EPOCH} max_steps=${PIRL_MAX_STEPS}"
+echo "[pirl-chunk] v1_jupytergpu excluded; queue=v1_gpu72."
+chunk_status=0
+if command -v timeout >/dev/null 2>&1; then
+  echo "[pirl-chunk] timeout guard=${PIRL_CHUNK_TIMEOUT:-2h20m}"
+  export -f pirl_assert_python312 pirl_resolve_paths pirl_prepare_runtime pirl_gpu_snapshot pirl_cleanup_ray pirl_run_rlinf
+  set +e
+  timeout --preserve-status "${PIRL_CHUNK_TIMEOUT:-2h20m}" \
+    bash -lc 'pirl_run_rlinf "$@"' bash "chunk_${PIRL_CHUNK_INDEX:-0}" "${overrides[@]}"
+  chunk_status=$?
+  set -e
+  pirl_cleanup_ray
+  if [[ "${chunk_status}" -eq 124 || "${chunk_status}" -eq 143 || "${chunk_status}" -eq 137 ]]; then
+    echo "[pirl-chunk] timeout reached; archiving logs and continuing queue/eval logic as partial chunk."
+    mkdir -p "${CHUNK_ROOT}/partial_timeout_logs"
+    cp -a "${PIRL_RUN_ROOT}/logs/." "${CHUNK_ROOT}/partial_timeout_logs/" 2>/dev/null || true
+    chunk_status=0
+  fi
+else
+  echo "[pirl-chunk] warning: timeout unavailable; running without pre-walltime guard." >&2
+  set +e
+  pirl_run_rlinf "chunk_${PIRL_CHUNK_INDEX:-0}" "${overrides[@]}"
+  chunk_status=$?
+  set -e
+fi
+
+if [[ "${chunk_status}" -ne 0 ]]; then
+  exit "${chunk_status}"
+fi
+
+"${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_queue_next.sh"
+
+echo "PIRL_MANISKILL_2GPU_CHUNK_DONE root=${CHUNK_ROOT}"
