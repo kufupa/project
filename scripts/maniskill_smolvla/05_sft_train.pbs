@@ -41,6 +41,7 @@ log="$(msm_stage_log sft_train)"
     --policy.max_state_dim=32 \
     --policy.max_action_dim=32 \
     --policy.use_amp=true
+  ln -sfn "${MSM_SFT_OUT}" "${MSM_CHECKPOINT_ROOT}/sft_main_latest"
   latest="$(readlink -f "${MSM_SFT_OUT}/checkpoints/last/pretrained_model" 2>/dev/null || true)"
   msm_write_manifest \
     "${MSM_RUN_ROOT}/manifests/sft_train.env" \

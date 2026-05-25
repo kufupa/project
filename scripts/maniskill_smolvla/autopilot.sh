@@ -15,6 +15,7 @@ STAGES=(
   "03_convert_full.pbs"
   "04_sft_smoke.pbs"
   "05_sft_train.pbs"
+  "06_benchmark.pbs"
 )
 
 job_state() {

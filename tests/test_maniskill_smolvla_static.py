@@ -17,6 +17,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         "03_convert_full.pbs",
         "04_sft_smoke.pbs",
         "05_sft_train.pbs",
+        "06_benchmark.pbs",
     ]
     for name in pbs_files:
         text = _read(name)
@@ -29,6 +30,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
     assert "#PBS -q v1_gpu72" in _read("02_data_full.pbs")
     assert "#PBS -q v1_gpu72" in _read("04_sft_smoke.pbs")
     assert "#PBS -q v1_gpu72" in _read("05_sft_train.pbs")
+    assert "#PBS -q v1_gpu72" in _read("06_benchmark.pbs")
 
 
 def test_common_keeps_large_artifacts_in_ephemeral() -> None:
@@ -71,6 +73,17 @@ def test_sft_keeps_pretrained_padding_dims() -> None:
     assert "--policy.max_state_dim=32" in combined
     assert "--policy.max_action_dim=32" in combined
     assert "--save_freq=\"${MSM_SFT_SAVE_FREQ}\"" in combined
+
+
+def test_benchmark_uses_maniskill_rollout() -> None:
+    benchmark = _read("06_benchmark.pbs")
+    evaluator = _read("eval_maniskill_smolvla.py")
+    assert "eval_maniskill_smolvla.py" in benchmark
+    assert "gym.make" in evaluator
+    assert "SmolVLAPolicy.from_pretrained" in evaluator
+    assert "make_pre_post_processors" in evaluator
+    assert "policy.select_action" in evaluator
+    assert "success_rate" in evaluator
 
 
 def test_gitignore_covers_large_artifacts() -> None:
