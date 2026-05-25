@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#PBS -N msm_sftsmoke
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=32:mem=192gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_sft_smoke.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_TRAIN_PYTHON}"
+
+export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
+export MSM_SFT_SMOKE_STEPS="${MSM_SFT_SMOKE_STEPS:-20}"
+export MSM_SFT_SMOKE_BATCH="${MSM_SFT_SMOKE_BATCH:-4}"
+export MSM_SFT_SMOKE_OUT="${MSM_SFT_SMOKE_OUT:-${MSM_CHECKPOINT_ROOT}/sft_smoke_${PBS_JOBID:-local}}"
+
+log="$(msm_stage_log sft_smoke)"
+(
+  echo "[msm-sft-smoke] dataset=${MSM_LEROBOT_DATASET} out=${MSM_SFT_SMOKE_OUT}"
+  cd "${PROJECT_ROOT}"
+  "${MSM_TRAIN_PYTHON}" -m lerobot.scripts.lerobot_train \
+    --policy.path=lerobot/smolvla_base \
+    --dataset.repo_id="${MSM_REPO_ID}" \
+    --dataset.root="${MSM_LEROBOT_DATASET}" \
+    --output_dir="${MSM_SFT_SMOKE_OUT}" \
+    --job_name=msm_sft_smoke \
+    --batch_size="${MSM_SFT_SMOKE_BATCH}" \
+    --steps="${MSM_SFT_SMOKE_STEPS}" \
+    --save_freq="${MSM_SFT_SMOKE_STEPS}" \
+    --log_freq=1 \
+    --eval_freq=0 \
+    --num_workers=2 \
+    --wandb.enable=false \
+    --policy.max_state_dim=32 \
+    --policy.max_action_dim=32 \
+    --policy.use_amp=true
+  msm_write_manifest \
+    "${MSM_RUN_ROOT}/manifests/sft_smoke.env" \
+    "stage=sft_smoke" \
+    "output_dir=${MSM_SFT_SMOKE_OUT}" \
+    "steps=${MSM_SFT_SMOKE_STEPS}" \
+    "batch_size=${MSM_SFT_SMOKE_BATCH}"
+  echo "MSM_SFT_SMOKE_DONE output_dir=${MSM_SFT_SMOKE_OUT}"
+) 2>&1 | tee "${log}"

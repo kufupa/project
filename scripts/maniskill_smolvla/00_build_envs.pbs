@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#PBS -N msm_env
+#PBS -q v1_small24
+#PBS -l select=1:ncpus=8:mem=48gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_env.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_prepare_runtime
+
+log="$(msm_stage_log build_envs)"
+"${PROJECT_ROOT}/scripts/maniskill_smolvla/build_envs.sh" 2>&1 | tee "${log}"

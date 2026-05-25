@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#PBS -N msm_data
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=256gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=72:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_data.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_DATA_PYTHON}"
+
+export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
+export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-16}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data"
+
+log="$(msm_stage_log data_full)"
+(
+  echo "[msm-data] env=${MSM_ENV_ID} traj=${MSM_FULL_TRAJ} procs=${MSM_FULL_NUM_PROCS}"
+  cd "${RL4VLA_ROOT}/ManiSkill"
+  "${MSM_DATA_PYTHON}" -m mani_skill.examples.motionplanning.widowx.collect_simpler \
+    -e "${MSM_ENV_ID}" \
+    --save_data \
+    --num_procs "${MSM_FULL_NUM_PROCS}" \
+    --num_traj "${MSM_FULL_TRAJ}" \
+    --record_dir "${MSM_FULL_RECORD_DIR}" \
+    --seed 100 \
+    --sim_backend cpu \
+    --obs_mode rgb+segmentation \
+    --render_mode rgb_array \
+    --shader default
+  "${MSM_DATA_PYTHON}" "${MSM_SCRIPT_ROOT}/inspect_npz.py" \
+    --root "${MSM_FULL_DATA_DIR}" \
+    --min-episodes 16384 \
+    --manifest "${MSM_RUN_ROOT}/manifests/data_full.json"
+  echo "MSM_DATA_FULL_DONE data_dir=${MSM_FULL_DATA_DIR}"
+) 2>&1 | tee "${log}"
