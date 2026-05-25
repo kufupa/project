@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL ManiSkill video baseline sidecar. Jupyter GPU queue excluded by default.
+#PBS -N pirlmvideo
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=384gb:ngpus=2:gpu_type=RTX6000
+#PBS -l walltime=02:30:00
+#PBS -j oe
+#PBS -o pirl_maniskill_2gpu_baseline_video.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+COMMON="${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_common.sh"
+# shellcheck source=pirl_maniskill_common.sh
+source "${COMMON}"
+
+pirl_setup_modules
+pirl_prepare_runtime
+
+VIDEO_ROOT="${PIRL_ARTIFACT_ROOT}/baseline_success/${PBS_JOBID:-local}"
+mkdir -p "${VIDEO_ROOT}"
+
+PIRL_VIDEO_ENVS="${PIRL_VIDEO_ENVS:-1}"
+PIRL_VIDEO_ATTEMPTS="${PIRL_VIDEO_ATTEMPTS:-3}"
+echo "[pirl-video] verified success video saved under ${VIDEO_ROOT} only when success metric observed."
+echo "[pirl-video] PIRL_VIDEO_ENVS=${PIRL_VIDEO_ENVS}; use 1 for video/success attribution."
+echo "[pirl-video] v1_jupytergpu excluded; using v1_gpu72 snapshot before eval."
+
+for attempt in $(seq 1 "${PIRL_VIDEO_ATTEMPTS}"); do
+  attempt_root="${VIDEO_ROOT}/attempt_${attempt}"
+  mkdir -p "${attempt_root}"
+  echo "[pirl-video] attempt=${attempt} root=${attempt_root}"
+  pirl_run_rlinf "baseline_video_attempt${attempt}" \
+    "runner.only_eval=True" \
+    "runner.logger.log_path=${attempt_root}" \
+    "runner.logger.experiment_name=baseline_video_attempt${attempt}" \
+    "env.eval.total_num_envs=${PIRL_VIDEO_ENVS}" \
+    "env.eval.video_cfg.save_video=True" \
+    "env.eval.video_cfg.video_base_dir=${attempt_root}/videos" \
+    "env.eval.use_fixed_reset_state_ids=True" \
+    "env.eval.ignore_terminations=True" \
+    "actor.model.model_path=${PIRL_SFT_CKPT}" \
+    "rollout.model.model_path=${PIRL_SFT_CKPT}"
+
+  if [[ -n "${PIRL_LAST_LOG:-}" ]] && grep -Eiq 'success[^[:alnum:]_]*(rate|mean|=|:)[^0-9]*([1-9][0-9]*|0\.[1-9])' "${PIRL_LAST_LOG}"; then
+    if [[ "${PIRL_VIDEO_ENVS}" != "1" ]]; then
+      echo "[pirl-video] success observed, but PIRL_VIDEO_ENVS=${PIRL_VIDEO_ENVS}; attribution ambiguous, not copying as verified." >&2
+      continue
+    fi
+    copied_count=0
+    while IFS= read -r mp4_path; do
+      cp -n "${mp4_path}" "${VIDEO_ROOT}/"
+      copied_count=$((copied_count + 1))
+    done < <(find "${attempt_root}" -type f -name '*.mp4')
+    if [[ "${copied_count}" -gt 0 ]]; then
+      touch "${VIDEO_ROOT}/SUCCESS_VIDEO_VERIFIED"
+      echo "[pirl-video] observed success-like metric in ${PIRL_LAST_LOG}; copied ${copied_count} verified single-env video(s)."
+      break
+    fi
+    echo "[pirl-video] success metric observed but no mp4 found; not marking verified." >&2
+  fi
+done
+
+if [[ ! -f "${VIDEO_ROOT}/SUCCESS_VIDEO_VERIFIED" ]]; then
+  echo "[pirl-video] no verified success video found; inspect attempt dirs under ${VIDEO_ROOT}."
+fi
+
+echo "PIRL_MANISKILL_2GPU_BASELINE_VIDEO_DONE videos=${VIDEO_ROOT}"
