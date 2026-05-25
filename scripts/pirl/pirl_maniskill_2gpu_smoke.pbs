@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL ManiSkill 2-GPU smoke. Jupyter GPU queue excluded by default.
+# Submit:
+#   cd /rds/general/user/aa6622/home/project && qsub scripts/pirl/pirl_maniskill_2gpu_smoke.pbs
+#PBS -N pirlmsmoke
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=64:mem=256gb:ngpus=2:gpu_type=RTX6000
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o pirl_maniskill_2gpu_smoke.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+COMMON="${PROJECT_ROOT}/scripts/pirl/pirl_maniskill_common.sh"
+# shellcheck source=pirl_maniskill_common.sh
+source "${COMMON}"
+
+pirl_setup_modules
+pirl_prepare_runtime
+
+SMOKE_ROOT="${PIRL_ARTIFACT_ROOT}/smoke/${PBS_JOBID:-local}"
+mkdir -p "${SMOKE_ROOT}"
+
+echo "[pirl-smoke] Purpose: model/FSDP/env load. v1_jupytergpu excluded; queue=v1_gpu72."
+pirl_run_rlinf "smoke" \
+  "runner.max_epochs=1" \
+  "runner.val_check_interval=-1" \
+  "runner.save_interval=-1" \
+  "runner.logger.log_path=${SMOKE_ROOT}" \
+  "runner.logger.experiment_name=smoke" \
+  "env.train.total_num_envs=2" \
+  "env.eval.total_num_envs=2" \
+  "env.train.max_steps_per_rollout_epoch=5" \
+  "env.eval.max_steps_per_rollout_epoch=5" \
+  "env.eval.video_cfg.save_video=False" \
+  "algorithm.rollout_epoch=1" \
+  "actor.micro_batch_size=1" \
+  "actor.global_batch_size=2" \
+  "actor.model.model_path=${PIRL_SFT_CKPT}" \
+  "rollout.model.model_path=${PIRL_SFT_CKPT}"
+
+echo "PIRL_MANISKILL_2GPU_SMOKE_DONE root=${SMOKE_ROOT}"

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# PBS (CX3): PIRL Python 3.12 static-test preflight. No GPU allocation.
+#PBS -N pirlpy312
+#PBS -q v1_cpu72
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -l walltime=00:20:00
+#PBS -j oe
+#PBS -o pirl_maniskill_py312_tests.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+bash "${PROJECT_ROOT}/scripts/pirl/pirl_python312_test.sh"
