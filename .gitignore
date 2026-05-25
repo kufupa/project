@@ -69,10 +69,3 @@ rtk/
 Imperial_College_Individual_Project_Template/
 RL4VLA/
 *.o[0-9]*
-
-results/
-rtk/
-*.bundle
-Imperial_College_Individual_Project_Template/
-RL4VLA/
-*.o[0-9]*
