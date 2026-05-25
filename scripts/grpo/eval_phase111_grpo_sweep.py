@@ -105,6 +105,7 @@ def run_sweep(
     rollout_execution: str = "vector_async",
     max_steps: int | None = None,
     chunk_len: int = 1,
+    checkpoint_stride: int = 1,
 ) -> dict[str, Any]:
     checkpoints_dir = run_dir / "checkpoints"
     ckpts = sorted(checkpoints_dir.glob("update_*.pt"), key=_checkpoint_update)
@@ -119,6 +120,9 @@ def run_sweep(
             "no checkpoints remain after min_update/max_update filter "
             f"(min_update={min_update}, max_update={max_update})"
         )
+    stride = max(1, int(checkpoint_stride))
+    if stride > 1:
+        ckpts = [ckpt for idx, ckpt in enumerate(ckpts) if idx % stride == 0]
 
     sweep_dir = run_dir / sweep_name
     sweep_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +170,7 @@ def run_sweep(
         "rollout_execution": str(rollout_execution),
         "max_steps": None if max_steps is None else int(max_steps),
         "chunk_len": int(chunk_len),
+        "checkpoint_stride": stride,
     }
 
     if top_k > 0:
@@ -240,6 +245,7 @@ def main() -> int:
     parser.add_argument("--rollout-execution", choices=("vector_sync", "vector_async"), default="vector_async")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--chunk-len", type=int, default=1)
+    parser.add_argument("--checkpoint-stride", type=int, default=1)
     args = parser.parse_args()
 
     result = run_sweep(
@@ -258,6 +264,7 @@ def main() -> int:
         rollout_execution=args.rollout_execution,
         max_steps=args.max_steps,
         chunk_len=args.chunk_len,
+        checkpoint_stride=args.checkpoint_stride,
     )
     print(
         "phase111_eval_sweep_ok",
