@@ -2,7 +2,6 @@
 
 Status: `2026-05-26 13:55 UTC+1`
 
-Mode: caveman ultra. Substance dense. No fluff.
 
 ## TL;DR
 
@@ -993,3 +992,18 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - Impact: duplicates are ~0.6% of episodes; not a schema blocker, but should not overweight SFT.
 - Fix: converter now deduplicates decoded signatures by default and records skipped duplicate count.
 - Validation: focused SmolVLA tests pass (`17 passed`).
+
+## 2026-05-28T00:15Z CPU Regen + Stale Raw Purge
+
+- Full data regen uses `v1_large72`, `select=1:ncpus=124:mem=256gb`, `MSM_FULL_NUM_PROCS=124`, `--sim_backend cpu`.
+- New raw output dir: `${MSM_RAW_ROOT}/full_cpu124_v1` (legacy stays `${MSM_RAW_ROOT}/full` until purged).
+- `02_data_full.pbs` calls `purge_stale_record_dir.sh` on the CPU job before collection; deletes only `MSM_STALE_RECORD_DIR` (default `full`) when it differs from the new record dir. Logs `du -sh` + `elapsed_s` (~206GB observed on login node; budget 10-30 min on ephemeral FS).
+- Convert/audit default input record dir updated to `full_cpu124_v1`. Convert walltime raised to `24:00:00`.
+
+## 2026-05-26T23:58Z Queue/Action-Step Update
+
+- User approved queueing scarce-GPU stages together with PBS `afterok` dependencies.
+- Added direct-login helper: `scripts/maniskill_smolvla/queue_afterok_gpu_tail.sh --after-job <convert_job>`.
+- SmolVLA ManiSkill SFT contract now uses `n_action_steps=4` with `chunk_size=50` for walltime speedup.
+- RTX6000 jobs may sit queued or show scheduler pressure comments like "placement set too small"; wait these out unless PBS marks an impossible run or failure.
+- Do not edit the accepted plan file for this; executable scripts, tests, handoff, and Cursor rule are the source of truth.
