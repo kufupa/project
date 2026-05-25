@@ -19,11 +19,12 @@ STAGES=(
 )
 
 job_state() {
-  qstat -f "$1" 2>/dev/null | awk -F'= ' '/job_state =/{print $2; exit}'
+  { qstat -f "$1" 2>/dev/null || true; } | awk -F'= ' '/job_state =/{print $2; exit}'
 }
 
 job_exit_status() {
-  qstat -xf "$1" 2>/dev/null | awk -F'= ' '/exit_status =/{print $2; exit}'
+  { qstat -xf "$1" 2>/dev/null || qstat -Hf "$1" 2>/dev/null || true; } \
+    | awk -F'= ' '/exit_status =/{print $2; exit}'
 }
 
 write_rca() {
@@ -82,7 +83,12 @@ monitor_job() {
 
 main() {
   echo "[msm-autopilot] run_root=${MSM_RUN_ROOT}"
-  for stage in "${STAGES[@]}"; do
+  local start_index="${MSM_START_STAGE_INDEX:-0}"
+  for idx in "${!STAGES[@]}"; do
+    if (( idx < start_index )); then
+      continue
+    fi
+    stage="${STAGES[$idx]}"
     job_id="$(submit_stage "${stage}")"
     echo "[msm-autopilot] submitted stage=${stage} job=${job_id}"
     monitor_job "${stage}" "${job_id}"
