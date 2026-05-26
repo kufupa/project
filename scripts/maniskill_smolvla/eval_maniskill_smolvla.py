@@ -64,6 +64,21 @@ def is_success(info: dict[str, Any]) -> bool:
     return bool(value)
 
 
+def select_fresh_first_action(
+    policy: SmolVLAPolicy,
+    preprocessor: Any,
+    postprocessor: Any,
+    batch: dict[str, Any],
+) -> np.ndarray:
+    policy.reset()
+    model_batch = preprocessor(batch)
+    with torch.no_grad():
+        action_chunk = policy.predict_action_chunk(model_batch)
+        first_action = action_chunk[:, 0]
+        action = postprocessor(first_action)
+    return action.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
+
 def rollout(args: argparse.Namespace) -> dict[str, Any]:
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     dataset = LeRobotDataset(args.repo_id, root=args.dataset_root, download_videos=False)
@@ -98,6 +113,7 @@ def rollout(args: argparse.Namespace) -> dict[str, Any]:
             task = env.unwrapped.get_language_instruction()
             gripper = 1.0
             episode_success = False
+            consecutive_successes = 0
             last_info = info
             for step in range(args.max_steps):
                 batch = {
@@ -105,17 +121,17 @@ def rollout(args: argparse.Namespace) -> dict[str, Any]:
                     OBS_STATE: torch.from_numpy(current_state(env, gripper)),
                     "task": task,
                 }
-                model_batch = preprocessor(batch)
-                with torch.no_grad():
-                    action = policy.select_action(model_batch)
-                    action = postprocessor(action)
-                action_np = action.detach().cpu().numpy().reshape(-1).astype(np.float32)
+                action_np = select_fresh_first_action(policy, preprocessor, postprocessor, batch)
                 action_np = np.nan_to_num(action_np, nan=0.0, posinf=1.0, neginf=-1.0)
                 action_np[:6] = np.clip(action_np[:6], -1.0, 1.0)
                 action_np[6] = 1.0 if action_np[6] >= 0 else -1.0
                 gripper = float(action_np[6])
                 _, _, terminated, truncated, last_info = env.step(action_np)
-                episode_success = is_success(last_info)
+                if is_success(last_info):
+                    consecutive_successes += 1
+                else:
+                    consecutive_successes = 0
+                episode_success = consecutive_successes >= args.sustained_success_steps
                 if episode_success or bool(terminated) or bool(truncated):
                     break
             successes += int(episode_success)
@@ -124,6 +140,7 @@ def rollout(args: argparse.Namespace) -> dict[str, Any]:
                     "episode": episode_idx,
                     "success": episode_success,
                     "steps": step + 1,
+                    "consecutive_successes": consecutive_successes,
                     "task": task,
                     "info": {k: str(v) for k, v in last_info.items()},
                 }
@@ -137,6 +154,7 @@ def rollout(args: argparse.Namespace) -> dict[str, Any]:
         "env_id": args.env_id,
         "obj_set": args.obj_set,
         "episodes": args.episodes,
+        "sustained_success_steps": args.sustained_success_steps,
         "successes": successes,
         "success_rate": successes / max(args.episodes, 1),
         "episode_results": episodes,
@@ -153,6 +171,7 @@ def main() -> None:
     parser.add_argument("--camera", default="3rd_view_camera")
     parser.add_argument("--episodes", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=80)
+    parser.add_argument("--sustained-success-steps", type=int, default=3)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")

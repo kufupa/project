@@ -17,8 +17,9 @@ msm_require_python "${MSM_TRAIN_PYTHON}"
 
 export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
 export MSM_SFT_OUT="${MSM_SFT_OUT:-${MSM_CHECKPOINT_ROOT}/sft_main_latest}"
-export MSM_EVAL_EPISODES="${MSM_EVAL_EPISODES:-8}"
+export MSM_EVAL_EPISODES="${MSM_EVAL_EPISODES:-25}"
 export MSM_EVAL_OBJ_SET="${MSM_EVAL_OBJ_SET:-train}"
+export MSM_EVAL_SUSTAINED_SUCCESS_STEPS="${MSM_EVAL_SUSTAINED_SUCCESS_STEPS:-3}"
 export MSM_EVAL_METRICS="${MSM_EVAL_METRICS:-${MSM_RUN_ROOT}/manifests/eval_metrics.json}"
 
 log="$(msm_stage_log benchmark)"
@@ -32,6 +33,7 @@ log="$(msm_stage_log benchmark)"
     --obj-set "${MSM_EVAL_OBJ_SET}" \
     --episodes "${MSM_EVAL_EPISODES}" \
     --max-steps 80 \
+    --sustained-success-steps "${MSM_EVAL_SUSTAINED_SUCCESS_STEPS}" \
     --output "${MSM_EVAL_METRICS}"
   echo "MSM_BENCHMARK_DONE metrics=${MSM_EVAL_METRICS}"
 ) 2>&1 | tee "${log}"

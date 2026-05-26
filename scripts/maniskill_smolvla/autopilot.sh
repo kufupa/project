@@ -9,10 +9,14 @@ source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
 msm_prepare_runtime
 
 STAGES=(
-  "00_build_envs.pbs"
-  "01_data_probe.pbs"
-  "02_data_full.pbs"
+  "03a_audit_full.pbs"
   "03_convert_full.pbs"
+  "04_sft_smoke.pbs"
+  "05_sft_train.pbs"
+  "06_benchmark.pbs"
+)
+
+GPU_STAGES=(
   "04_sft_smoke.pbs"
   "05_sft_train.pbs"
   "06_benchmark.pbs"
@@ -32,6 +36,8 @@ write_rca() {
   local job_id="$2"
   local exit_status="$3"
   local rca="${MSM_RUN_ROOT}/rca/${stage%.pbs}_${job_id}.md"
+  local newest_log=""
+  newest_log="$(ls -t "${MSM_RUN_ROOT}/logs"/*.log 2>/dev/null | head -n 1 || true)"
   {
     echo "# RCA: ${stage}"
     echo
@@ -43,26 +49,78 @@ write_rca() {
     echo "## Likely logs"
     echo "- ${MSM_RUN_ROOT}/logs/"
     echo "- ${PROJECT_ROOT}/artifacts/smolvla_maniskill/"
+    if [[ -n "${newest_log}" ]]; then
+      echo
+      echo "## Latest stage log tail"
+      echo
+      echo '```text'
+      tail -n 120 "${newest_log}" || true
+      echo '```'
+    fi
+    echo
+    echo "## PBS record"
+    echo
+    echo '```text'
+    qstat -xf "${job_id}" 2>/dev/null || qstat -Hf "${job_id}" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Failure classification hints"
+    echo "- scheduler/resource: qstat comments, Can Never Run, Qlist, walltime, mem"
+    echo "- dependency/import: ModuleNotFoundError, ImportError, Illegal instruction, segmentation fault"
+    echo "- data schema: bad shapes, missing keys, duplicate decoded signatures"
+    echo "- LeRobot config: draccus parse errors, feature key mismatch, checkpoint config mismatch"
+    echo "- CUDA/OOM: CUDA out of memory, CUBLAS, NCCL, killed"
+    echo "- eval/action: NaN action, clipped action saturation, env.step failure"
     echo
     echo "## Next action"
     echo "Inspect newest stage log, fix root cause, then rerun from ${stage}."
   } > "${rca}"
+  {
+    echo
+    echo "## $(date -u +%Y-%m-%dT%H:%M:%SZ) RCA needed"
+    echo
+    echo "- stage: ${stage}"
+    echo "- job_id: ${job_id}"
+    echo "- exit_status: ${exit_status}"
+    echo "- rca: ${rca}"
+  } >> "${PROJECT_ROOT}/docs/eggroll/smolvla_maniskill_handoff.md"
   echo "MSM_RCA_NEEDED stage=${stage} job_id=${job_id} exit_status=${exit_status} rca=${rca}"
+}
+
+is_gpu_stage() {
+  local stage="$1"
+  local gpu_stage
+  for gpu_stage in "${GPU_STAGES[@]}"; do
+    [[ "${stage}" == "${gpu_stage}" ]] && return 0
+  done
+  return 1
+}
+
+check_rtx6000_capacity() {
+  local snapshot="${HOME}/.agents/skills/checking-pbs-gpu-availability/scripts/pbs_gpu_snapshot.py"
+  if [[ -x "${snapshot}" || -f "${snapshot}" ]]; then
+    python3 "${snapshot}" -q v1_gpu72 || true
+  else
+    echo "[msm-autopilot] warning: missing ${snapshot}; submitting RTX6000 PBS job without snapshot"
+  fi
 }
 
 submit_stage() {
   local stage="$1"
   local script="${MSM_SCRIPT_ROOT}/${stage}"
   msm_require_file "${script}"
+  if is_gpu_stage "${stage}"; then
+    check_rtx6000_capacity
+  fi
   local host="${MSM_PBS_HOST:-}"
   local select_spec=""
   if [[ -n "${host}" ]]; then
     case "${stage}" in
-      01_data_probe.pbs) select_spec="1:ncpus=4:mem=32gb:ngpus=1:vnode=${host}" ;;
-      02_data_full.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:vnode=${host}" ;;
-      04_sft_smoke.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:vnode=${host}" ;;
-      05_sft_train.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:vnode=${host}" ;;
-      06_benchmark.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:vnode=${host}" ;;
+      01_data_probe.pbs) select_spec="1:ncpus=4:mem=32gb:ngpus=1:vnode=${host}:gpu_type=RTX6000" ;;
+      02_data_full.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:vnode=${host}:gpu_type=RTX6000" ;;
+      04_sft_smoke.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:vnode=${host}:gpu_type=RTX6000" ;;
+      05_sft_train.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:vnode=${host}:gpu_type=RTX6000" ;;
+      06_benchmark.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:vnode=${host}:gpu_type=RTX6000" ;;
     esac
   fi
   if [[ -n "${select_spec}" ]]; then
