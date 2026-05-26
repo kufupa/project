@@ -17,6 +17,7 @@ msm_require_python "${MSM_DATA_PYTHON}"
 
 export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
 export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-16}"
+export MSM_FULL_SEED="${MSM_FULL_SEED:-100}"
 export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
 export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data"
 
@@ -30,7 +31,7 @@ log="$(msm_stage_log data_full)"
     --num_procs "${MSM_FULL_NUM_PROCS}" \
     --num_traj "${MSM_FULL_TRAJ}" \
     --record_dir "${MSM_FULL_RECORD_DIR}" \
-    --seed 100 \
+    --seed "${MSM_FULL_SEED}" \
     --sim_backend cpu \
     --obs_mode rgb+segmentation \
     --render_mode rgb_array \
@@ -39,5 +40,12 @@ log="$(msm_stage_log data_full)"
     --root "${MSM_FULL_DATA_DIR}" \
     --min-episodes 16384 \
     --manifest "${MSM_RUN_ROOT}/manifests/data_full.json"
+  msm_write_manifest \
+    "${MSM_RUN_ROOT}/manifests/data_full.env" \
+    "stage=data_full" \
+    "data_dir=${MSM_FULL_DATA_DIR}" \
+    "num_traj=${MSM_FULL_TRAJ}" \
+    "num_procs=${MSM_FULL_NUM_PROCS}" \
+    "seed=${MSM_FULL_SEED}"
   echo "MSM_DATA_FULL_DONE data_dir=${MSM_FULL_DATA_DIR}"
 ) 2>&1 | tee "${log}"

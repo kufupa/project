@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 def load_episode(path: Path) -> dict[str, Any]:
@@ -48,7 +47,27 @@ def as_image_array(value: Any) -> np.ndarray:
     return image
 
 
+def apply_state_gripper_mode(
+    states: np.ndarray,
+    actions: np.ndarray,
+    *,
+    mode: str,
+    initial_gripper: float,
+) -> np.ndarray:
+    if mode == "as-recorded":
+        return states.astype(np.float32, copy=True)
+    if mode != "previous-action":
+        raise ValueError(f"unsupported state gripper mode: {mode}")
+    fixed = states.astype(np.float32, copy=True)
+    fixed[0, 6] = np.float32(initial_gripper)
+    if len(fixed) > 1:
+        fixed[1:, 6] = actions[:-1, 6].astype(np.float32)
+    return fixed
+
+
 def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
     files = sorted(args.input.glob("*.npz"))
     if args.limit:
         files = files[: args.limit]
@@ -94,7 +113,13 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
     for path in files:
         episode = load_episode(path)
         actions = np.asarray(episode["action"], dtype=np.float32)
-        states = np.asarray(episode["state"], dtype=np.float32)
+        raw_states = np.asarray(episode["state"], dtype=np.float32)
+        states = apply_state_gripper_mode(
+            raw_states,
+            actions,
+            mode=args.state_gripper_mode,
+            initial_gripper=args.initial_gripper,
+        )
         images = episode["image"]
         if actions.shape[1:] != (7,) or states.shape[1:] != (7,) or len(actions) != len(states):
             raise SystemExit(f"{path} bad action/state shapes: {actions.shape} {states.shape}")
@@ -152,6 +177,8 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         "skipped_frames": skipped_frames,
         "appended_completion_frames": appended_completion_frames,
         "filter_small_actions": args.filter_small_actions,
+        "state_gripper_mode": args.state_gripper_mode,
+        "initial_gripper": args.initial_gripper,
     }
 
 
@@ -166,8 +193,10 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--image-writer-threads", type=int, default=4)
     parser.add_argument("--stop-after-success-count", type=int, default=0)
-    parser.add_argument("--append-completion-frames", type=int, default=15)
-    parser.add_argument("--filter-small-actions", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--append-completion-frames", type=int, default=0)
+    parser.add_argument("--state-gripper-mode", choices=("as-recorded", "previous-action"), default="previous-action")
+    parser.add_argument("--initial-gripper", type=float, default=1.0)
+    parser.add_argument("--filter-small-actions", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 

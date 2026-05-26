@@ -14,6 +14,7 @@ source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
 msm_setup_modules
 msm_prepare_runtime
 msm_require_python "${MSM_TRAIN_PYTHON}"
+source "${MSM_SCRIPT_ROOT}/smolvla_policy_args.sh"
 
 export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
 export MSM_SFT_SMOKE_STEPS="${MSM_SFT_SMOKE_STEPS:-20}"
@@ -37,9 +38,10 @@ log="$(msm_stage_log sft_smoke)"
     --eval_freq=0 \
     --num_workers=2 \
     --wandb.enable=false \
-    --policy.max_state_dim=32 \
-    --policy.max_action_dim=32 \
-    --policy.use_amp=true
+    "${MSM_SMOLVLA_POLICY_ARGS[@]}"
+  "${MSM_TRAIN_PYTHON}" "${MSM_SCRIPT_ROOT}/check_smolvla_policy_contract.py" \
+    --run-root "${MSM_SFT_SMOKE_OUT}" \
+    --manifest "${MSM_RUN_ROOT}/manifests/sft_smoke_policy_contract.json"
   msm_write_manifest \
     "${MSM_RUN_ROOT}/manifests/sft_smoke.env" \
     "stage=sft_smoke" \

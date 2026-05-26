@@ -14,6 +14,7 @@ source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
 msm_setup_modules
 msm_prepare_runtime
 msm_require_python "${MSM_TRAIN_PYTHON}"
+source "${MSM_SCRIPT_ROOT}/smolvla_policy_args.sh"
 
 export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
 export MSM_SFT_STEPS="${MSM_SFT_STEPS:-3000}"
@@ -38,9 +39,7 @@ log="$(msm_stage_log sft_train)"
     --eval_freq=0 \
     --num_workers=4 \
     --wandb.enable=false \
-    --policy.max_state_dim=32 \
-    --policy.max_action_dim=32 \
-    --policy.use_amp=true
+    "${MSM_SMOLVLA_POLICY_ARGS[@]}"
   ln -sfn "${MSM_SFT_OUT}" "${MSM_CHECKPOINT_ROOT}/sft_main_latest"
   latest="$(readlink -f "${MSM_SFT_OUT}/checkpoints/last/pretrained_model" 2>/dev/null || true)"
   msm_write_manifest \

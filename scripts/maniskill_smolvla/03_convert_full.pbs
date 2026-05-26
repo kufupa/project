@@ -28,9 +28,11 @@ log="$(msm_stage_log convert_full)"
     --repo-id "${MSM_REPO_ID}" \
     --fps "${MSM_FPS}" \
     --min-episodes 16384 \
-    --append-completion-frames 15 \
+    --state-gripper-mode previous-action \
+    --initial-gripper 1.0 \
+    --append-completion-frames 0 \
     --manifest "${MSM_RUN_ROOT}/manifests/convert_full.json" \
-    --filter-small-actions \
+    --no-filter-small-actions \
     --overwrite
   echo "MSM_CONVERT_FULL_DONE dataset=${MSM_LEROBOT_DATASET}"
 ) 2>&1 | tee "${log}"
