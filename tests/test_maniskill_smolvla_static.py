@@ -125,6 +125,8 @@ def test_autopilot_supports_host_retry_and_exit_status() -> None:
     assert "-q v1_gpu72" in autopilot
     assert "Failure classification hints" in autopilot
     assert "smolvla_maniskill_handoff.md" in autopilot
+    assert "MSM_STAGE_MAX_RETRIES" in autopilot
+    assert "exceeded max_retries" in autopilot
 
 
 def test_audit_full_runs_on_cpu_pbs() -> None:
