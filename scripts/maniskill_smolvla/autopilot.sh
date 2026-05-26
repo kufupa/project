@@ -58,11 +58,11 @@ submit_stage() {
   local select_spec=""
   if [[ -n "${host}" ]]; then
     case "${stage}" in
-      01_data_probe.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:host=${host}" ;;
-      02_data_full.pbs) select_spec="1:ncpus=64:mem=256gb:ngpus=1:host=${host}" ;;
-      04_sft_smoke.pbs) select_spec="1:ncpus=32:mem=192gb:ngpus=1:host=${host}" ;;
-      05_sft_train.pbs) select_spec="1:ncpus=48:mem=256gb:ngpus=1:host=${host}" ;;
-      06_benchmark.pbs) select_spec="1:ncpus=32:mem=192gb:ngpus=1:host=${host}" ;;
+      01_data_probe.pbs) select_spec="1:ncpus=4:mem=32gb:ngpus=1:host=${host}" ;;
+      02_data_full.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:host=${host}" ;;
+      04_sft_smoke.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:host=${host}" ;;
+      05_sft_train.pbs) select_spec="1:ncpus=16:mem=128gb:ngpus=1:host=${host}" ;;
+      06_benchmark.pbs) select_spec="1:ncpus=8:mem=96gb:ngpus=1:host=${host}" ;;
     esac
   fi
   if [[ -n "${select_spec}" ]]; then
