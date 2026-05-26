@@ -976,3 +976,11 @@ MSM_START_STAGE_INDEX=1 MSM_PBS_HOST=cx3-8-12 \
 ```
 
 Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
+
+## 2026-05-26T19:47Z Autonomous Repair Run
+
+- Committed repaired data/SmolVLA/eval contract and PBS supervisor changes.
+- Cancelled stale pre-repair `msm_convert` job `2852597.pbs-7`; it was writing with old converter semantics.
+- Submitted CPU PBS supervisor `2857972.pbs-7` via `07_autonomous_supervisor.pbs`.
+- Supervisor is running on `cx3-13-3` and queued CPU audit child `2857984.pbs-7`.
+- RTX6000 snapshot before queueing showed `count=0`; GPU stages must remain queued/waiting for `gpu_type=RTX6000`.
