@@ -75,6 +75,7 @@ def test_converter_uses_lerobot_7d_contract() -> None:
     assert "default=0" in converter
     assert "--append-completion-frames 0" in _read("03_convert_full.pbs")
     assert "--state-gripper-mode previous-action" in _read("03_convert_full.pbs")
+    assert "--dedupe-decoded-signatures" in _read("03_convert_full.pbs")
     assert "--no-filter-small-actions" in _read("03_convert_full.pbs")
 
 

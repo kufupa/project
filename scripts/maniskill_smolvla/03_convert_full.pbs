@@ -30,6 +30,7 @@ log="$(msm_stage_log convert_full)"
     --min-episodes 16384 \
     --state-gripper-mode previous-action \
     --initial-gripper 1.0 \
+    --dedupe-decoded-signatures \
     --append-completion-frames 0 \
     --manifest "${MSM_RUN_ROOT}/manifests/convert_full.json" \
     --no-filter-small-actions \
