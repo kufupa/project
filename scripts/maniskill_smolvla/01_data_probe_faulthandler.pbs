@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#PBS -N msm_probe_fh
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=16:mem=128gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/probe_faulthandler.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_DATA_PYTHON}"
+
+export PYTHONFAULTHANDLER=1
+export PYTHONUNBUFFERED=1
+export MSM_PROBE_TRAJ="${MSM_PROBE_TRAJ:-1}"
+export MSM_PROBE_RECORD_DIR="${MSM_PROBE_RECORD_DIR:-${MSM_RAW_ROOT}/probe_faulthandler}"
+
+cd "${RL4VLA_ROOT}/ManiSkill"
+"${MSM_DATA_PYTHON}" -X faulthandler -m mani_skill.examples.motionplanning.widowx.collect_simpler \
+  -e "${MSM_ENV_ID}" \
+  --save_data \
+  --num_procs 1 \
+  --num_traj "${MSM_PROBE_TRAJ}" \
+  --record_dir "${MSM_PROBE_RECORD_DIR}" \
+  --seed 100 \
+  --sim_backend cpu \
+  --obs_mode rgb+segmentation \
+  --render_mode rgb_array \
+  --shader default
