@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument("--min-episodes", type=int, default=1)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--image-writer-threads", type=int, default=4)
-    parser.add_argument("--stop-after-success-count", type=int, default=6)
+    parser.add_argument("--stop-after-success-count", type=int, default=15)
     parser.add_argument("--filter-small-actions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
