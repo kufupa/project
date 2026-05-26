@@ -19,6 +19,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         "04_sft_smoke.pbs",
         "05_sft_train.pbs",
         "06_benchmark.pbs",
+        "07_autonomous_supervisor.pbs",
     ]
     for name in pbs_files:
         text = _read(name)
@@ -32,6 +33,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
     assert "#PBS -q v1_gpu72" in _read("04_sft_smoke.pbs")
     assert "#PBS -q v1_gpu72" in _read("05_sft_train.pbs")
     assert "#PBS -q v1_gpu72" in _read("06_benchmark.pbs")
+    assert "#PBS -q v1_small24" in _read("07_autonomous_supervisor.pbs")
 
 
 def test_common_keeps_large_artifacts_in_ephemeral() -> None:
@@ -131,6 +133,14 @@ def test_audit_full_runs_on_cpu_pbs() -> None:
     assert "ngpus" not in audit
     assert "audit_npz_contract.py" in audit
     assert "MSM_AUDIT_FULL_DONE" in audit
+
+
+def test_autonomous_supervisor_runs_under_cpu_pbs() -> None:
+    supervisor = _read("07_autonomous_supervisor.pbs")
+    assert "#PBS -q v1_small24" in supervisor
+    assert "ngpus" not in supervisor
+    assert "autopilot.sh" in supervisor
+    assert "MSM_AUTOPILOT_POLL_SECONDS" in supervisor
 
 
 def test_env_rebuilds_toppra_without_native_avx512() -> None:

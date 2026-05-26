@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#PBS -N msm_auto
+#PBS -q v1_small24
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_auto.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+export MSM_AUTOPILOT_POLL_SECONDS="${MSM_AUTOPILOT_POLL_SECONDS:-120}"
+
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+
+cd "${PROJECT_ROOT}"
+"${PROJECT_ROOT}/scripts/maniskill_smolvla/autopilot.sh"
