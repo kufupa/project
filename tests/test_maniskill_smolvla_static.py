@@ -65,8 +65,9 @@ def test_converter_uses_lerobot_7d_contract() -> None:
     assert '"shape": (7,)' in converter
     assert '"task": instruction' in converter
     assert "dataset.finalize()" in converter
-    assert "default=15" in converter
-    assert "--stop-after-success-count 15" in _read("03_convert_full.pbs")
+    assert "--append-completion-frames" in converter
+    assert "appended_completion_frames" in converter
+    assert "--append-completion-frames 15" in _read("03_convert_full.pbs")
 
 
 def test_sft_keeps_pretrained_padding_dims() -> None:
