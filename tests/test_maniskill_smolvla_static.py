@@ -165,3 +165,15 @@ def test_data_full_seed_is_configurable_and_manifested() -> None:
     assert 'MSM_FULL_SEED="${MSM_FULL_SEED:-100}"' in data_full
     assert '--seed "${MSM_FULL_SEED}"' in data_full
     assert '"seed=${MSM_FULL_SEED}"' in data_full
+
+
+def test_cleanup_requires_verified_replacement_before_delete() -> None:
+    cleanup = _read("cleanup_stale_artifacts.sh")
+    assert "cleanup blocked" in cleanup
+    assert "MSM_EPHEMERAL_ROOT" in cleanup
+    assert "audit_full.json" in cleanup
+    assert "convert_full.json" in cleanup
+    assert "sft_smoke.env" in cleanup
+    assert "sft_smoke_policy_contract.json" in cleanup
+    assert "cleanup confidence >=95%" in cleanup
+    assert "rm -rf --" in cleanup
