@@ -13,10 +13,32 @@ msm_prepare_runtime
 echo "[msm-env] data python primary: ${MSM_DATA_PYTHON}"
 msm_require_python "${MSM_DATA_PYTHON}"
 
+if [[ "${MSM_PIN_DATA_NUMPY:-1}" == "1" ]]; then
+  echo "[msm-env] pinning data NumPy below 2 for mplib 0.1.1"
+  "${MSM_DATA_PYTHON}" -m pip install --force-reinstall "numpy<2.0.0"
+fi
+
+if [[ "${MSM_REBUILD_TOPPRA_PORTABLE:-1}" == "1" ]]; then
+  echo "[msm-env] rebuilding toppra with portable x86-64 flags"
+  "${MSM_DATA_PYTHON}" -m pip install --upgrade Cython wheel setuptools
+  CFLAGS="${MSM_TOPPRA_CFLAGS:--O2 -fPIC -march=x86-64 -mtune=generic}" \
+  CXXFLAGS="${MSM_TOPPRA_CXXFLAGS:--O2 -fPIC -march=x86-64 -mtune=generic}" \
+    "${MSM_DATA_PYTHON}" -m pip install --force-reinstall --no-deps --no-cache-dir --no-build-isolation --no-binary=toppra "toppra==0.6.3"
+fi
+
 "${MSM_DATA_PYTHON}" - <<'PY'
+import numpy as np
+
+assert int(np.__version__.split(".", 1)[0]) < 2, (
+    f"mplib 0.1.1 segfaults in ArticulatedModel with NumPy 2.x; got {np.__version__}"
+)
+print(f"[msm-env] data NumPy OK: {np.__version__}")
+
 mods = [
     "gymnasium",
     "mani_skill",
+    "mplib",
+    "toppra.constraint.linear_joint_velocity",
     "tyro",
     "cv2",
     "torch",

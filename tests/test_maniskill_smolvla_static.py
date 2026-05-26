@@ -90,8 +90,20 @@ def test_autopilot_supports_host_retry_and_exit_status() -> None:
     autopilot = _read("autopilot.sh")
     assert "MSM_PBS_HOST" in autopilot
     assert "vnode=${host}" in autopilot
+    assert "vnode=${host}:gpu_type=RTX6000" in autopilot
     assert 'tolower($1) ~ /exit_status' in autopilot
     assert 'qsub -l "select=${select_spec}"' in autopilot
+
+
+def test_env_rebuilds_toppra_without_native_avx512() -> None:
+    build_envs = _read("build_envs.sh")
+    assert "MSM_REBUILD_TOPPRA_PORTABLE" in build_envs
+    assert "-march=x86-64 -mtune=generic" in build_envs
+    assert "--no-build-isolation --no-binary=toppra" in build_envs
+    assert "toppra.constraint.linear_joint_velocity" in build_envs
+    assert "MSM_PIN_DATA_NUMPY" in build_envs
+    assert "numpy<2.0.0" in build_envs
+    assert "mplib 0.1.1 segfaults" in build_envs
 
 
 def test_gitignore_covers_large_artifacts() -> None:
