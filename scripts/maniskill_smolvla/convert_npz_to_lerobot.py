@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -14,6 +15,23 @@ import numpy as np
 
 def load_episode(path: Path) -> dict[str, Any]:
     return np.load(path, allow_pickle=True)["arr_0"].tolist()
+
+
+def decoded_signature(episode: dict[str, Any]) -> str:
+    h = hashlib.sha256()
+    for key in ("action", "state"):
+        arr = np.asarray(episode[key], dtype=np.float32)
+        h.update(key.encode("utf-8"))
+        h.update(str(arr.shape).encode("utf-8"))
+        h.update(arr.tobytes())
+    images = episode["image"]
+    h.update(str(len(images)).encode("utf-8"))
+    for image in (images[0], images[-1]):
+        arr = np.asarray(image, dtype=np.uint8)
+        h.update(str(arr.shape).encode("utf-8"))
+        h.update(arr.tobytes())
+    h.update(str(episode.get("instruction", "")).encode("utf-8"))
+    return h.hexdigest()
 
 
 def filter_small_actions(
@@ -110,8 +128,16 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
     skipped_frames = 0
     appended_completion_frames = 0
     converted_episodes = 0
+    skipped_duplicate_episodes = 0
+    seen_signatures: set[str] = set()
     for path in files:
         episode = load_episode(path)
+        if args.dedupe_decoded_signatures:
+            signature = decoded_signature(episode)
+            if signature in seen_signatures:
+                skipped_duplicate_episodes += 1
+                continue
+            seen_signatures.add(signature)
         actions = np.asarray(episode["action"], dtype=np.float32)
         raw_states = np.asarray(episode["state"], dtype=np.float32)
         states = apply_state_gripper_mode(
@@ -173,6 +199,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         "repo_id": args.repo_id,
         "episodes_seen": len(files),
         "episodes_converted": converted_episodes,
+        "episodes_skipped_duplicate_decoded_signature": skipped_duplicate_episodes,
         "frames": kept_frames,
         "skipped_frames": skipped_frames,
         "appended_completion_frames": appended_completion_frames,
@@ -196,6 +223,7 @@ def main() -> None:
     parser.add_argument("--append-completion-frames", type=int, default=0)
     parser.add_argument("--state-gripper-mode", choices=("as-recorded", "previous-action"), default="previous-action")
     parser.add_argument("--initial-gripper", type=float, default=1.0)
+    parser.add_argument("--dedupe-decoded-signatures", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--filter-small-actions", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()

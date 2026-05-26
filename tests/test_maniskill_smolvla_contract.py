@@ -84,3 +84,19 @@ def test_previous_action_gripper_makes_state_causal() -> None:
     )
 
     assert fixed[:, 6].tolist() == [1.0, 1.0, -1.0, -1.0]
+
+
+def test_converter_signature_matches_audit_signature(tmp_path: Path) -> None:
+    audit = _load_module(
+        PROJECT / "scripts" / "maniskill_smolvla" / "audit_npz_contract.py",
+        "audit_npz_contract_for_converter",
+    )
+    converter = _load_module(
+        PROJECT / "scripts" / "maniskill_smolvla" / "convert_npz_to_lerobot.py",
+        "convert_npz_to_lerobot_for_signature",
+    )
+    path = tmp_path / "success_proc_0_numid_0_epsid_0.npz"
+    _write_episode(path, grip_sequence=[1, -1], image_value=7)
+    episode = audit.load_episode(path)
+
+    assert converter.decoded_signature(episode) == audit.decoded_signature(episode)
