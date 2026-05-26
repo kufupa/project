@@ -89,7 +89,7 @@ def test_benchmark_uses_maniskill_rollout() -> None:
 def test_autopilot_supports_host_retry_and_exit_status() -> None:
     autopilot = _read("autopilot.sh")
     assert "MSM_PBS_HOST" in autopilot
-    assert "host=${host}" in autopilot
+    assert "vnode=${host}" in autopilot
     assert 'tolower($1) ~ /exit_status' in autopilot
     assert 'qsub -l "select=${select_spec}"' in autopilot
 
