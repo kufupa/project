@@ -29,7 +29,7 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         assert "artifacts/smolvla_maniskill" in text
 
     assert "#PBS -q v1_gpu72" in _read("01_data_probe.pbs")
-    assert "#PBS -q v1_large72" in _read("02_data_full.pbs")
+    assert "#PBS -q v1_large24" in _read("02_data_full.pbs")
     assert "ngpus" not in _read("02_data_full.pbs")
     assert "#PBS -q v1_gpu72" in _read("04_sft_smoke.pbs")
     assert "#PBS -q v1_gpu72" in _read("05_sft_train.pbs")
