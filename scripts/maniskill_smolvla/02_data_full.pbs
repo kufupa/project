@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #PBS -N msm_data
-#PBS -q v1_large24
+#PBS -q v1_large24a
 #PBS -l select=1:ncpus=124:mem=256gb
 #PBS -l walltime=12:00:00
 #PBS -j oe
