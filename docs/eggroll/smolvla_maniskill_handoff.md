@@ -1001,9 +1001,15 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - `02_data_full.pbs` calls `purge_stale_record_dir.sh` on the CPU job before collection; deletes only `MSM_STALE_RECORD_DIR` (default `full`) when it differs from the new record dir. Logs `du -sh` + `elapsed_s` (~206GB observed on login node; budget 10-30 min on ephemeral FS).
 - Convert/audit default input record dir updated to `full_cpu124_v1`. Convert walltime raised to `24:00:00`.
 
+## 2026-05-28T Overnight autonomous (render_backend fix)
+
+- Prior `2869567` failed: `failed to find device cuda` on CPU node (default render_backend=gpu).
+- Fix: `collect_simpler` + `02_data_full.pbs` pass `--render_backend cpu`; `MSM_PURGE_STALE_RECORD_DIR=0` (legacy `full` already purged).
+- Re-submit chain after fix; monitor via `overnight_autonomous.sh` or `qstat`. GPU `Q`/placement-set = wait.
+
 ## 2026-05-28T Execute: CPU regen + 10k SFT chain
 
-- PBS chain submitted: `data=2869567` → `convert=2869569` → `smoke=2869570` → `train=2869571` → `eval=2869572` (all `afterok`).
+- PBS chain submitted: `data=2869567` → `convert=2869569` → `smoke=2869570` → `train=2869571` → `eval=2869572` (all `afterok`). **2869567 failed** (cuda render); superseded by requeue above.
 - Raw output: `${MSM_RAW_ROOT}/full_cpu124_v1/.../16400/data`. Legacy `${MSM_RAW_ROOT}/full` purged at start of `02_data_full.pbs` (~206GB; logs `elapsed_s`).
 - Convert input `full_cpu124_v1` → LeRobot `${MSM_LEROBOT_ROOT}/25main` (SFT/eval read this, not raw npz).
 - Main SFT: `MSM_SFT_STEPS=10000`, `MSM_SFT_SAVE_FREQ=1000`, walltime `16:00:00`, out `${MSM_CHECKPOINT_ROOT}/sft_main_<jobid>`.
