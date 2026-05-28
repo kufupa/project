@@ -1001,6 +1001,16 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - `02_data_full.pbs` calls `purge_stale_record_dir.sh` on the CPU job before collection; deletes only `MSM_STALE_RECORD_DIR` (default `full`) when it differs from the new record dir. Logs `du -sh` + `elapsed_s` (~206GB observed on login node; budget 10-30 min on ephemeral FS).
 - Convert/audit default input record dir updated to `full_cpu124_v1`. Convert walltime raised to `24:00:00`.
 
+## 2026-05-28T02:23Z Chain running (cuda sync fix)
+
+- Active: `data=2869637` **R** on `cx3-2-26` (`v1_large24a`).
+- Downstream: `convert=2869638` → `smoke=2869639` → `train=2869640` → `eval=2869641`.
+- RCA `2869610` fail: `sapien_env._get_obs_sensor_data` called `torch.cuda.synchronize()` on CPU node. Patched guard `if torch.cuda.is_available()`.
+
+## 2026-05-28T02:10Z Chain running (superseded)
+
+- `2869610` failed NVIDIA driver after render_backend fix; see above.
+
 ## 2026-05-28T Overnight autonomous (render_backend fix)
 
 - Prior `2869567` failed: `failed to find device cuda` on CPU node (default render_backend=gpu).
@@ -1015,6 +1025,20 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - Main SFT: `MSM_SFT_STEPS=10000`, `MSM_SFT_SAVE_FREQ=1000`, walltime `16:00:00`, out `${MSM_CHECKPOINT_ROOT}/sft_main_<jobid>`.
 - PBS venv: `common.sh` `msm_setup_modules` exports `LD_LIBRARY_PATH="${EBROOTPython}/lib:..."` before `lerobot_mw_py312` python.
 - GPU jobs may sit `Q` / "placement set too small" while queued — wait unless hard fail.
+
+## 2026-05-28T04:12Z Active chain (32-proc CPU large24a)
+
+| Stage | Job | State |
+|-------|-----|-------|
+| data | `2869684` | R `cx3-1-5` 32×CPU, `v1_large24a`, 12h wall |
+| convert | `2869685` | H afterok |
+| sft_smoke | `2869686` | H RTX6000 |
+| sft_train | `2869687` | H 10k/1k/16h |
+| eval | `2869688` | H |
+
+- Raw: `full_cpu124_v1` (legacy `full` purged earlier; do not re-purge).
+- Progress ~04:12Z: **947/16400** NPZ (~21–23/min); ETA ~11–12h total — tight vs 12h wall; contingency `02_data_full_fast.pbs` (64 procs, 16h) committed if walltime kills job.
+- Probe `2869679`: 8/8 NPZ on large24a validated CPU path (`render_backend cpu`, `sapien_env` cuda sync guard).
 
 ## 2026-05-26T23:58Z Queue/Action-Step Update
 
