@@ -186,6 +186,16 @@ def test_data_full_seed_is_configurable_and_manifested() -> None:
     assert '"seed=${MSM_FULL_SEED}"' in data_full
 
 
+def test_data_full_resume_uses_record_split_and_proc_offset() -> None:
+    resume = _read("02_data_full_resume.pbs")
+    assert 'MSM_RECORD_SPLIT="${MSM_RECORD_SPLIT:-16400}"' in resume
+    assert "--record-split" in resume
+    assert "--proc-id-offset" in resume
+    assert 'MSM_PROC_ID_OFFSET="${MSM_PROC_ID_OFFSET:-32}"' in resume
+    assert "MSM_RESUME_NUM_TRAJ" in resume
+    assert "${MSM_RECORD_SPLIT}/data" in resume
+
+
 def test_data_full_uses_large24a_record_dir_and_render_cpu() -> None:
     data_full = _read("02_data_full.pbs")
     convert = _read("03_convert_full.pbs")
@@ -195,6 +205,13 @@ def test_data_full_uses_large24a_record_dir_and_render_cpu() -> None:
     assert "--sim_backend cpu" in data_full
     assert "--render_backend cpu" in data_full
     assert "full_cpu124_v1" in convert
+    collect = (
+        PROJECT
+        / "RL4VLA/ManiSkill/mani_skill/examples/motionplanning/widowx/collect_simpler.py"
+    ).read_text(encoding="utf-8")
+    assert "record_split" in collect
+    assert "proc_id_offset" in collect
+    assert "record_split_name" in collect
 
 
 def test_cleanup_requires_verified_replacement_before_delete() -> None:
