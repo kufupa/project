@@ -1003,6 +1003,7 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 
 ## 2026-05-28T Execute: CPU regen + 10k SFT chain
 
+- PBS chain submitted: `data=2869567` → `convert=2869569` → `smoke=2869570` → `train=2869571` → `eval=2869572` (all `afterok`).
 - Raw output: `${MSM_RAW_ROOT}/full_cpu124_v1/.../16400/data`. Legacy `${MSM_RAW_ROOT}/full` purged at start of `02_data_full.pbs` (~206GB; logs `elapsed_s`).
 - Convert input `full_cpu124_v1` → LeRobot `${MSM_LEROBOT_ROOT}/25main` (SFT/eval read this, not raw npz).
 - Main SFT: `MSM_SFT_STEPS=10000`, `MSM_SFT_SAVE_FREQ=1000`, walltime `16:00:00`, out `${MSM_CHECKPOINT_ROOT}/sft_main_<jobid>`.
