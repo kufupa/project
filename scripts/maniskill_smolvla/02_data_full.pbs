@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #PBS -N msm_data
-#PBS -q v1_gpu72
-#PBS -l select=1:ncpus=16:mem=64gb:ngpus=1:gpu_type=RTX6000
-#PBS -l walltime=72:00:00
+#PBS -q v1_large72
+#PBS -l select=1:ncpus=124:mem=256gb
+#PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -o artifacts/smolvla_maniskill/msm_data.out
 
@@ -16,14 +16,24 @@ msm_prepare_runtime
 msm_require_python "${MSM_DATA_PYTHON}"
 
 export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
-export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-16}"
+export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-124}"
 export MSM_FULL_SEED="${MSM_FULL_SEED:-100}"
-export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
+export MSM_STALE_RECORD_DIR="${MSM_STALE_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_PURGE_STALE_RECORD_DIR="${MSM_PURGE_STALE_RECORD_DIR:-1}"
 export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data"
 
 log="$(msm_stage_log data_full)"
 (
   echo "[msm-data] env=${MSM_ENV_ID} traj=${MSM_FULL_TRAJ} procs=${MSM_FULL_NUM_PROCS}"
+  echo "[msm-data] record_dir=${MSM_FULL_RECORD_DIR} stale=${MSM_STALE_RECORD_DIR}"
+  if [[ "${MSM_PURGE_STALE_RECORD_DIR}" == "1" ]]; then
+    "${MSM_SCRIPT_ROOT}/purge_stale_record_dir.sh" \
+      --stale "${MSM_STALE_RECORD_DIR}" \
+      --new "${MSM_FULL_RECORD_DIR}"
+  else
+    echo "[msm-data] MSM_PURGE_STALE_RECORD_DIR=0 skip stale delete"
+  fi
   cd "${RL4VLA_ROOT}/ManiSkill"
   "${MSM_DATA_PYTHON}" -m mani_skill.examples.motionplanning.widowx.collect_simpler \
     -e "${MSM_ENV_ID}" \
@@ -43,6 +53,8 @@ log="$(msm_stage_log data_full)"
   msm_write_manifest \
     "${MSM_RUN_ROOT}/manifests/data_full.env" \
     "stage=data_full" \
+    "record_dir=${MSM_FULL_RECORD_DIR}" \
+    "stale_record_dir=${MSM_STALE_RECORD_DIR}" \
     "data_dir=${MSM_FULL_DATA_DIR}" \
     "num_traj=${MSM_FULL_TRAJ}" \
     "num_procs=${MSM_FULL_NUM_PROCS}" \

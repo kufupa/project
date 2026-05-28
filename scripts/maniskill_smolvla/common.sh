@@ -12,6 +12,9 @@ msm_setup_modules() {
   module load tools/prod
   module load Python/3.12.3-GCCcore-13.3.0
   module load Mesa/24.1.3-GCCcore-13.3.0
+  if [[ -n "${EBROOTPython:-}" && -d "${EBROOTPython}/lib" ]]; then
+    export LD_LIBRARY_PATH="${EBROOTPython}/lib:${LD_LIBRARY_PATH:-}"
+  fi
 }
 
 msm_resolve_paths() {
