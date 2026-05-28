@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #PBS -N msm_data
-#PBS -q v1_large24a
-#PBS -l select=1:ncpus=124:mem=256gb
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=32:mem=128gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=12:00:00
 #PBS -j oe
 #PBS -o artifacts/smolvla_maniskill/msm_data.out
@@ -16,7 +16,7 @@ msm_prepare_runtime
 msm_require_python "${MSM_DATA_PYTHON}"
 
 export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
-export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-124}"
+export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-32}"
 export MSM_FULL_SEED="${MSM_FULL_SEED:-100}"
 export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
 export MSM_STALE_RECORD_DIR="${MSM_STALE_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
