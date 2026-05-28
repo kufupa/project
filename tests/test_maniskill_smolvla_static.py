@@ -29,7 +29,8 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
         assert "artifacts/smolvla_maniskill" in text
 
     assert "#PBS -q v1_gpu72" in _read("01_data_probe.pbs")
-    assert "#PBS -q v1_gpu72" in _read("02_data_full.pbs")
+    assert "#PBS -q v1_large72" in _read("02_data_full.pbs")
+    assert "ngpus" not in _read("02_data_full.pbs")
     assert "#PBS -q v1_gpu72" in _read("04_sft_smoke.pbs")
     assert "#PBS -q v1_gpu72" in _read("05_sft_train.pbs")
     assert "#PBS -q v1_gpu72" in _read("06_benchmark.pbs")
@@ -182,6 +183,17 @@ def test_data_full_seed_is_configurable_and_manifested() -> None:
     assert 'MSM_FULL_SEED="${MSM_FULL_SEED:-100}"' in data_full
     assert '--seed "${MSM_FULL_SEED}"' in data_full
     assert '"seed=${MSM_FULL_SEED}"' in data_full
+
+
+def test_data_full_uses_cpu124_record_dir_and_render_cpu() -> None:
+    data_full = _read("02_data_full.pbs")
+    convert = _read("03_convert_full.pbs")
+    assert "ncpus=124" in data_full
+    assert "mem=256gb" in data_full
+    assert 'MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"' in data_full
+    assert "--sim_backend cpu" in data_full
+    assert "--render_backend cpu" in data_full
+    assert "full_cpu124_v1" in convert
 
 
 def test_cleanup_requires_verified_replacement_before_delete() -> None:

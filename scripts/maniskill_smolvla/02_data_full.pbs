@@ -20,7 +20,7 @@ export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-124}"
 export MSM_FULL_SEED="${MSM_FULL_SEED:-100}"
 export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
 export MSM_STALE_RECORD_DIR="${MSM_STALE_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
-export MSM_PURGE_STALE_RECORD_DIR="${MSM_PURGE_STALE_RECORD_DIR:-1}"
+export MSM_PURGE_STALE_RECORD_DIR="${MSM_PURGE_STALE_RECORD_DIR:-0}"
 export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data"
 
 log="$(msm_stage_log data_full)"
@@ -43,6 +43,7 @@ log="$(msm_stage_log data_full)"
     --record_dir "${MSM_FULL_RECORD_DIR}" \
     --seed "${MSM_FULL_SEED}" \
     --sim_backend cpu \
+    --render_backend cpu \
     --obs_mode rgb+segmentation \
     --render_mode rgb_array \
     --shader default
