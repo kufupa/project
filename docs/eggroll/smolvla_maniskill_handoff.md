@@ -1000,6 +1000,14 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 - `02_data_full.pbs` calls `purge_stale_record_dir.sh` on the CPU job before collection; deletes only `MSM_STALE_RECORD_DIR` (default `full`) when it differs from the new record dir. Logs `du -sh` + `elapsed_s` (~206GB observed on login node; budget 10-30 min on ephemeral FS).
 - Convert/audit default input record dir updated to `full_cpu124_v1`. Convert walltime raised to `24:00:00`.
 
+## 2026-05-28T Execute: CPU regen + 10k SFT chain
+
+- Raw output: `${MSM_RAW_ROOT}/full_cpu124_v1/.../16400/data`. Legacy `${MSM_RAW_ROOT}/full` purged at start of `02_data_full.pbs` (~206GB; logs `elapsed_s`).
+- Convert input `full_cpu124_v1` → LeRobot `${MSM_LEROBOT_ROOT}/25main` (SFT/eval read this, not raw npz).
+- Main SFT: `MSM_SFT_STEPS=10000`, `MSM_SFT_SAVE_FREQ=1000`, walltime `16:00:00`, out `${MSM_CHECKPOINT_ROOT}/sft_main_<jobid>`.
+- PBS venv: `common.sh` `msm_setup_modules` exports `LD_LIBRARY_PATH="${EBROOTPython}/lib:..."` before `lerobot_mw_py312` python.
+- GPU jobs may sit `Q` / "placement set too small" while queued — wait unless hard fail.
+
 ## 2026-05-26T23:58Z Queue/Action-Step Update
 
 - User approved queueing scarce-GPU stages together with PBS `afterok` dependencies.

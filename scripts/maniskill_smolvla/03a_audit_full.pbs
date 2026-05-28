@@ -16,7 +16,7 @@ msm_prepare_runtime
 msm_require_python "${MSM_DATA_PYTHON}"
 
 export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
-export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
 export MSM_FULL_DATA_DIR="${MSM_FULL_DATA_DIR:-${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data}"
 
 log="$(msm_stage_log audit_full)"

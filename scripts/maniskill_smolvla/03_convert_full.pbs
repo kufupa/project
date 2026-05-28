@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #PBS -N msm_convert
 #PBS -q v1_small24
-#PBS -l select=1:ncpus=16:mem=128gb
-#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=32:mem=192gb
+#PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -o artifacts/smolvla_maniskill/msm_convert.out
 
@@ -16,7 +16,7 @@ msm_prepare_runtime
 msm_require_python "${MSM_TRAIN_PYTHON}"
 
 export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
-export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
 export MSM_FULL_DATA_DIR="${MSM_FULL_DATA_DIR:-${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data}"
 export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
 
