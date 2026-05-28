@@ -36,6 +36,20 @@ def test_pbs_scripts_use_pbs_and_expected_queues() -> None:
     assert "#PBS -q v1_small24" in _read("07_autonomous_supervisor.pbs")
 
 
+def test_common_sets_ld_library_path_for_batch_venv() -> None:
+    common = _read("common.sh")
+    assert "EBROOTPython" in common
+    assert 'LD_LIBRARY_PATH="${EBROOTPython}/lib' in common
+
+
+def test_main_sft_uses_10k_steps_and_1k_checkpoints() -> None:
+    train = _read("05_sft_train.pbs")
+    assert 'MSM_SFT_STEPS="${MSM_SFT_STEPS:-10000}"' in train
+    assert 'MSM_SFT_SAVE_FREQ="${MSM_SFT_SAVE_FREQ:-1000}"' in train
+    assert "#PBS -l walltime=16:00:00" in train
+    assert "MSM_CHECKPOINT_ROOT" in _read("common.sh")
+
+
 def test_common_keeps_large_artifacts_in_ephemeral() -> None:
     common = _read("common.sh")
     assert "/rds/general/user/aa6622/ephemeral/eggroll/smolvla_maniskill" in common
