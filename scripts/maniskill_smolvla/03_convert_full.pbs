@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #PBS -N msm_convert
 #PBS -q v1_small24
-#PBS -l select=1:ncpus=32:mem=192gb
+#PBS -l select=1:ncpus=16:mem=128gb
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -o artifacts/smolvla_maniskill/msm_convert.out
