@@ -17,9 +17,11 @@ msm_require_python "${MSM_DATA_PYTHON}"
 
 export MSM_TARGET_SUCCESSES="${MSM_TARGET_SUCCESSES:-16400}"
 export MSM_MIN_EPISODES="${MSM_MIN_EPISODES:-16384}"
+export MSM_RECORD_SPLIT="${MSM_RECORD_SPLIT:-16400}"
 export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
-export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_TARGET_SUCCESSES}/data"
-export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-64}"
+export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_RECORD_SPLIT}/data"
+export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-32}"
+export MSM_PROC_ID_OFFSET="${MSM_PROC_ID_OFFSET:-32}"
 export MSM_FULL_SEED="${MSM_FULL_SEED:-200}"
 
 log="$(msm_stage_log data_full_resume)"
@@ -32,15 +34,17 @@ log="$(msm_stage_log data_full_resume)"
     echo "[msm-data-resume] skip collect; run inspect only"
   else
     deficit=$((MSM_TARGET_SUCCESSES - count))
-    slack=$((deficit / 10 + 64))
-    export MSM_FULL_NUM_TRAJ=$((deficit + slack))
-    echo "[msm-data-resume] collect num_traj=${MSM_FULL_NUM_TRAJ} procs=${MSM_FULL_NUM_PROCS} seed=${MSM_FULL_SEED}"
+    slack=$((deficit / 10 + MSM_FULL_NUM_PROCS))
+    export MSM_RESUME_NUM_TRAJ=$((deficit + slack))
+    echo "[msm-data-resume] collect num_traj=${MSM_RESUME_NUM_TRAJ} record_split=${MSM_RECORD_SPLIT} procs=${MSM_FULL_NUM_PROCS} offset=${MSM_PROC_ID_OFFSET} seed=${MSM_FULL_SEED}"
     cd "${RL4VLA_ROOT}/ManiSkill"
     "${MSM_DATA_PYTHON}" -m mani_skill.examples.motionplanning.widowx.collect_simpler \
       -e "${MSM_ENV_ID}" \
       --save_data \
       --num_procs "${MSM_FULL_NUM_PROCS}" \
-      --num_traj "${MSM_FULL_NUM_TRAJ}" \
+      --num_traj "${MSM_RESUME_NUM_TRAJ}" \
+      --record-split "${MSM_RECORD_SPLIT}" \
+      --proc-id-offset "${MSM_PROC_ID_OFFSET}" \
       --record_dir "${MSM_FULL_RECORD_DIR}" \
       --seed "${MSM_FULL_SEED}" \
       --sim_backend cpu \
@@ -60,7 +64,8 @@ log="$(msm_stage_log data_full_resume)"
     "stage=data_full_resume" \
     "data_dir=${MSM_FULL_DATA_DIR}" \
     "npz_count=${count_after}" \
-    "num_procs=${MSM_FULL_NUM_PROCS}" \
+    "record_split=${MSM_RECORD_SPLIT}" \
+    "proc_id_offset=${MSM_PROC_ID_OFFSET}" \
     "seed=${MSM_FULL_SEED}"
   echo "MSM_DATA_FULL_DONE data_dir=${MSM_FULL_DATA_DIR}"
 ) 2>&1 | tee "${log}"
