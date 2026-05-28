@@ -4,7 +4,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
 source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
 msm_prepare_runtime
 POLL="${MSM_OVERNIGHT_POLL_SECONDS:-1200}"
-JOBS="2869605.pbs-7 2869606.pbs-7 2869607.pbs-7 2869608.pbs-7 2869609.pbs-7"
+JOBS="2869684.pbs-7 2874835.pbs-7 2869685.pbs-7 2869686.pbs-7 2869687.pbs-7 2869688.pbs-7"
 DATA_DIR="${MSM_RAW_ROOT}/full_cpu124_v1/PutOnPlateInScene25Main-v3/16400/data"
 log() { echo "[msm-poll] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 while true; do
