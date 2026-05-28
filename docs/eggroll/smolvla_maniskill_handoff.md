@@ -1037,7 +1037,8 @@ Do not pin unless needed. Generic `gpu_type=RTX6000` now OK once `toppra` fixed.
 | eval | `2869688` | H |
 
 - Raw: `full_cpu124_v1` (legacy `full` purged earlier; do not re-purge).
-- Progress ~04:12Z: **947/16400** NPZ (~21–23/min); ETA ~11–12h total — tight vs 12h wall; contingency `02_data_full_fast.pbs` (64 procs, 16h) committed if walltime kills job.
+- Progress ~11:50Z: **~8400/16400** NPZ; **12h wall will not finish** — resume **`2874835`** (`afterany:2869684`; replaced buggy `2874278`). Resume uses `--record-split 16400`, `--proc-id-offset 32`, `num_traj=deficit` only. After resume OK + data exit≠0: `rechain_after_data_fail.sh 2869684.pbs-7 2874835.pbs-7 2869685.pbs-7 2869686.pbs-7 2869687.pbs-7 2869688.pbs-7`.
+- Contingency also: `02_data_full_fast.pbs` (standalone 64-proc regen).
 - Probe `2869679`: 8/8 NPZ on large24a validated CPU path (`render_backend cpu`, `sapien_env` cuda sync guard).
 
 ## 2026-05-26T23:58Z Queue/Action-Step Update
