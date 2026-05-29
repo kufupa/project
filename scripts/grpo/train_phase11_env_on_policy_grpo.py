@@ -409,7 +409,7 @@ def main() -> int:
         MetaWorldSmolVLAGRPOPolicy,
         freeze_all_but_grpo_trainables,
     )
-    from smolvla_grpo.reward_backends import EnvRewardBackend
+    from smolvla_grpo.reward_backends import make_phase11_reward_backend
     from smolvla_pipeline.evaluator import (
         _resolve_camera_name,
         _resolve_flip_corner2,
@@ -492,6 +492,24 @@ def main() -> int:
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--success-bonus", type=float, default=0.0)
     p.add_argument("--clip-penalty", type=float, default=0.0)
+    p.add_argument(
+        "--reward-mode",
+        choices=("dense_return", "sparse_success_delta"),
+        default="dense_return",
+        help="dense_return sums env step rewards; sparse_success_delta uses success (+rel delta).",
+    )
+    p.add_argument(
+        "--reward-coef",
+        type=float,
+        default=1.0,
+        help="Scale for sparse success reward (ignored for dense_return).",
+    )
+    p.add_argument(
+        "--use-rel-reward",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sparse only: reward = delta of success indicator across steps.",
+    )
     args = p.parse_args()
     if int(args.batch_size) < 1:
         raise SystemExit("--batch-size must be >= 1")
@@ -555,11 +573,15 @@ def main() -> int:
     old_policy = copy.deepcopy(bundle.policy).eval().to(device)
     bundle.policy.train()
 
-    reward_backend = EnvRewardBackend(
+    reward_backend = make_phase11_reward_backend(
+        reward_mode=args.reward_mode,
+        reward_coef=float(args.reward_coef),
+        use_rel_reward=bool(args.use_rel_reward),
         success_bonus=float(args.success_bonus),
         clip_penalty=float(args.clip_penalty),
     )
     end_u = start_u + int(args.num_updates)
+    zero_advantage_skips = 0
 
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -587,6 +609,9 @@ def main() -> int:
         "lr": args.lr,
         "success_bonus": float(args.success_bonus),
         "clip_penalty": float(args.clip_penalty),
+        "reward_mode": args.reward_mode,
+        "reward_coef": float(args.reward_coef),
+        "use_rel_reward": bool(args.use_rel_reward),
         "action_transform": args.action_transform,
         "run_label": args.run_label,
     }
@@ -712,12 +737,16 @@ def main() -> int:
             "action_clip_any_fraction": action_clip_any_fraction,
             "terminated": terminated_flags,
             "truncated": truncated_flags,
+            "reward_mode": args.reward_mode,
+            "reward_coef": float(args.reward_coef),
+            "use_rel_reward": bool(args.use_rel_reward),
         }
         if batch_size_i == 1:
             advantages = compute_group_advantages(returns)
         else:
             advantages = compute_seed_batch_advantages(returns, group_size=group_size_i)
         if torch.allclose(advantages, torch.zeros_like(advantages)):
+            zero_advantage_skips += 1
             update_seconds = float(time.perf_counter() - update_t0)
             proc_mem_after_optimize = _proc_mem_fields("after_optimize")
             skipped_extra = {
@@ -745,6 +774,7 @@ def main() -> int:
                     "update": update,
                     "skipped": True,
                     "reason": "zero_advantages",
+                    "zero_advantage_skips": zero_advantage_skips,
                     "reset_seed": reset_seed,
                     "returns": returns.detach().cpu().tolist(),
                     **skipped_extra,
@@ -901,6 +931,10 @@ def main() -> int:
             f"vmem_tree_mb={checkpoint_extra.get('proc_mem_after_optimize_tree_vmsize_kb', 0) / 1024.0:.1f}",
             flush=True,
         )
+
+    manifest["zero_advantage_skips"] = zero_advantage_skips
+    manifest["completed_updates"] = int(end_u - start_u)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(f"Done. Artifacts under {out}")
     return 0

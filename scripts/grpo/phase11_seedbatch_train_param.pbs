@@ -13,6 +13,10 @@ module load Python/3.12.3-GCCcore-13.3.0
 module load Mesa/24.1.3-GCCcore-13.3.0
 cd /rds/general/user/aa6622/home/project
 
+if [[ -n "${EBROOTPython:-}" && -d "${EBROOTPython}/lib" ]]; then
+  export LD_LIBRARY_PATH="${EBROOTPython}/lib:${LD_LIBRARY_PATH:-}"
+fi
+
 BASE_CKPT="${PHASE11_BASE_CKPT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
 PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
 RUN_DIR="${PHASE11_RUN_DIR:?set PHASE11_RUN_DIR}"
@@ -30,6 +34,9 @@ INIT_LOG_STD="${PHASE11_INIT_LOG_STD:--2.0}"
 EULER_NOISE="${PHASE11_EULER_NOISE:-0.2}"
 SUCCESS_BONUS="${PHASE11_SUCCESS_BONUS:-0.0}"
 CLIP_PENALTY="${PHASE11_CLIP_PENALTY:-0.0}"
+REWARD_MODE="${PHASE11_REWARD_MODE:-dense_return}"
+REWARD_COEF="${PHASE11_REWARD_COEF:-1.0}"
+USE_REL_REWARD="${PHASE11_USE_REL_REWARD:-1}"
 ROLLOUT_POLICY_BATCH_SIZE="${PHASE11_ROLLOUT_POLICY_BATCH_SIZE:-16}"
 LOGPROB_BATCH_SIZE="${PHASE11_LOGPROB_BATCH_SIZE:-16}"
 CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
@@ -95,6 +102,9 @@ run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" scripts/grpo/train_phase11_en
   --euler-step-noise-std "${EULER_NOISE}" \
   --success-bonus "${SUCCESS_BONUS}" \
   --clip-penalty "${CLIP_PENALTY}" \
+  --reward-mode "${REWARD_MODE}" \
+  --reward-coef "${REWARD_COEF}" \
+  $([[ "${USE_REL_REWARD}" == "1" ]] && echo --use-rel-reward || echo --no-rel-reward) \
   --logprob-recompute-mode batched \
   --logprob-batch-size "${LOGPROB_BATCH_SIZE}" \
   --rollout-policy-batch-size "${ROLLOUT_POLICY_BATCH_SIZE}" \
