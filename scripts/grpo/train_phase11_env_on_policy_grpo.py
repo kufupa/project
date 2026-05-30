@@ -319,12 +319,21 @@ def main() -> int:
                 t_len = len(traj.proc_snapshots)
                 for cs in range(0, t_len, args.chunk_size):
                     ce = min(cs + args.chunk_size, t_len)
-                    procs = traj.proc_snapshots[cs:ce]
                     u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(device)
+                    mean_stored = torch.stack([traj.distr_means[t] for t in range(cs, ce)]).to(device)
+                    log_std_stored = torch.stack([traj.distr_log_stds[t] for t in range(cs, ce)]).to(device)
                     old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, u_chunk).reshape(-1)
+                    if train_wrapper.action_transform == "tanh_norm_ablation":
+                        squished = torch.tanh(u_chunk)
+                        replay_lp = train_wrapper.calculate_log_prob(
+                            mean_stored, log_std_stored, u_chunk, squished, eps=train_wrapper.eps
+                        ).reshape(-1)
+                    else:
+                        replay_lp = train_wrapper.calculate_gaussian_log_prob(
+                            mean_stored, log_std_stored, u_chunk
+                        ).reshape(-1)
                     parity_old.append(old_lp.detach().cpu())
-                    parity_new.append(new_lp.detach().cpu())
+                    parity_new.append(replay_lp.detach().cpu())
         parity_stats = summarize_logprob_ratio_parity(
             torch.cat(parity_old) if parity_old else torch.zeros(0),
             torch.cat(parity_new) if parity_new else torch.zeros(0),
