@@ -29,6 +29,8 @@ class SampledStep:
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
+    distr_mean: torch.Tensor
+    distr_log_std: torch.Tensor
     action_clip_fraction: float = 0.0
     action_clip_any: bool = False
     postprocessor_oob_mean: float = 0.0
@@ -42,6 +44,8 @@ class SampledBatchStep:
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
+    distr_mean: torch.Tensor
+    distr_log_std: torch.Tensor
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
     postprocessor_oob_mean: np.ndarray
@@ -56,8 +60,30 @@ class SampledActionChunk:
     log_prob_sum: torch.Tensor
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
-    postprocessor_oob_mean: np.ndarray
     unique_action_rows: int
+
+
+def collate_proc_snapshots(proc_snapshots: Sequence[Any]) -> dict[str, Any]:
+    """Merge single-row preprocessor dicts into one batch for SmolVLA forward."""
+    if not proc_snapshots:
+        return {}
+    out: dict[str, Any] = {}
+    for key in proc_snapshots[0].keys():
+        vals = [proc[key] for proc in proc_snapshots]
+        v0 = vals[0]
+        if torch.is_tensor(v0):
+            out[key] = torch.cat(
+                [v if torch.is_tensor(v) else torch.as_tensor(v) for v in vals],
+                dim=0,
+            )
+        elif isinstance(v0, (list, tuple)):
+            merged: list[Any] = []
+            for v in vals:
+                merged.extend(list(v))
+            out[key] = merged
+        else:
+            out[key] = v0
+    return out
 
 
 class MetaWorldSmolVLAGRPOPolicy:
@@ -296,6 +322,8 @@ class MetaWorldSmolVLAGRPOPolicy:
             policy_tensor=policy_tensor.detach(),
             unsquashed=unsquashed.detach(),
             log_prob=log_prob.detach(),
+            distr_mean=mean.detach(),
+            distr_log_std=log_std.detach(),
             action_clip_fraction=clip_fraction,
             action_clip_any=clip_any,
             postprocessor_oob_mean=oob_mean,
@@ -320,6 +348,8 @@ class MetaWorldSmolVLAGRPOPolicy:
         policy_rows: list[torch.Tensor] = []
         unsq_rows: list[torch.Tensor] = []
         lp_rows: list[torch.Tensor] = []
+        mean_rows: list[torch.Tensor] = []
+        log_std_rows: list[torch.Tensor] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
         oob_rows: list[float] = []
@@ -350,6 +380,8 @@ class MetaWorldSmolVLAGRPOPolicy:
             policy_rows.append(policy_tensor.detach())
             unsq_rows.append(unsquashed.detach())
             lp_rows.append(log_prob.detach())
+            mean_rows.append(m.detach())
+            log_std_rows.append(ls.detach())
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
             oob_rows.append(oob_mean)
@@ -358,6 +390,8 @@ class MetaWorldSmolVLAGRPOPolicy:
             policy_tensor=torch.cat(policy_rows, dim=0),
             unsquashed=torch.cat(unsq_rows, dim=0),
             log_prob=torch.cat(lp_rows, dim=0).reshape(b),
+            distr_mean=torch.cat(mean_rows, dim=0),
+            distr_log_std=torch.cat(log_std_rows, dim=0),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
             postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
@@ -388,13 +422,11 @@ class MetaWorldSmolVLAGRPOPolicy:
         exec_rows: list[np.ndarray] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
-        oob_rows: list[float] = []
         for row in policy_tensor:
-            exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(row.reshape(1, -1))
+            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(row.reshape(1, -1))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
-            oob_rows.append(oob_mean)
 
         exec_action_np = np.stack(exec_rows, axis=0)
         return SampledActionChunk(
@@ -405,7 +437,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             log_prob_sum=log_prob_steps.detach().sum(),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
-            postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
             unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
         )
 
@@ -441,16 +472,11 @@ class MetaWorldSmolVLAGRPOPolicy:
         """Recompute log p(a|s) from stored preprocessor outputs (no env needed)."""
         if len(proc_snapshots) != int(unsquashed_actions.shape[0]):
             raise ValueError("proc_snapshots length must match unsquashed_actions batch dim")
-        means: list[torch.Tensor] = []
-        log_stds: list[torch.Tensor] = []
-        for proc_cpu in proc_snapshots:
-            self._reset_policy_forward_state()
-            proc = self._proc_to_device(proc_cpu)
-            mean, log_std = self._policy.select_action_distr_params(proc)
-            means.append(mean.reshape(1, -1))
-            log_stds.append(log_std.reshape(1, -1))
-        mean = torch.cat(means, dim=0)
-        log_std = torch.cat(log_stds, dim=0)
+        self._reset_policy_forward_state()
+        batched = self._proc_to_device(collate_proc_snapshots(proc_snapshots))
+        mean, log_std = self._policy.select_action_distr_params(batched)
+        mean = mean.reshape(len(proc_snapshots), -1)
+        log_std = log_std.reshape(len(proc_snapshots), -1)
         u = unsquashed_actions.to(mean.device)
         if u.shape != mean.shape:
             u = u.reshape(mean.shape)
@@ -464,7 +490,6 @@ class MetaWorldSmolVLAGRPOPolicy:
         proc: Any,
         unsquashed_chunk: torch.Tensor,
     ) -> torch.Tensor:
-        self._reset_policy_forward_state()
         proc_d = self._proc_to_device(proc)
         chunk_len = int(unsquashed_chunk.reshape(-1, self.action_dim).shape[0])
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=chunk_len)
