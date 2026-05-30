@@ -55,6 +55,7 @@ class RolloutTrajectory:
     log_probs: list[torch.Tensor] = field(default_factory=list)
     action_clip_fractions: list[float] = field(default_factory=list)
     action_clip_any: list[bool] = field(default_factory=list)
+    postprocessor_oob_means: list[float] = field(default_factory=list)
     terminated: bool = False
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -236,6 +237,7 @@ def collect_rollout_group(
             traj.log_probs.append(step.log_prob.cpu())
             traj.action_clip_fractions.append(float(step.action_clip_fraction))
             traj.action_clip_any.append(bool(step.action_clip_any))
+            traj.postprocessor_oob_means.append(float(step.postprocessor_oob_mean))
             if env_backend == "official_lerobot":
                 action_batch = step.exec_action_np.reshape(1, -1).astype(np.float32)
                 env_step = env_h.step(action_batch)

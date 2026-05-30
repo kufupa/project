@@ -35,6 +35,74 @@ class RatioStats:
     n: int
 
 
+@dataclass
+class LogprobRatioParityStats:
+    """Old vs recomputed logprob under identical weights and stored actions."""
+
+    n: int
+    mean_ratio: float
+    std_ratio: float
+    min_ratio: float
+    max_ratio: float
+    max_abs_log_ratio: float
+    within_tolerance: bool
+
+    def as_dict(self) -> dict[str, float | int | bool]:
+        return {
+            "n": self.n,
+            "mean_ratio": self.mean_ratio,
+            "std_ratio": self.std_ratio,
+            "min_ratio": self.min_ratio,
+            "max_ratio": self.max_ratio,
+            "max_abs_log_ratio": self.max_abs_log_ratio,
+            "within_tolerance": self.within_tolerance,
+        }
+
+
+def summarize_logprob_ratio_parity(
+    old_log_probs: torch.Tensor,
+    new_log_probs: torch.Tensor,
+    *,
+    tolerance: float = 0.02,
+) -> LogprobRatioParityStats:
+    """Check exp(new-old) ~ 1 for identical weights and stored policy-space actions."""
+    olp = old_log_probs.reshape(-1).float()
+    nlp = new_log_probs.reshape(-1).float()
+    if olp.shape != nlp.shape:
+        raise ValueError(f"logprob shape mismatch: old={tuple(olp.shape)} new={tuple(nlp.shape)}")
+    n = int(olp.numel())
+    if n == 0:
+        return LogprobRatioParityStats(
+            n=0,
+            mean_ratio=1.0,
+            std_ratio=0.0,
+            min_ratio=1.0,
+            max_ratio=1.0,
+            max_abs_log_ratio=0.0,
+            within_tolerance=True,
+        )
+    log_ratio = (nlp - olp).detach()
+    ratio = torch.exp(log_ratio)
+    mean_ratio = float(ratio.mean().item())
+    std_ratio = float(ratio.std(unbiased=n > 1).item()) if n > 1 else 0.0
+    min_ratio = float(ratio.min().item())
+    max_ratio = float(ratio.max().item())
+    max_abs_log_ratio = float(log_ratio.abs().max().item())
+    within = (
+        abs(mean_ratio - 1.0) <= tolerance
+        and max_abs_log_ratio <= max(tolerance, 1e-6)
+    )
+    return LogprobRatioParityStats(
+        n=n,
+        mean_ratio=mean_ratio,
+        std_ratio=std_ratio,
+        min_ratio=min_ratio,
+        max_ratio=max_ratio,
+        max_abs_log_ratio=max_abs_log_ratio,
+        within_tolerance=within,
+    )
+
+
 def summarize_ratio_stats(
     ratio: torch.Tensor, *, epsilon: float
 ) -> RatioStats:
