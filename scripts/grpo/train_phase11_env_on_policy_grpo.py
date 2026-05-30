@@ -27,7 +27,7 @@ def main() -> int:
     from torch import nn
 
     from smolvla_grpo.checkpointing import load_grpo_checkpoint, save_grpo_checkpoint
-    from smolvla_grpo.grpo_math import compute_group_advantages
+    from smolvla_grpo.grpo_math import compute_group_advantages, summarize_logprob_ratio_parity
     from smolvla_grpo.phase11_rollout import collect_rollout_group, load_bundle_for_grpo
     from smolvla_grpo.policy_wrapper import (
         MetaWorldSmolVLAGRPOPolicy,
@@ -70,7 +70,12 @@ def main() -> int:
     p.add_argument("--clip-eps", type=float, default=0.2)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--init-log-std", type=float, default=-2.0)
-    p.add_argument("--euler-step-noise-std", type=float, default=0.2)
+    p.add_argument(
+        "--euler-step-noise-std",
+        type=float,
+        default=0.0,
+        help="Must be 0 for Gaussian logprob parity unless --allow-euler-noise",
+    )
     p.add_argument(
         "--action-transform",
         choices=("no_tanh", "tanh_norm_ablation"),
@@ -79,10 +84,26 @@ def main() -> int:
     )
     p.add_argument("--run-label", type=str, default="no_tanh_main")
     p.add_argument("--save-every", type=int, default=5)
+    p.add_argument("--parity-tolerance", type=float, default=0.02)
+    p.add_argument(
+        "--allow-euler-noise",
+        action="store_true",
+        help="Allow nonzero euler_step_noise_std (denoise noise not in Gaussian logprob)",
+    )
+    p.add_argument(
+        "--fail-on-parity-violation",
+        action="store_true",
+        help="Exit non-zero if pre-update logprob ratio parity fails",
+    )
     p.add_argument("--grad-clip", type=float, default=1.0)
     args = p.parse_args()
     if args.batch_size != 1:
         raise SystemExit("Only batch_size=1 supported (one seed context per update).")
+    if float(args.euler_step_noise_std) > 0.0 and not args.allow_euler_noise:
+        raise SystemExit(
+            "euler_step_noise_std must be 0 for corrected Gaussian GRPO "
+            "(add --allow-euler-noise only for ablations)"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out = args.output_dir.expanduser().resolve()
@@ -148,6 +169,8 @@ def main() -> int:
         "lr": args.lr,
         "action_transform": args.action_transform,
         "run_label": args.run_label,
+        "euler_step_noise_std": float(args.euler_step_noise_std),
+        "parity_tolerance": float(args.parity_tolerance),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -186,10 +209,12 @@ def main() -> int:
         truncated_flags = [bool(tr.truncated) for tr in rollouts]
         clip_values = [float(v) for tr in rollouts for v in tr.action_clip_fractions]
         clip_any_values = [bool(v) for tr in rollouts for v in tr.action_clip_any]
+        oob_values = [float(v) for tr in rollouts for v in tr.postprocessor_oob_means]
         action_clip_fraction = float(sum(clip_values) / max(len(clip_values), 1))
         action_clip_any_fraction = float(
             sum(1 for v in clip_any_values if v) / max(len(clip_any_values), 1)
         )
+        postprocessor_oob_mean = float(sum(oob_values) / max(len(oob_values), 1)) if oob_values else 0.0
         resolved_max_steps = int(args.max_steps)
         if rollouts:
             resolved_max_steps = int(
@@ -286,6 +311,35 @@ def main() -> int:
             )
             continue
 
+        bundle.policy.eval()
+        parity_old: list[torch.Tensor] = []
+        parity_new: list[torch.Tensor] = []
+        with torch.no_grad():
+            for traj in rollouts:
+                t_len = len(traj.proc_snapshots)
+                for cs in range(0, t_len, args.chunk_size):
+                    ce = min(cs + args.chunk_size, t_len)
+                    procs = traj.proc_snapshots[cs:ce]
+                    u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(device)
+                    old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
+                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, u_chunk).reshape(-1)
+                    parity_old.append(old_lp.detach().cpu())
+                    parity_new.append(new_lp.detach().cpu())
+        parity_stats = summarize_logprob_ratio_parity(
+            torch.cat(parity_old) if parity_old else torch.zeros(0),
+            torch.cat(parity_new) if parity_new else torch.zeros(0),
+            tolerance=float(args.parity_tolerance),
+        )
+        if not parity_stats.within_tolerance:
+            msg = (
+                f"GRPO logprob parity failed update={update}: "
+                f"mean_ratio={parity_stats.mean_ratio:.6f} "
+                f"max_abs_log_ratio={parity_stats.max_abs_log_ratio:.6f}"
+            )
+            print(msg, flush=True)
+            if args.fail_on_parity_violation:
+                raise RuntimeError(msg)
+
         bundle.policy.train()
         optimize_t0 = time.perf_counter()
         for _epoch in range(args.update_epochs):
@@ -337,6 +391,8 @@ def main() -> int:
                 "num_env_steps": num_env_steps,
                 "action_clip_fraction": action_clip_fraction,
                 "action_clip_any_fraction": action_clip_any_fraction,
+                "postprocessor_oob_mean": postprocessor_oob_mean,
+                "parity": parity_stats.as_dict(),
                 "rollout_seconds": rollout_seconds,
                 "optimize_seconds": optimize_seconds,
                 "update_seconds": update_seconds,
@@ -399,6 +455,8 @@ def main() -> int:
             f"env_steps={num_env_steps}",
             f"clip_frac={action_clip_fraction:.4f}",
             f"clip_any_frac={action_clip_any_fraction:.4f}",
+            f"oob_mean={postprocessor_oob_mean:.4f}",
+            f"parity_mean_ratio={parity_stats.mean_ratio:.4f}",
             f"rollout_s={rollout_seconds:.2f}",
             f"opt_s={optimize_seconds:.2f}",
             f"update_s={update_seconds:.2f}",

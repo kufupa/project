@@ -138,6 +138,7 @@ def collect_official_lerobot_vector_rollout_group(
                 rollouts[i].log_probs.append(batch.log_prob[i].detach().cpu())
                 rollouts[i].action_clip_fractions.append(float(batch.action_clip_fraction[i]))
                 rollouts[i].action_clip_any.append(bool(batch.action_clip_any[i]))
+                rollouts[i].postprocessor_oob_means.append(float(batch.postprocessor_oob_mean[i]))
                 rollouts[i].rewards.append(float(env_batch.reward[i]))
                 rollouts[i].successes.append(bool(env_batch.success[i]))
 

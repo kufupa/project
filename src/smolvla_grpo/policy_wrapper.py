@@ -31,6 +31,7 @@ class SampledStep:
     log_prob: torch.Tensor
     action_clip_fraction: float = 0.0
     action_clip_any: bool = False
+    postprocessor_oob_mean: float = 0.0
 
 
 @dataclass
@@ -43,6 +44,7 @@ class SampledBatchStep:
     log_prob: torch.Tensor
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
+    postprocessor_oob_mean: np.ndarray
 
 
 @dataclass
@@ -54,6 +56,7 @@ class SampledActionChunk:
     log_prob_sum: torch.Tensor
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
+    postprocessor_oob_mean: np.ndarray
     unique_action_rows: int
 
 
@@ -151,7 +154,24 @@ class MetaWorldSmolVLAGRPOPolicy:
         var = std * std
         return -0.5 * (((sample - mean) ** 2) / var + 2 * log_std + math.log(2 * math.pi)).sum(dim=-1)
 
-    def _postprocess_and_clip(self, policy_tensor: torch.Tensor) -> tuple[np.ndarray, float, bool]:
+    @staticmethod
+    def postprocessor_oob_excess(
+        raw_np: np.ndarray,
+        *,
+        action_low: np.ndarray,
+        action_high: np.ndarray,
+    ) -> np.ndarray:
+        """Per-dim positive excess beyond env bounds (before clip)."""
+        low = np.asarray(action_low, dtype=np.float32).reshape(-1)
+        high = np.asarray(action_high, dtype=np.float32).reshape(-1)
+        raw = np.asarray(raw_np, dtype=np.float32).reshape(-1)
+        below = np.maximum(low - raw, 0.0)
+        above = np.maximum(raw - high, 0.0)
+        return below + above
+
+    def _postprocess_and_clip(
+        self, policy_tensor: torch.Tensor
+    ) -> tuple[np.ndarray, float, bool, float]:
         out = self.bundle.postprocessor(policy_tensor)
         if hasattr(out, "detach"):
             raw_np = out.detach().float().cpu().numpy().reshape(-1)
@@ -162,9 +182,12 @@ class MetaWorldSmolVLAGRPOPolicy:
                 f"Policy action dim mismatch: expected {self.action_dim}, got {raw_np.size}. "
                 "Refusing silent pad/truncate."
             )
+        oob_mean = float(
+            np.mean(self.postprocessor_oob_excess(raw_np, action_low=self.action_low, action_high=self.action_high))
+        )
         clipped = np.clip(raw_np, self.action_low, self.action_high).astype(np.float32, copy=False)
         changed = np.not_equal(clipped, raw_np)
-        return clipped, float(np.mean(changed)), bool(np.any(changed))
+        return clipped, float(np.mean(changed)), bool(np.any(changed)), oob_mean
 
     def _get_distr_params_chunk(
         self,
@@ -267,7 +290,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         else:
             policy_tensor = unsquashed
             log_prob = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
-        exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
+        exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
         return SampledStep(
             exec_action_np=exec_np,
             policy_tensor=policy_tensor.detach(),
@@ -275,6 +298,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             log_prob=log_prob.detach(),
             action_clip_fraction=clip_fraction,
             action_clip_any=clip_any,
+            postprocessor_oob_mean=oob_mean,
         )
 
     def sample_action_batch_from_proc(
@@ -298,6 +322,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         lp_rows: list[torch.Tensor] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
+        oob_rows: list[float] = []
         if rngs is not None and len(rngs) != b:
             raise ValueError(f"rngs length {len(rngs)} != n_envs {b}")
         if rngs is None and reset_seed is None:
@@ -320,13 +345,14 @@ class MetaWorldSmolVLAGRPOPolicy:
             else:
                 policy_tensor = unsquashed
                 log_prob = self.calculate_gaussian_log_prob(m, ls, unsquashed)
-            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(policy_tensor)
+            exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             policy_rows.append(policy_tensor.detach())
             unsq_rows.append(unsquashed.detach())
             lp_rows.append(log_prob.detach())
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
+            oob_rows.append(oob_mean)
         return SampledBatchStep(
             exec_action_np=np.stack(exec_rows, axis=0),
             policy_tensor=torch.cat(policy_rows, dim=0),
@@ -334,6 +360,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             log_prob=torch.cat(lp_rows, dim=0).reshape(b),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+            postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
         )
 
     def sample_action_chunk_from_proc(
@@ -361,11 +388,13 @@ class MetaWorldSmolVLAGRPOPolicy:
         exec_rows: list[np.ndarray] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
+        oob_rows: list[float] = []
         for row in policy_tensor:
-            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(row.reshape(1, -1))
+            exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(row.reshape(1, -1))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
+            oob_rows.append(oob_mean)
 
         exec_action_np = np.stack(exec_rows, axis=0)
         return SampledActionChunk(
@@ -376,6 +405,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             log_prob_sum=log_prob_steps.detach().sum(),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+            postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
             unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
         )
 
@@ -398,6 +428,11 @@ class MetaWorldSmolVLAGRPOPolicy:
                 out[k] = v
         return out
 
+    def _reset_policy_forward_state(self) -> None:
+        policy_reset = getattr(self._policy, "reset", None)
+        if callable(policy_reset):
+            policy_reset()
+
     def get_action_probs_from_proc_list(
         self,
         proc_snapshots: Sequence[Any],
@@ -409,6 +444,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         means: list[torch.Tensor] = []
         log_stds: list[torch.Tensor] = []
         for proc_cpu in proc_snapshots:
+            self._reset_policy_forward_state()
             proc = self._proc_to_device(proc_cpu)
             mean, log_std = self._policy.select_action_distr_params(proc)
             means.append(mean.reshape(1, -1))
@@ -428,6 +464,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         proc: Any,
         unsquashed_chunk: torch.Tensor,
     ) -> torch.Tensor:
+        self._reset_policy_forward_state()
         proc_d = self._proc_to_device(proc)
         chunk_len = int(unsquashed_chunk.reshape(-1, self.action_dim).shape[0])
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=chunk_len)
