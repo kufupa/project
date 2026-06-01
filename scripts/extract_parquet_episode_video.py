@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import io
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,10 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 from PIL import Image
+
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO / "src"))
 
 
 @dataclass(frozen=True)
@@ -178,10 +183,12 @@ def resolve_source_episode_from_first_frame(
 
     import torch
 
+    from smolvla_grpo.checkpointing import torch_load_mmap_default
+
     target_hash = _frame_array_hash(_png_bytes_to_rgb_array(first_png_bytes))
     for episode_path in sorted(root.glob("episode_*.pt")):
         try:
-            payload = torch.load(episode_path, map_location="cpu", weights_only=False)
+            payload = torch_load_mmap_default(episode_path, map_location="cpu", weights_only=False)
         except Exception:
             continue
         if not isinstance(payload, dict):
