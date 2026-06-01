@@ -661,9 +661,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
             full_trace = self._slice_flow_sde_trace(self._get_last_flow_sde_trace())
             full_trace["flow_sde_noise_level"] = self.flow_sde_noise_level
-            for key in ("A_tau", "v_tau", "mu_tau", "sigma_tau", "A_next"):
-                if torch.is_tensor(full_trace.get(key)):
-                    full_trace[key] = full_trace[key][:, : int(chunk_len), :].detach()
             log_prob_steps = self._flow_sde_log_prob_steps_from_trace(
                 full_trace,
                 chunk_len=int(chunk_len),

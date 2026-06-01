@@ -52,16 +52,18 @@ class _TracePolicy(_DummyPolicy):
         self.model = self
         self.config = type("Config", (), {"n_action_steps": 1, "num_steps": 10})()
         self.last_flow_sde_trace = None
+        self.trace_len = 3
 
     def _export_trace(self, b: int, *, kwargs) -> torch.Tensor:
         assert kwargs["flow_sde_trace"] is True
-        mu = torch.zeros(b, 3, 8)
-        sigma = torch.full((b, 3, 8), 0.5)
-        a_next = torch.full((b, 3, 8), 0.25)
+        h = int(self.trace_len)
+        mu = torch.zeros(b, h, 8)
+        sigma = torch.full((b, h, 8), 0.5)
+        a_next = torch.full((b, h, 8), 0.25)
         self.last_flow_sde_trace = {
             "tau_idx": torch.zeros(b, dtype=torch.long),
-            "A_tau": torch.zeros(b, 3, 8),
-            "v_tau": torch.ones(b, 3, 8),
+            "A_tau": torch.zeros(b, h, 8),
+            "v_tau": torch.ones(b, h, 8),
             "mu_tau": mu,
             "sigma_tau": sigma,
             "A_next": a_next,
@@ -310,6 +312,36 @@ def test_flow_sde_chunk_recompute_uses_stored_trace() -> None:
     torch.testing.assert_close(recomputed.reshape(3), chunk.log_prob_steps)
     torch.testing.assert_close(mu.reshape(3, 4), chunk.distr_mean)
     torch.testing.assert_close(log_std.reshape(3, 4), chunk.distr_log_std)
+
+
+def test_flow_sde_chunk_preserves_full_trace_for_replay() -> None:
+    bundle = _DummyBundle()
+    policy = _TracePolicy()
+    policy.trace_len = 6
+    policy.config = type("Config", (), {"n_action_steps": 5, "num_steps": 10})()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+
+    chunk = wrapper.sample_action_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk_len=3,
+        rng=torch.Generator().manual_seed(123),
+    )
+
+    assert chunk.flow_sde_trace is not None
+    assert chunk.flow_sde_trace["A_tau"].shape == (1, 6, 8)
+    assert chunk.log_prob_steps.shape == (3,)
 
 
 def test_trainer_rejects_nonzero_euler_without_flag() -> None:
