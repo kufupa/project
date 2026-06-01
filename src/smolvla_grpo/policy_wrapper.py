@@ -106,6 +106,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         action_low: np.ndarray | None = None,
         action_high: np.ndarray | None = None,
         min_log_std: float = -4.0,
+        gaussian_logprob_action: str = "executed",
     ) -> None:
         self.bundle = bundle
         self.min_log_std = float(min_log_std)
@@ -118,7 +119,10 @@ class MetaWorldSmolVLAGRPOPolicy:
         self._agent_dim, self._env_dim = _smolvla_state_dims(self._policy)
         if action_transform not in ("no_tanh", "tanh_norm_ablation"):
             raise ValueError("action_transform must be 'no_tanh' or 'tanh_norm_ablation'")
+        if gaussian_logprob_action not in ("executed", "unsquashed"):
+            raise ValueError("gaussian_logprob_action must be 'executed' or 'unsquashed'")
         self.action_transform = action_transform
+        self.gaussian_logprob_action = gaussian_logprob_action
         self.action_low = (
             np.asarray(action_low, dtype=np.float32).reshape(self.action_dim)
             if action_low is not None
@@ -184,6 +188,16 @@ class MetaWorldSmolVLAGRPOPolicy:
             device=ref.device, dtype=ref.dtype
         )
         return t.reshape(ref.shape)
+
+    def _gaussian_scored_action(
+        self,
+        *,
+        unsquashed: torch.Tensor,
+        executed: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.gaussian_logprob_action == "unsquashed":
+            return unsquashed
+        return executed
 
     @staticmethod
     def calculate_gaussian_log_prob(
@@ -334,13 +348,15 @@ class MetaWorldSmolVLAGRPOPolicy:
         exec_t = self._executed_tensor_from_np(exec_np, ref=mean)
         if self.action_transform == "tanh_norm_ablation":
             log_prob = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+            logprob_action = unsquashed
         else:
-            log_prob = self.calculate_gaussian_log_prob(mean, log_std, exec_t)
+            logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
+            log_prob = self.calculate_gaussian_log_prob(mean, log_std, logprob_action)
         return SampledStep(
             exec_action_np=exec_np,
             policy_tensor=policy_tensor.detach(),
             unsquashed=unsquashed.detach(),
-            logprob_action=exec_t.detach(),
+            logprob_action=logprob_action.detach(),
             log_prob=log_prob.detach(),
             distr_mean=mean.detach(),
             distr_log_std=log_std.detach(),
@@ -399,13 +415,15 @@ class MetaWorldSmolVLAGRPOPolicy:
             exec_t = self._executed_tensor_from_np(exec_np, ref=m)
             if self.action_transform == "tanh_norm_ablation":
                 log_prob = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+                logprob_action = unsquashed
             else:
-                log_prob = self.calculate_gaussian_log_prob(m, ls, exec_t)
+                logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
+                log_prob = self.calculate_gaussian_log_prob(m, ls, logprob_action)
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             policy_rows.append(policy_tensor.detach())
             unsq_rows.append(unsquashed.detach())
             lp_rows.append(log_prob.detach())
-            scored_rows.append(exec_t.detach())
+            scored_rows.append(logprob_action.detach())
             mean_rows.append(m.detach())
             log_std_rows.append(ls.detach())
             clip_frac_rows.append(clip_fraction)
@@ -496,7 +514,19 @@ class MetaWorldSmolVLAGRPOPolicy:
         proc_snapshots: Sequence[Any],
         scored_actions: torch.Tensor,
     ) -> torch.Tensor:
-        """Recompute log p(a|s) for executed (env-seen) actions from proc snapshots."""
+        """Recompute log p(a|s) for the configured Gaussian-scored action."""
+        log_probs, _mean, _log_std = self.get_action_log_probs_and_params_from_proc_list(
+            proc_snapshots,
+            scored_actions,
+        )
+        return log_probs
+
+    def get_action_log_probs_and_params_from_proc_list(
+        self,
+        proc_snapshots: Sequence[Any],
+        scored_actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Recompute log p(a|s) and return live distribution params for diagnostics."""
         if len(proc_snapshots) != int(scored_actions.shape[0]):
             raise ValueError("proc_snapshots length must match scored_actions batch dim")
         self._reset_policy_forward_state()
@@ -510,8 +540,10 @@ class MetaWorldSmolVLAGRPOPolicy:
             u = u.reshape(mean.shape)
         if self.action_transform == "tanh_norm_ablation":
             squished = torch.tanh(u)
-            return self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
-        return self.calculate_gaussian_log_prob(mean, log_std, u)
+            log_probs = self.calculate_log_prob(mean, log_std, u, squished, eps=self.eps)
+        else:
+            log_probs = self.calculate_gaussian_log_prob(mean, log_std, u)
+        return log_probs, mean, log_std
 
     def get_action_probs_for_chunk_from_proc(
         self,

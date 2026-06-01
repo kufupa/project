@@ -18,6 +18,89 @@ def kl_to_reference(current_log_probs: torch.Tensor, reference_log_probs: torch.
     return (reference_log_probs.reshape(-1) - current_log_probs.reshape(-1)).float()
 
 
+def apply_grpo_regularizers(
+    base_loss: torch.Tensor,
+    *,
+    current_log_probs: torch.Tensor,
+    reference_log_probs: torch.Tensor,
+    log_std: torch.Tensor,
+    kl_beta: float,
+    entropy_coef: float,
+) -> torch.Tensor:
+    """Add measured KL penalty and entropy bonus to an already-scaled GRPO loss."""
+    loss = base_loss
+    if float(kl_beta) != 0.0:
+        kl = kl_to_reference(current_log_probs, reference_log_probs).mean()
+        loss = loss + float(kl_beta) * kl
+    if float(entropy_coef) != 0.0:
+        entropy = gaussian_entropy(log_std.reshape(-1, log_std.shape[-1])).mean()
+        loss = loss - float(entropy_coef) * entropy
+    return loss
+
+
+def update_metrics(
+    *,
+    new_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    log_std: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    epsilon: float,
+) -> dict[str, float | bool | int]:
+    """Phase-A per-update diagnostics for GRPO collapse triage."""
+    nlp = new_log_probs.detach().reshape(-1).float()
+    olp = old_log_probs.detach().reshape(-1).float()
+    if nlp.shape != olp.shape:
+        raise ValueError(f"logprob shape mismatch: old={tuple(olp.shape)} new={tuple(nlp.shape)}")
+
+    if nlp.numel() == 0:
+        ratio = torch.ones(0, dtype=torch.float32, device=nlp.device)
+        approx_kl = 0.0
+        ratio_min = ratio_max = ratio_mean = 1.0
+        ratio_clip_fraction = 0.0
+    else:
+        log_ratio = nlp - olp
+        ratio = torch.exp(log_ratio)
+        approx_kl = float((olp - nlp).mean().item())
+        ratio_min = float(ratio.min().item())
+        ratio_max = float(ratio.max().item())
+        ratio_mean = float(ratio.mean().item())
+        low = 1.0 - float(epsilon)
+        high = 1.0 + float(epsilon)
+        ratio_clip_fraction = float(((ratio < low) | (ratio > high)).float().mean().item())
+
+    ls = log_std.detach().reshape(-1).float()
+    if ls.numel() == 0:
+        log_std_mean = log_std_min = log_std_max = 0.0
+    else:
+        log_std_mean = float(ls.mean().item())
+        log_std_min = float(ls.min().item())
+        log_std_max = float(ls.max().item())
+
+    ret = returns.detach().reshape(-1).float()
+    if ret.numel() <= 1:
+        group_return_std = 0.0
+    else:
+        group_return_std = float(torch.nan_to_num(ret.std(unbiased=True), nan=0.0).item())
+
+    adv = advantages.detach().reshape(-1).float()
+    zero_adv_skip = bool(adv.numel() > 0 and torch.allclose(adv, torch.zeros_like(adv)))
+
+    return {
+        "approx_kl": approx_kl,
+        "ratio_mean": ratio_mean,
+        "ratio_min": ratio_min,
+        "ratio_max": ratio_max,
+        "ratio_clip_fraction": ratio_clip_fraction,
+        "log_std_mean": log_std_mean,
+        "log_std_min": log_std_min,
+        "log_std_max": log_std_max,
+        "group_return_std": group_return_std,
+        "zero_adv_skip": zero_adv_skip,
+        "n_logprob": int(nlp.numel()),
+    }
+
+
 def compute_group_advantages(returns: torch.Tensor, *, eps: float = 1e-8) -> torch.Tensor:
     """Normalize episode returns within a group (same as safe-robot-steering).
 

@@ -45,7 +45,11 @@ class _DummyPolicy:
         return None
 
 
-def _wrapper(*, action_transform: str = "no_tanh") -> tuple[MetaWorldSmolVLAGRPOPolicy, _DummyBundle, _DummyPolicy]:
+def _wrapper(
+    *,
+    action_transform: str = "no_tanh",
+    gaussian_logprob_action: str = "executed",
+) -> tuple[MetaWorldSmolVLAGRPOPolicy, _DummyBundle, _DummyPolicy]:
     bundle = _DummyBundle()
     policy = _DummyPolicy(torch.zeros(1, 4), torch.full((1, 4), -1.0))
     wrapper = MetaWorldSmolVLAGRPOPolicy(
@@ -57,6 +61,7 @@ def _wrapper(*, action_transform: str = "no_tanh") -> tuple[MetaWorldSmolVLAGRPO
         action_dim=4,
         policy_module=policy,
         action_transform=action_transform,
+        gaussian_logprob_action=gaussian_logprob_action,
         action_low=np.full((4,), -1.0, dtype=np.float32),
         action_high=np.full((4,), 1.0, dtype=np.float32),
     )
@@ -89,6 +94,34 @@ def test_logprob_scores_executed_action_when_clipped() -> None:
     proc = {"x": torch.zeros(1, 1)}
     assert step.action_clip_fraction > 0.0
     assert not torch.allclose(step.unsquashed.flatten()[:2], step.logprob_action.flatten()[:2])
+    recomputed = wrapper.get_action_probs_from_proc_list(
+        [proc], step.logprob_action.reshape(1, -1)
+    )
+    assert torch.allclose(step.log_prob.reshape(()), recomputed.reshape(()), atol=1e-5)
+
+
+def test_logprob_unsquashed_ablation_scores_sampled_action_when_clipped() -> None:
+    bundle = _DummyBundle()
+    policy = _DummyPolicy(torch.full((1, 4), 2.0), torch.full((1, 4), -20.0))
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        action_transform="no_tanh",
+        gaussian_logprob_action="unsquashed",
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+    step = wrapper.sample_action_from_proc({"x": torch.zeros(1, 1)})
+    proc = {"x": torch.zeros(1, 1)}
+    assert step.action_clip_fraction > 0.0
+    assert torch.allclose(step.unsquashed, step.logprob_action)
+    exec_t = torch.from_numpy(step.exec_action_np.reshape(step.unsquashed.shape))
+    assert not torch.allclose(exec_t, step.logprob_action)
     recomputed = wrapper.get_action_probs_from_proc_list(
         [proc], step.logprob_action.reshape(1, -1)
     )
