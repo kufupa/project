@@ -304,9 +304,9 @@ class MetaWorldSmolVLAGRPOPolicy:
     @staticmethod
     def _flow_sde_log_prob_from_trace(trace: dict[str, Any], *, action_dim: int) -> torch.Tensor:
         return sde_step_logprob(
-            trace["A_next"][..., :action_dim],
-            trace["mu_tau"][..., :action_dim],
-            trace["sigma_tau"][..., :action_dim],
+            trace["A_next"][:, 0, :action_dim],
+            trace["mu_tau"][:, 0, :action_dim],
+            trace["sigma_tau"][:, 0, :action_dim],
         ).reshape(-1)
 
     def _get_distr_params_chunk(
@@ -413,9 +413,9 @@ class MetaWorldSmolVLAGRPOPolicy:
             policy_tensor = mean
             exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
             log_prob = self._flow_sde_log_prob_from_trace(flow_trace, action_dim=self.action_dim)
-            trace_action = flow_trace["A_next"][..., : self.action_dim].reshape(mean.shape)
-            trace_mu = flow_trace["mu_tau"][..., : self.action_dim].reshape(mean.shape)
-            trace_sigma = flow_trace["sigma_tau"][..., : self.action_dim].reshape(mean.shape)
+            trace_action = flow_trace["A_next"][:, 0, : self.action_dim].reshape(mean.shape)
+            trace_mu = flow_trace["mu_tau"][:, 0, : self.action_dim].reshape(mean.shape)
+            trace_sigma = flow_trace["sigma_tau"][:, 0, : self.action_dim].reshape(mean.shape)
             return SampledStep(
                 exec_action_np=exec_np,
                 policy_tensor=policy_tensor.detach(),
@@ -510,9 +510,9 @@ class MetaWorldSmolVLAGRPOPolicy:
                 policy_tensor = mean[r : r + 1]
                 exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
                 log_prob = self._flow_sde_log_prob_from_trace(row_trace, action_dim=self.action_dim)
-                trace_action = row_trace["A_next"][..., : self.action_dim].reshape(policy_tensor.shape)
-                trace_mu = row_trace["mu_tau"][..., : self.action_dim].reshape(policy_tensor.shape)
-                trace_sigma = row_trace["sigma_tau"][..., : self.action_dim].reshape(policy_tensor.shape)
+                trace_action = row_trace["A_next"][:, 0, : self.action_dim].reshape(policy_tensor.shape)
+                trace_mu = row_trace["mu_tau"][:, 0, : self.action_dim].reshape(policy_tensor.shape)
+                trace_sigma = row_trace["sigma_tau"][:, 0, : self.action_dim].reshape(policy_tensor.shape)
                 exec_rows.append(np.asarray(exec_np, dtype=np.float32))
                 policy_rows.append(policy_tensor.detach())
                 lp_rows.append(log_prob.detach())
@@ -728,7 +728,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         mu = mu.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
         sigma = sigma.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
         log_std = torch.log(sigma.clamp(min=self.eps))
-        action = trace["A_next"].reshape(len(proc_snapshots), -1)[:, : self.action_dim]
+        action = trace["A_next"][:, 0, : self.action_dim]
         log_probs = sde_step_logprob(action, mu, sigma)
         return log_probs.reshape(-1), mu, log_std
 
