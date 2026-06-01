@@ -90,6 +90,14 @@ class _TracePolicy(_DummyPolicy):
         )
 
 
+class _ReplayDriftTracePolicy(_TracePolicy):
+    def flow_sde_logprob_from_trace(self, proc, flow_sde_trace, *, flow_sde_noise_level: float):
+        assert flow_sde_noise_level == 0.5
+        mu = flow_sde_trace["mu_tau"] + 0.1
+        sigma = torch.full_like(flow_sde_trace["sigma_tau"], 0.25)
+        return torch.zeros(flow_sde_trace["A_next"].shape[:2]), mu, sigma
+
+
 def _wrapper(
     *,
     action_transform: str = "no_tanh",
@@ -312,6 +320,40 @@ def test_flow_sde_chunk_recompute_uses_stored_trace() -> None:
     torch.testing.assert_close(recomputed.reshape(3), chunk.log_prob_steps)
     torch.testing.assert_close(mu.reshape(3, 4), chunk.distr_mean)
     torch.testing.assert_close(log_std.reshape(3, 4), chunk.distr_log_std)
+
+
+def test_flow_sde_chunk_sampling_scores_with_replay_path() -> None:
+    bundle = _DummyBundle()
+    policy = _ReplayDriftTracePolicy()
+    policy.config = type("Config", (), {"n_action_steps": 5, "num_steps": 10})()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+
+    chunk = wrapper.sample_action_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk_len=3,
+        rng=torch.Generator().manual_seed(123),
+    )
+
+    recomputed, mu, log_std = wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
+        [{"x": torch.zeros(1, 1)}],
+        [chunk.flow_sde_trace],
+        chunk_len=3,
+    )
+    torch.testing.assert_close(chunk.log_prob_steps, recomputed.reshape(3))
+    torch.testing.assert_close(chunk.distr_mean, mu.reshape(3, 4))
+    torch.testing.assert_close(chunk.distr_log_std, log_std.reshape(3, 4))
 
 
 def test_flow_sde_chunk_preserves_full_trace_for_replay() -> None:
