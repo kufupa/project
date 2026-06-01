@@ -56,13 +56,13 @@ class _TracePolicy(_DummyPolicy):
     def select_action_distr_params(self, proc, **kwargs):
         assert kwargs["flow_sde_trace"] is True
         b = int(proc["x"].shape[0])
-        mu = torch.zeros(b, 1, 8)
-        sigma = torch.full((b, 1, 8), 0.5)
-        a_next = torch.full((b, 1, 8), 0.25)
+        mu = torch.zeros(b, 3, 8)
+        sigma = torch.full((b, 3, 8), 0.5)
+        a_next = torch.full((b, 3, 8), 0.25)
         self.last_flow_sde_trace = {
             "tau_idx": torch.zeros(b, dtype=torch.long),
-            "A_tau": torch.zeros(b, 1, 8),
-            "v_tau": torch.ones(b, 1, 8),
+            "A_tau": torch.zeros(b, 3, 8),
+            "v_tau": torch.ones(b, 3, 8),
             "mu_tau": mu,
             "sigma_tau": sigma,
             "A_next": a_next,
@@ -195,10 +195,11 @@ def test_flow_sde_mode_scores_and_exports_trace() -> None:
     for key in ("tau_idx", "A_tau", "v_tau", "mu_tau", "sigma_tau", "A_next", "noise_seed"):
         assert key in trace
     assert trace["A_tau"].shape[-1] == 8
+    assert trace["A_tau"].shape[1] == 3
     expected = sde_step_logprob(
-        trace["A_next"][..., :4],
-        trace["mu_tau"][..., :4],
-        trace["sigma_tau"][..., :4],
+        trace["A_next"][:, 0, :4],
+        trace["mu_tau"][:, 0, :4],
+        trace["sigma_tau"][:, 0, :4],
     ).reshape(())
     assert torch.allclose(step.log_prob.reshape(()), expected, atol=1e-6)
 
