@@ -45,7 +45,14 @@ def compute_live_logprob_parity(
                 procs = traj.proc_snapshots[cs:ce]
                 scored_chunk = torch.stack([traj.logprob_actions[t] for t in range(cs, ce)]).to(device)
                 old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                live_lp = train_wrapper.get_action_probs_from_proc_list(procs, scored_chunk).reshape(-1)
+                if train_wrapper.logprob_mode == "flow_sde":
+                    live_lp, _mu, _log_std = train_wrapper.get_flow_sde_log_probs_from_proc_list(
+                        procs,
+                        traj.flow_sde_traces[cs:ce],
+                    )
+                    live_lp = live_lp.reshape(-1)
+                else:
+                    live_lp = train_wrapper.get_action_probs_from_proc_list(procs, scored_chunk).reshape(-1)
                 parity_old.append(old_lp.detach().cpu())
                 parity_new.append(live_lp.detach().cpu())
     return summarize_logprob_ratio_parity(
@@ -142,6 +149,8 @@ def main() -> int:
         default="gaussian",
         help="flow_sde requires venv denoise hook (Phase B)",
     )
+    p.add_argument("--flow-sde-noise-level", type=float, default=0.5)
+    p.add_argument("--flow-sde-trace-step", type=int, default=0)
     p.add_argument(
         "--gaussian-logprob-action",
         choices=("executed", "unsquashed"),
@@ -149,10 +158,10 @@ def main() -> int:
         help="Action tensor scored by Gaussian logprob; unsquashed recreates the pre-A.3 G8 ablation.",
     )
     args = p.parse_args()
-    if args.logprob_mode != "gaussian":
-        raise SystemExit("logprob_mode flow_sde not enabled yet; use gaussian for Phase46")
     if args.batch_size != 1:
         raise SystemExit("Only batch_size=1 supported (one seed context per update).")
+    if args.logprob_mode == "flow_sde" and args.action_transform != "no_tanh":
+        raise SystemExit("flow_sde requires --action-transform no_tanh")
     if float(args.euler_step_noise_std) > 0.0 and not args.allow_euler_noise:
         raise SystemExit(
             "euler_step_noise_std must be 0 for corrected Gaussian GRPO "
@@ -184,6 +193,9 @@ def main() -> int:
         action_transform=args.action_transform,
         min_log_std=float(args.min_log_std),
         gaussian_logprob_action=args.gaussian_logprob_action,
+        logprob_mode=args.logprob_mode,
+        flow_sde_noise_level=float(args.flow_sde_noise_level),
+        flow_sde_trace_step=int(args.flow_sde_trace_step),
     )
     train_wrapper.assert_grpo_api()
     train_wrapper.set_log_std(args.init_log_std)
@@ -225,6 +237,9 @@ def main() -> int:
         "lr": args.lr,
         "action_transform": args.action_transform,
         "gaussian_logprob_action": args.gaussian_logprob_action,
+        "logprob_mode": args.logprob_mode,
+        "flow_sde_noise_level": float(args.flow_sde_noise_level),
+        "flow_sde_trace_step": int(args.flow_sde_trace_step),
         "run_label": args.run_label,
         "euler_step_noise_std": float(args.euler_step_noise_std),
         "parity_tolerance": float(args.parity_tolerance),
@@ -251,6 +266,9 @@ def main() -> int:
             async_start_method=args.async_start_method,
             action_transform=args.action_transform,
             gaussian_logprob_action=args.gaussian_logprob_action,
+            logprob_mode=args.logprob_mode,
+            flow_sde_noise_level=float(args.flow_sde_noise_level),
+            flow_sde_trace_step=int(args.flow_sde_trace_step),
         )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
         returns = torch.tensor(
@@ -431,7 +449,12 @@ def main() -> int:
                     )
                     old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
                     new_lp, _mean_live, log_std_live = (
-                        train_wrapper.get_action_log_probs_and_params_from_proc_list(procs, scored_chunk)
+                        train_wrapper.get_flow_sde_log_probs_from_proc_list(
+                            procs,
+                            traj.flow_sde_traces[cs:ce],
+                        )
+                        if args.logprob_mode == "flow_sde"
+                        else train_wrapper.get_action_log_probs_and_params_from_proc_list(procs, scored_chunk)
                     )
                     new_lp = new_lp.reshape(-1)
                     ratio = torch.exp(new_lp - old_lp)
