@@ -22,12 +22,49 @@ def _append_progress(path: Path, row: dict) -> None:
         fp.write(json.dumps(row) + "\n")
 
 
+def compute_live_logprob_parity(
+    *,
+    train_wrapper,
+    rollouts,
+    chunk_size: int,
+    device,
+    tolerance: float,
+):
+    """Recompute stored actions through the live update path before optimizer.step."""
+    import torch
+
+    from smolvla_grpo.grpo_math import summarize_logprob_ratio_parity
+
+    parity_old: list[torch.Tensor] = []
+    parity_new: list[torch.Tensor] = []
+    with torch.no_grad():
+        for traj in rollouts:
+            t_len = len(traj.proc_snapshots)
+            for cs in range(0, t_len, int(chunk_size)):
+                ce = min(cs + int(chunk_size), t_len)
+                procs = traj.proc_snapshots[cs:ce]
+                scored_chunk = torch.stack([traj.logprob_actions[t] for t in range(cs, ce)]).to(device)
+                old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
+                live_lp = train_wrapper.get_action_probs_from_proc_list(procs, scored_chunk).reshape(-1)
+                parity_old.append(old_lp.detach().cpu())
+                parity_new.append(live_lp.detach().cpu())
+    return summarize_logprob_ratio_parity(
+        torch.cat(parity_old) if parity_old else torch.zeros(0),
+        torch.cat(parity_new) if parity_new else torch.zeros(0),
+        tolerance=float(tolerance),
+    )
+
+
 def main() -> int:
     import torch
     from torch import nn
 
     from smolvla_grpo.checkpointing import load_grpo_checkpoint, save_grpo_checkpoint
-    from smolvla_grpo.grpo_math import compute_group_advantages, summarize_logprob_ratio_parity
+    from smolvla_grpo.grpo_math import (
+        apply_grpo_regularizers,
+        compute_group_advantages,
+        update_metrics,
+    )
     from smolvla_grpo.phase11_rollout import collect_rollout_group, load_bundle_for_grpo
     from smolvla_grpo.policy_wrapper import (
         MetaWorldSmolVLAGRPOPolicy,
@@ -105,6 +142,12 @@ def main() -> int:
         default="gaussian",
         help="flow_sde requires venv denoise hook (Phase B)",
     )
+    p.add_argument(
+        "--gaussian-logprob-action",
+        choices=("executed", "unsquashed"),
+        default="executed",
+        help="Action tensor scored by Gaussian logprob; unsquashed recreates the pre-A.3 G8 ablation.",
+    )
     args = p.parse_args()
     if args.logprob_mode != "gaussian":
         raise SystemExit("logprob_mode flow_sde not enabled yet; use gaussian for Phase46")
@@ -140,6 +183,7 @@ def main() -> int:
         action_dim=action_dim,
         action_transform=args.action_transform,
         min_log_std=float(args.min_log_std),
+        gaussian_logprob_action=args.gaussian_logprob_action,
     )
     train_wrapper.assert_grpo_api()
     train_wrapper.set_log_std(args.init_log_std)
@@ -180,6 +224,7 @@ def main() -> int:
         "clip_eps": args.clip_eps,
         "lr": args.lr,
         "action_transform": args.action_transform,
+        "gaussian_logprob_action": args.gaussian_logprob_action,
         "run_label": args.run_label,
         "euler_step_noise_std": float(args.euler_step_noise_std),
         "parity_tolerance": float(args.parity_tolerance),
@@ -205,6 +250,7 @@ def main() -> int:
             rollout_execution=args.rollout_execution,
             async_start_method=args.async_start_method,
             action_transform=args.action_transform,
+            gaussian_logprob_action=args.gaussian_logprob_action,
         )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
         returns = torch.tensor(
@@ -233,6 +279,24 @@ def main() -> int:
                 rollouts[0].metadata.get("resolved_max_steps", resolved_max_steps)
             )
         advantages = compute_group_advantages(returns)
+        rollout_old_lp = (
+            torch.cat([torch.stack(tr.log_probs).reshape(-1) for tr in rollouts]).to(device)
+            if rollouts
+            else torch.zeros(0, device=device)
+        )
+        rollout_log_std = (
+            torch.cat([torch.stack(tr.distr_log_stds).reshape(-1, action_dim) for tr in rollouts]).to(device)
+            if rollouts
+            else torch.zeros(0, action_dim, device=device)
+        )
+        pre_update_metrics = update_metrics(
+            new_log_probs=rollout_old_lp,
+            old_log_probs=rollout_old_lp,
+            log_std=rollout_log_std,
+            returns=returns,
+            advantages=advantages,
+            epsilon=float(args.clip_eps),
+        )
         if torch.allclose(advantages, torch.zeros_like(advantages)):
             update_seconds = float(time.perf_counter() - update_t0)
             _append_progress(
@@ -245,6 +309,7 @@ def main() -> int:
                     "env_backend": args.env_backend,
                     "rollout_execution": args.rollout_execution,
                     "action_transform": args.action_transform,
+                    "gaussian_logprob_action": args.gaussian_logprob_action,
                     "run_label": args.run_label,
                     "async_start_method": (
                         args.async_start_method if args.rollout_execution == "vector_async" else None
@@ -264,6 +329,7 @@ def main() -> int:
                     "update_seconds": update_seconds,
                     "terminated": terminated_flags,
                     "truncated": truncated_flags,
+                    **pre_update_metrics,
                 },
             )
             state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
@@ -284,6 +350,7 @@ def main() -> int:
                 "update_seconds": update_seconds,
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
+                **pre_update_metrics,
             }
             save_grpo_checkpoint(
                 ckpt_dir / "latest.pt",
@@ -308,6 +375,7 @@ def main() -> int:
                 f"mode={args.rollout_execution}",
                 f"label={args.run_label}",
                 f"action_transform={args.action_transform}",
+                f"gaussian_logprob_action={args.gaussian_logprob_action}",
                 f"seed={reset_seed}",
                 f"avg_return={avg_ret:.6g}",
                 f"success_rate={success_rate:.3f}",
@@ -324,36 +392,11 @@ def main() -> int:
             continue
 
         bundle.policy.eval()
-        parity_old: list[torch.Tensor] = []
-        parity_new: list[torch.Tensor] = []
-        with torch.no_grad():
-            for traj in rollouts:
-                t_len = len(traj.proc_snapshots)
-                for cs in range(0, t_len, args.chunk_size):
-                    ce = min(cs + args.chunk_size, t_len)
-                    scored_chunk = torch.stack([traj.logprob_actions[t] for t in range(cs, ce)]).to(
-                        device
-                    )
-                    mean_stored = torch.stack([traj.distr_means[t] for t in range(cs, ce)]).to(device)
-                    log_std_stored = torch.stack([traj.distr_log_stds[t] for t in range(cs, ce)]).to(device)
-                    old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                    if train_wrapper.action_transform == "tanh_norm_ablation":
-                        u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(
-                            device
-                        )
-                        squished = torch.tanh(u_chunk)
-                        replay_lp = train_wrapper.calculate_log_prob(
-                            mean_stored, log_std_stored, u_chunk, squished, eps=train_wrapper.eps
-                        ).reshape(-1)
-                    else:
-                        replay_lp = train_wrapper.calculate_gaussian_log_prob(
-                            mean_stored, log_std_stored, scored_chunk
-                        ).reshape(-1)
-                    parity_old.append(old_lp.detach().cpu())
-                    parity_new.append(replay_lp.detach().cpu())
-        parity_stats = summarize_logprob_ratio_parity(
-            torch.cat(parity_old) if parity_old else torch.zeros(0),
-            torch.cat(parity_new) if parity_new else torch.zeros(0),
+        parity_stats = compute_live_logprob_parity(
+            train_wrapper=train_wrapper,
+            rollouts=rollouts,
+            chunk_size=int(args.chunk_size),
+            device=device,
             tolerance=float(args.parity_tolerance),
         )
         if not parity_stats.within_tolerance:
@@ -368,8 +411,14 @@ def main() -> int:
 
         bundle.policy.train()
         optimize_t0 = time.perf_counter()
+        last_new_log_probs: list[torch.Tensor] = []
+        last_old_log_probs: list[torch.Tensor] = []
+        last_log_stds: list[torch.Tensor] = []
         for _epoch in range(args.update_epochs):
             optimizer.zero_grad()
+            epoch_new_log_probs: list[torch.Tensor] = []
+            epoch_old_log_probs: list[torch.Tensor] = []
+            epoch_log_stds: list[torch.Tensor] = []
             for gi, traj in enumerate(rollouts):
                 A = advantages[gi].reshape(()).float()
                 T = len(traj.proc_snapshots)
@@ -381,20 +430,44 @@ def main() -> int:
                         device
                     )
                     old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, scored_chunk).reshape(
-                        -1
+                    new_lp, _mean_live, log_std_live = (
+                        train_wrapper.get_action_log_probs_and_params_from_proc_list(procs, scored_chunk)
                     )
+                    new_lp = new_lp.reshape(-1)
                     ratio = torch.exp(new_lp - old_lp)
                     unclipped = ratio * A
                     clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * A
                     step_losses = -torch.min(unclipped, clipped)
                     chunk_loss = step_losses.sum() / max(T * G, 1)
+                    regularizer_scale = float(ce - cs) / float(max(T * G, 1))
+                    chunk_loss = apply_grpo_regularizers(
+                        chunk_loss,
+                        current_log_probs=new_lp,
+                        reference_log_probs=old_lp,
+                        log_std=log_std_live,
+                        kl_beta=float(args.kl_beta) * regularizer_scale,
+                        entropy_coef=float(args.entropy_coef) * regularizer_scale,
+                    )
                     chunk_loss.backward()
+                    epoch_new_log_probs.append(new_lp.detach().cpu())
+                    epoch_old_log_probs.append(old_lp.detach().cpu())
+                    epoch_log_stds.append(log_std_live.detach().cpu())
 
             nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
             optimizer.step()
+            last_new_log_probs = epoch_new_log_probs
+            last_old_log_probs = epoch_old_log_probs
+            last_log_stds = epoch_log_stds
         optimize_seconds = float(time.perf_counter() - optimize_t0)
         update_seconds = float(time.perf_counter() - update_t0)
+        post_update_metrics = update_metrics(
+            new_log_probs=torch.cat(last_new_log_probs) if last_new_log_probs else rollout_old_lp.detach().cpu(),
+            old_log_probs=torch.cat(last_old_log_probs) if last_old_log_probs else rollout_old_lp.detach().cpu(),
+            log_std=torch.cat(last_log_stds) if last_log_stds else rollout_log_std.detach().cpu(),
+            returns=returns.detach().cpu(),
+            advantages=advantages.detach().cpu(),
+            epsilon=float(args.clip_eps),
+        )
 
         _append_progress(
             progress_path,
@@ -404,6 +477,7 @@ def main() -> int:
                 "env_backend": args.env_backend,
                 "rollout_execution": args.rollout_execution,
                 "action_transform": args.action_transform,
+                "gaussian_logprob_action": args.gaussian_logprob_action,
                 "run_label": args.run_label,
                 "async_start_method": (
                     args.async_start_method if args.rollout_execution == "vector_async" else None
@@ -421,11 +495,14 @@ def main() -> int:
                 "action_clip_any_fraction": action_clip_any_fraction,
                 "postprocessor_oob_mean": postprocessor_oob_mean,
                 "parity": parity_stats.as_dict(),
+                "kl_beta": float(args.kl_beta),
+                "entropy_coef": float(args.entropy_coef),
                 "rollout_seconds": rollout_seconds,
                 "optimize_seconds": optimize_seconds,
                 "update_seconds": update_seconds,
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
+                **post_update_metrics,
             },
         )
         state = {k: v.clone() for k, v in bundle.policy.state_dict().items()}
@@ -476,6 +553,7 @@ def main() -> int:
             f"mode={args.rollout_execution}",
             f"label={args.run_label}",
             f"action_transform={args.action_transform}",
+            f"gaussian_logprob_action={args.gaussian_logprob_action}",
             f"seed={reset_seed}",
             f"avg_return={avg_ret:.6g}",
             f"success_rate={success_rate:.3f}",
