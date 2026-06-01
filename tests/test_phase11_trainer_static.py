@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+
+from scripts.grpo.train_phase11_env_on_policy_grpo import compute_live_chunk_logprob_parity
 
 
 TRAINER = Path(__file__).resolve().parents[1] / "scripts" / "grpo" / "train_phase11_env_on_policy_grpo.py"
@@ -31,3 +36,34 @@ def test_chunk_mode_loads_bundle_with_rollout_chunk_len() -> None:
 def test_chunk_mode_uses_chunk_rollout_collector() -> None:
     text = TRAINER.read_text(encoding="utf-8")
     assert "collect_chunk_rollout_group" in text
+
+
+def test_chunk_parity_replays_one_chunk_at_a_time() -> None:
+    class _Wrapper:
+        def get_flow_sde_log_probs_for_chunk_from_proc_list(self, procs, traces, *, chunk_len: int):
+            del traces, chunk_len
+            if len(procs) != 1:
+                return torch.tensor([[100.0, 100.0]]), None, None
+            return torch.tensor([[1.0, 2.0]]), None, None
+
+    chunk_a = SimpleNamespace(
+        proc_snapshot={"x": torch.zeros(1, 1)},
+        flow_sde_trace={"A_next": torch.zeros(1, 2, 4)},
+        valid_action_mask=torch.tensor([True, True]),
+        log_probs=torch.tensor([1.0, 2.0]),
+    )
+    chunk_b = SimpleNamespace(
+        proc_snapshot={"x": torch.zeros(1, 1)},
+        flow_sde_trace={"A_next": torch.zeros(1, 2, 4)},
+        valid_action_mask=torch.tensor([True, False]),
+        log_probs=torch.tensor([1.0, 2.0]),
+    )
+    stats, payload = compute_live_chunk_logprob_parity(
+        train_wrapper=_Wrapper(),
+        rollouts=[SimpleNamespace(chunks=[chunk_a, chunk_b])],
+        chunk_len=2,
+        tolerance=0.02,
+    )
+
+    assert stats.within_tolerance
+    assert payload["max_abs_per_action_logprob"] == 0.0
