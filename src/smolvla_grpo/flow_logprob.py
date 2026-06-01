@@ -7,6 +7,22 @@ import math
 import torch
 
 
+def sde_step_logprob_per_dim(
+    x_next: torch.Tensor,
+    mu: torch.Tensor,
+    sigma: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """OpenPI-style per-dimension diagonal Gaussian log-density."""
+    mask = sigma <= eps
+    sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
+    log_norm = -torch.log(sigma_safe) - 0.5 * math.log(2 * math.pi)
+    quad = -0.5 * ((x_next - mu) / sigma_safe) ** 2
+    per_dim = log_norm + quad
+    return torch.where(mask.expand_as(per_dim), torch.zeros_like(per_dim), per_dim)
+
+
 def sde_step_logprob(
     x_next: torch.Tensor,
     mu: torch.Tensor,
@@ -15,14 +31,13 @@ def sde_step_logprob(
     eps: float = 1e-8,
 ) -> torch.Tensor:
     """Diagonal Gaussian log-density summed over trailing action dims."""
-    sigma_safe = torch.clamp(sigma, min=eps)
-    var = sigma_safe * sigma_safe
-    log_norm = -torch.log(sigma_safe) - 0.5 * math.log(2 * math.pi)
-    quad = -0.5 * ((x_next - mu) ** 2) / var
-    per_dim = log_norm + quad
-    mask = (sigma <= eps).expand_as(per_dim)
-    out = per_dim.sum(dim=-1)
-    return torch.where(mask.any(dim=-1), torch.zeros_like(out), out)
+    return sde_step_logprob_per_dim(x_next, mu, sigma, eps=eps).sum(dim=-1)
+
+
+def _flow_sde_denom_timestep(tau: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+    """OpenPI replaces tau=1 with the next timestep before sigma_ratio."""
+    next_tau = tau - delta
+    return torch.where(torch.isclose(tau, torch.ones_like(tau)), next_tau, tau)
 
 
 def sde_step_params(
@@ -37,8 +52,8 @@ def sde_step_params(
     delta_b = delta
     x0_pred = x_tau - v_tau * t_input
     x1_pred = x_tau + v_tau * (1.0 - t_input)
-    denom = torch.where(tau == 1, torch.tensor(1.0, device=tau.device, dtype=tau.dtype), 1.0 - tau)
-    sigma_ratio = tau / denom.clamp(min=1e-6)
+    denom_timestep = _flow_sde_denom_timestep(tau, delta_b)
+    sigma_ratio = tau / (1.0 - denom_timestep).clamp(min=1e-6)
     sigmas = float(noise_level) * torch.sqrt(sigma_ratio.clamp(min=0.0))
     sigma_i = sigmas
     x0_weight = torch.ones_like(t_input) - (t_input - delta_b)
