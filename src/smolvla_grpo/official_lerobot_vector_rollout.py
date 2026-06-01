@@ -55,6 +55,9 @@ def collect_official_lerobot_vector_rollout_group(
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
     gaussian_logprob_action: str = "executed",
+    logprob_mode: str = "gaussian",
+    flow_sde_noise_level: float = 0.5,
+    flow_sde_trace_step: int = 0,
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` one-episode trajectories with one vector env step per timestep."""
     if rollout_execution not in ("vector_sync", "vector_async"):
@@ -87,6 +90,9 @@ def collect_official_lerobot_vector_rollout_group(
             policy_module=policy_old,
             action_transform=action_transform,
             gaussian_logprob_action=gaussian_logprob_action,
+            logprob_mode=logprob_mode,
+            flow_sde_noise_level=flow_sde_noise_level,
+            flow_sde_trace_step=flow_sde_trace_step,
             action_low=action_low,
             action_high=action_high,
         )
@@ -102,6 +108,7 @@ def collect_official_lerobot_vector_rollout_group(
             tr.metadata["rollout_execution"] = rollout_execution
             tr.metadata["action_transform"] = action_transform
             tr.metadata["gaussian_logprob_action"] = gaussian_logprob_action
+            tr.metadata["logprob_mode"] = logprob_mode
             tr.metadata["async_start_method"] = async_start_method if use_async else "none"
             tr.metadata["requested_max_steps"] = requested_max_steps
             tr.metadata["resolved_max_steps"] = max_steps_i
