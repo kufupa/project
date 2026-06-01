@@ -31,7 +31,9 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_phase111_on_grpo_lerobot_smoke.slurm",
         "submit_phase111_single_task_grpo.slurm",
         "submit_phase111_vector_rollout_smoke.slurm",
-        "submit_flow_sde_grpo_smoke_a30.slurm",
+        "submit_flow_sde_chunk_grpo_smoke_a30.slurm",
+        "submit_flow_sde_chunk_grpo_train16_a30.slurm",
+        "submit_flow_sde_chunk_grpo_eval25_a30.slurm",
         "submit_phase111_eval_sweep.slurm",
         "submit_phase11_chain.sh",
         "submit_api_gate_smoke.slurm",
@@ -70,15 +72,44 @@ def test_submit_phase111_vector_rollout_smoke_trains_sync_and_async() -> None:
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
-def test_submit_flow_sde_grpo_smoke_uses_live_flow_mode() -> None:
-    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_grpo_smoke_a30.slurm"
+def test_submit_flow_sde_chunk_grpo_smoke_uses_chunk_flow_mode() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_smoke_a30.slurm"
     text = path.read_text(encoding="utf-8")
     assert "#SBATCH --export=NIL" in text
     assert "scripts/slurm/common_env.sh" in text
+    assert "--rollout-unit chunk" in text
+    assert "--rollout-chunk-len 5" in text
+    assert "--rollout-execution serial" in text
     assert "--logprob-mode flow_sde" in text
     assert "--flow-sde-noise-level 0.5" in text
+    assert "--flow-sde-trace-step -1" in text
     assert "--fail-on-parity-violation" in text
-    assert "FLOW_SDE_GRPO_SMOKE_OK" in text
+    assert "FLOW_SDE_CHUNK_GRPO_SMOKE_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_submit_flow_sde_chunk_grpo_train16_has_gate_contract() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_train16_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --export=NIL" in text
+    assert "scripts/slurm/common_env.sh" in text
+    assert "--rollout-unit chunk" in text
+    assert "--rollout-chunk-len 5" in text
+    assert "--rollout-execution serial" in text
+    assert "--num-updates 16" in text
+    assert 'test -f "${OUT}/checkpoints/update_0016.pt"' in text
+    assert "FLOW_SDE_CHUNK_GRPO_TRAIN16_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_submit_flow_sde_chunk_grpo_eval25_has_gate_contract() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_eval25_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --export=NIL" in text
+    assert "scripts/slurm/common_env.sh" in text
+    assert "--num-episodes 25" in text
+    assert "--chunk-len 5" in text
+    assert "FLOW_SDE_CHUNK_GRPO_EVAL25_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
@@ -113,8 +144,8 @@ def test_submit_phase111_single_task_grpo_is_official_backend() -> None:
     assert 'manifest["action_transform"]' in text
     assert 'manifest["run_label"]' in text
     assert 'manifest["async_start_method"] == "forkserver"' in text
-    assert 'len(rows) == num_updates' in text
-    assert 'update_0100.pt' in text
+    assert 'len(rows) == end_update' in text
+    assert 'last_ckpt = out / "checkpoints" / f"update_{end_update:04d}.pt"' in text
     assert '"rollout_seconds" in row' in text
     assert '"optimize_seconds" in row' in text
     assert '"update_seconds" in row' in text
