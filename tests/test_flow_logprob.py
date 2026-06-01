@@ -99,3 +99,30 @@ def test_logprob_per_dim_matches_openpi_zero_sigma_mask() -> None:
 
     assert torch.allclose(per_dim, expected, atol=1e-6)
     assert torch.allclose(sde_step_logprob(sample, mu, sigma), expected.sum(dim=-1), atol=1e-6)
+
+
+def test_sde_logprob_uses_fp32_for_low_precision_inputs() -> None:
+    mu = torch.zeros(2, 4, dtype=torch.bfloat16)
+    sigma = torch.full((2, 4), 0.1, dtype=torch.bfloat16)
+    x_next = torch.full((2, 4), 0.05, dtype=torch.bfloat16)
+
+    per_dim = sde_step_logprob_per_dim(x_next, mu, sigma)
+    summed = sde_step_logprob(x_next, mu, sigma)
+
+    assert per_dim.dtype == torch.float32
+    assert summed.dtype == torch.float32
+    assert torch.isfinite(summed).all()
+
+
+def test_sde_step_params_uses_fp32_for_low_precision_inputs() -> None:
+    x_tau = torch.arange(24, dtype=torch.bfloat16).reshape(2, 3, 4) / 10
+    v_tau = torch.full_like(x_tau, 0.25)
+    tau = torch.ones_like(x_tau)
+    delta = torch.full_like(x_tau, 0.1)
+
+    mu, sigma = sde_step_params(x_tau, v_tau, tau, delta, noise_level=0.5)
+
+    assert mu.dtype == torch.float32
+    assert sigma.dtype == torch.float32
+    assert torch.isfinite(mu).all()
+    assert torch.isfinite(sigma).all()

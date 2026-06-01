@@ -7,6 +7,10 @@ import math
 import torch
 
 
+def _fp32(t: torch.Tensor) -> torch.Tensor:
+    return t if t.dtype == torch.float32 else t.float()
+
+
 def sde_step_logprob_per_dim(
     x_next: torch.Tensor,
     mu: torch.Tensor,
@@ -15,6 +19,9 @@ def sde_step_logprob_per_dim(
     eps: float = 1e-8,
 ) -> torch.Tensor:
     """OpenPI-style per-dimension diagonal Gaussian log-density."""
+    x_next = _fp32(x_next)
+    mu = _fp32(mu)
+    sigma = _fp32(sigma)
     mask = sigma <= eps
     sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
     log_norm = -torch.log(sigma_safe) - 0.5 * math.log(2 * math.pi)
@@ -48,6 +55,10 @@ def sde_step_params(
     noise_level: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map openpi Flow-SDE hybrid step to (mu, sigma) for one transition."""
+    x_tau = _fp32(x_tau)
+    v_tau = _fp32(v_tau)
+    tau = _fp32(tau)
+    delta = _fp32(delta)
     t_input = tau
     delta_b = delta
     x0_pred = x_tau - v_tau * t_input
