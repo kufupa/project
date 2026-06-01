@@ -70,6 +70,18 @@ class _TracePolicy(_DummyPolicy):
         }
         return a_next[:, 0, :], torch.zeros(b, 4)
 
+    def flow_sde_logprob_from_trace(self, proc, flow_sde_trace, *, flow_sde_noise_level: float):
+        assert flow_sde_noise_level == 0.5
+        return (
+            sde_step_logprob(
+                flow_sde_trace["A_next"],
+                flow_sde_trace["mu_tau"],
+                flow_sde_trace["sigma_tau"],
+            ),
+            flow_sde_trace["mu_tau"],
+            flow_sde_trace["sigma_tau"],
+        )
+
 
 def _wrapper(
     *,
@@ -188,6 +200,34 @@ def test_flow_sde_mode_scores_and_exports_trace() -> None:
         assert key in trace
     expected = sde_step_logprob(trace["A_next"], trace["mu_tau"], trace["sigma_tau"]).reshape(())
     assert torch.allclose(step.log_prob.reshape(()), expected, atol=1e-6)
+
+
+def test_flow_sde_recompute_uses_stored_trace() -> None:
+    bundle = _DummyBundle()
+    policy = _TracePolicy()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+    step = wrapper.sample_action_from_proc({"x": torch.zeros(1, 1)}, rng=torch.Generator().manual_seed(123))
+
+    recomputed, mu, log_std = wrapper.get_flow_sde_log_probs_from_proc_list(
+        [{"x": torch.zeros(1, 1)}],
+        [step.flow_sde_trace],
+    )
+
+    assert torch.allclose(recomputed.reshape(()), step.log_prob.reshape(()), atol=1e-6)
+    assert torch.allclose(mu, step.distr_mean)
+    assert torch.allclose(log_std, step.distr_log_std)
 
 
 def test_trainer_rejects_nonzero_euler_without_flag() -> None:
