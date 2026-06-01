@@ -103,20 +103,16 @@ def compute_live_chunk_logprob_parity(
     per_action_abs: list[torch.Tensor] = []
     with torch.no_grad():
         for traj in rollouts:
-            procs = [chunk.proc_snapshot for chunk in traj.chunks]
-            traces = [chunk.flow_sde_trace for chunk in traj.chunks]
-            if not procs:
-                continue
-            live_steps, _mu, _log_std = train_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
-                procs,
-                traces,
-                chunk_len=int(chunk_len),
-            )
-            live_steps = live_steps.detach().cpu()
-            for idx, chunk in enumerate(traj.chunks):
+            for chunk in traj.chunks:
+                live_steps, _mu, _log_std = train_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
+                    [chunk.proc_snapshot],
+                    [chunk.flow_sde_trace],
+                    chunk_len=int(chunk_len),
+                )
+                live_steps = live_steps.detach().cpu()
                 valid = chunk.valid_action_mask.reshape(1, -1)
                 old_step = chunk.log_probs.reshape(1, -1)
-                new_step = live_steps[idx : idx + 1]
+                new_step = live_steps.reshape(1, -1)
                 parity_old.append(masked_chunk_sum(old_step, valid).reshape(1))
                 parity_new.append(masked_chunk_sum(new_step, valid).reshape(1))
                 per_action_abs.append(((new_step - old_step).abs() * valid.float()).reshape(-1))
@@ -683,23 +679,19 @@ def main() -> int:
                 epoch_log_stds: list[torch.Tensor] = []
                 for gi, traj in enumerate(rollouts):
                     A = advantages[gi].reshape(()).float()
-                    procs = [chunk.proc_snapshot for chunk in traj.chunks]
-                    traces = [chunk.flow_sde_trace for chunk in traj.chunks]
-                    if not procs:
-                        continue
-                    new_steps, _mu_live, log_std_live = (
-                        train_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
-                            procs,
-                            traces,
-                            chunk_len=int(args.rollout_chunk_len),
-                        )
-                    )
-                    for ci, chunk in enumerate(traj.chunks):
+                    for chunk in traj.chunks:
                         valid = chunk.valid_action_mask.reshape(1, -1).to(device)
                         if not bool(valid.any()):
                             continue
+                        new_steps, _mu_live, log_std_live = (
+                            train_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
+                                [chunk.proc_snapshot],
+                                [chunk.flow_sde_trace],
+                                chunk_len=int(args.rollout_chunk_len),
+                            )
+                        )
                         old_steps = chunk.log_probs.reshape(1, -1).to(device)
-                        new_step = new_steps[ci : ci + 1]
+                        new_step = new_steps.reshape(1, -1)
                         old_lp = masked_chunk_sum(old_steps, valid)
                         new_lp = masked_chunk_sum(new_step, valid)
                         ratio = torch.exp((new_lp - old_lp).clamp(-20.0, 20.0))
@@ -710,14 +702,14 @@ def main() -> int:
                             chunk_loss,
                             current_log_probs=new_lp,
                             reference_log_probs=old_lp,
-                            log_std=log_std_live[ci : ci + 1].reshape(-1, action_dim),
+                            log_std=log_std_live.reshape(-1, action_dim),
                             kl_beta=float(args.kl_beta) / max(int(valid_chunk_count), 1),
                             entropy_coef=float(args.entropy_coef) / max(int(valid_chunk_count), 1),
                         )
                         chunk_loss.backward()
                         epoch_new_log_probs.append(new_lp.detach().cpu())
                         epoch_old_log_probs.append(old_lp.detach().cpu())
-                        epoch_log_stds.append(log_std_live[ci].detach().cpu().reshape(-1, action_dim))
+                        epoch_log_stds.append(log_std_live.detach().cpu().reshape(-1, action_dim))
 
                 total_grad_norm = nn.utils.clip_grad_norm_(bundle.policy.parameters(), args.grad_clip)
                 optimizer.step()
