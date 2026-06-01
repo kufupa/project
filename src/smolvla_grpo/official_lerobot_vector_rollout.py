@@ -135,6 +135,7 @@ def collect_official_lerobot_vector_rollout_group(
                 rollouts[i].proc_snapshots.append(detach_proc_snapshot(row_proc))
                 rollouts[i].exec_actions.append(batch.exec_action_np[i].reshape(-1).tolist())
                 rollouts[i].unsquashed_actions.append(batch.unsquashed[i].detach().cpu())
+                rollouts[i].logprob_actions.append(batch.logprob_action[i].detach().cpu())
                 rollouts[i].distr_means.append(batch.distr_mean[i].detach().cpu())
                 rollouts[i].distr_log_stds.append(batch.distr_log_std[i].detach().cpu())
                 rollouts[i].log_probs.append(batch.log_prob[i].detach().cpu())

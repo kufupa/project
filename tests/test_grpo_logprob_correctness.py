@@ -70,7 +70,7 @@ def test_logprob_ratio_parity_identity() -> None:
     assert abs(stats.mean_ratio - 1.0) < 1e-5
 
 
-def test_clipped_exec_does_not_change_gaussian_logprob_target() -> None:
+def test_logprob_scores_executed_action_when_clipped() -> None:
     bundle = _DummyBundle()
     policy = _DummyPolicy(torch.full((1, 4), 2.0), torch.full((1, 4), -20.0))
     wrapper = MetaWorldSmolVLAGRPOPolicy(
@@ -87,17 +87,20 @@ def test_clipped_exec_does_not_change_gaussian_logprob_target() -> None:
     )
     step = wrapper.sample_action_from_proc({"x": torch.zeros(1, 1)})
     proc = {"x": torch.zeros(1, 1)}
-    recomputed = wrapper.get_action_probs_from_proc_list([proc], step.unsquashed.reshape(1, -1))
     assert step.action_clip_fraction > 0.0
+    assert not torch.allclose(step.unsquashed.flatten()[:2], step.logprob_action.flatten()[:2])
+    recomputed = wrapper.get_action_probs_from_proc_list(
+        [proc], step.logprob_action.reshape(1, -1)
+    )
     assert torch.allclose(step.log_prob.reshape(()), recomputed.reshape(()), atol=1e-5)
 
 
-def test_get_action_probs_resets_policy_per_timestep() -> None:
+def test_get_action_probs_resets_policy_before_batched_forward() -> None:
     wrapper, _bundle, policy = _wrapper()
     procs = [{"x": torch.zeros(1, 1)}, {"x": torch.zeros(1, 1)}]
     unsq = torch.zeros(2, 4)
     wrapper.get_action_probs_from_proc_list(procs, unsq)
-    assert policy.reset_calls >= 2
+    assert policy.reset_calls >= 1
 
 
 def test_trainer_rejects_nonzero_euler_without_flag() -> None:

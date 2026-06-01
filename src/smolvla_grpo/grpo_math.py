@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+
 import torch
+
+
+def gaussian_entropy(log_std: torch.Tensor) -> torch.Tensor:
+    """Per-batch-row entropy of diagonal Gaussian (sum over action dims)."""
+    return (log_std + 0.5 * math.log(2 * math.pi * math.e)).sum(dim=-1)
+
+
+def kl_to_reference(current_log_probs: torch.Tensor, reference_log_probs: torch.Tensor) -> torch.Tensor:
+    """KL(ref || cur) ≈ E[log pi_ref - log pi_cur] on stored actions."""
+    return (reference_log_probs.reshape(-1) - current_log_probs.reshape(-1)).float()
 
 
 def compute_group_advantages(returns: torch.Tensor, *, eps: float = 1e-8) -> torch.Tensor:

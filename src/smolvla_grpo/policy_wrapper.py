@@ -28,6 +28,7 @@ class SampledStep:
     exec_action_np: np.ndarray
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
+    logprob_action: torch.Tensor
     log_prob: torch.Tensor
     distr_mean: torch.Tensor
     distr_log_std: torch.Tensor
@@ -44,6 +45,7 @@ class SampledBatchStep:
     policy_tensor: torch.Tensor
     unsquashed: torch.Tensor
     log_prob: torch.Tensor
+    logprob_action: torch.Tensor
     distr_mean: torch.Tensor
     distr_log_std: torch.Tensor
     action_clip_fraction: np.ndarray
@@ -103,8 +105,10 @@ class MetaWorldSmolVLAGRPOPolicy:
         action_transform: str = "no_tanh",
         action_low: np.ndarray | None = None,
         action_high: np.ndarray | None = None,
+        min_log_std: float = -4.0,
     ) -> None:
         self.bundle = bundle
+        self.min_log_std = float(min_log_std)
         self.task_text = task_text
         self.camera_name = camera_name
         self.flip_corner2 = flip_corner2
@@ -169,6 +173,17 @@ class MetaWorldSmolVLAGRPOPolicy:
         log_prob_u = log_prob_u.sum(dim=-1)
         correction = torch.sum(torch.log(1 - squished.pow(2) + eps), dim=-1)
         return log_prob_u - correction
+
+    @staticmethod
+    def clamp_log_std(log_std: torch.Tensor, min_log_std: float) -> torch.Tensor:
+        return torch.clamp(log_std, min=float(min_log_std))
+
+    @staticmethod
+    def _executed_tensor_from_np(exec_np: np.ndarray, *, ref: torch.Tensor) -> torch.Tensor:
+        t = torch.from_numpy(np.asarray(exec_np, dtype=np.float32)).to(
+            device=ref.device, dtype=ref.dtype
+        )
+        return t.reshape(ref.shape)
 
     @staticmethod
     def calculate_gaussian_log_prob(
@@ -304,6 +319,7 @@ class MetaWorldSmolVLAGRPOPolicy:
     ) -> SampledStep:
         proc_d = self._proc_to_device(proc)
         mean, log_std = self._policy.select_action_distr_params(proc_d)
+        log_std = self.clamp_log_std(log_std, self.min_log_std)
         std = torch.exp(log_std)
         if rng is None:
             noise = torch.randn_like(mean)
@@ -312,15 +328,19 @@ class MetaWorldSmolVLAGRPOPolicy:
         unsquashed = mean + std * noise
         if self.action_transform == "tanh_norm_ablation":
             policy_tensor = torch.tanh(unsquashed)
-            log_prob = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
         else:
             policy_tensor = unsquashed
-            log_prob = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
         exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
+        exec_t = self._executed_tensor_from_np(exec_np, ref=mean)
+        if self.action_transform == "tanh_norm_ablation":
+            log_prob = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+        else:
+            log_prob = self.calculate_gaussian_log_prob(mean, log_std, exec_t)
         return SampledStep(
             exec_action_np=exec_np,
             policy_tensor=policy_tensor.detach(),
             unsquashed=unsquashed.detach(),
+            logprob_action=exec_t.detach(),
             log_prob=log_prob.detach(),
             distr_mean=mean.detach(),
             distr_log_std=log_std.detach(),
@@ -341,6 +361,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         """Sample one action per batch row; RNG matches serial `collect_rollout_group` indexing."""
         proc_d = self._proc_to_device(proc)
         mean, log_std = self._policy.select_action_distr_params(proc_d)
+        log_std = self.clamp_log_std(log_std, self.min_log_std)
         b = int(mean.shape[0])
         if b != int(n_envs):
             raise ValueError(f"proc batch dim {b} != n_envs {int(n_envs)}")
@@ -353,6 +374,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
         oob_rows: list[float] = []
+        scored_rows: list[torch.Tensor] = []
         if rngs is not None and len(rngs) != b:
             raise ValueError(f"rngs length {len(rngs)} != n_envs {b}")
         if rngs is None and reset_seed is None:
@@ -371,15 +393,19 @@ class MetaWorldSmolVLAGRPOPolicy:
             unsquashed = m + std * noise
             if self.action_transform == "tanh_norm_ablation":
                 policy_tensor = torch.tanh(unsquashed)
-                log_prob = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
             else:
                 policy_tensor = unsquashed
-                log_prob = self.calculate_gaussian_log_prob(m, ls, unsquashed)
             exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
+            exec_t = self._executed_tensor_from_np(exec_np, ref=m)
+            if self.action_transform == "tanh_norm_ablation":
+                log_prob = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+            else:
+                log_prob = self.calculate_gaussian_log_prob(m, ls, exec_t)
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             policy_rows.append(policy_tensor.detach())
             unsq_rows.append(unsquashed.detach())
             lp_rows.append(log_prob.detach())
+            scored_rows.append(exec_t.detach())
             mean_rows.append(m.detach())
             log_std_rows.append(ls.detach())
             clip_frac_rows.append(clip_fraction)
@@ -390,6 +416,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             policy_tensor=torch.cat(policy_rows, dim=0),
             unsquashed=torch.cat(unsq_rows, dim=0),
             log_prob=torch.cat(lp_rows, dim=0).reshape(b),
+            logprob_action=torch.cat(scored_rows, dim=0),
             distr_mean=torch.cat(mean_rows, dim=0),
             distr_log_std=torch.cat(log_std_rows, dim=0),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
@@ -467,17 +494,18 @@ class MetaWorldSmolVLAGRPOPolicy:
     def get_action_probs_from_proc_list(
         self,
         proc_snapshots: Sequence[Any],
-        unsquashed_actions: torch.Tensor,
+        scored_actions: torch.Tensor,
     ) -> torch.Tensor:
-        """Recompute log p(a|s) from stored preprocessor outputs (no env needed)."""
-        if len(proc_snapshots) != int(unsquashed_actions.shape[0]):
-            raise ValueError("proc_snapshots length must match unsquashed_actions batch dim")
+        """Recompute log p(a|s) for executed (env-seen) actions from proc snapshots."""
+        if len(proc_snapshots) != int(scored_actions.shape[0]):
+            raise ValueError("proc_snapshots length must match scored_actions batch dim")
         self._reset_policy_forward_state()
         batched = self._proc_to_device(collate_proc_snapshots(proc_snapshots))
         mean, log_std = self._policy.select_action_distr_params(batched)
+        log_std = self.clamp_log_std(log_std, self.min_log_std)
         mean = mean.reshape(len(proc_snapshots), -1)
         log_std = log_std.reshape(len(proc_snapshots), -1)
-        u = unsquashed_actions.to(mean.device)
+        u = scored_actions.to(mean.device)
         if u.shape != mean.shape:
             u = u.reshape(mean.shape)
         if self.action_transform == "tanh_norm_ablation":
