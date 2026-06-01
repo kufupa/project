@@ -31,6 +31,7 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_phase111_on_grpo_lerobot_smoke.slurm",
         "submit_phase111_single_task_grpo.slurm",
         "submit_phase111_vector_rollout_smoke.slurm",
+        "submit_flow_sde_grpo_smoke_a30.slurm",
         "submit_phase111_eval_sweep.slurm",
         "submit_phase11_chain.sh",
         "submit_api_gate_smoke.slurm",
@@ -66,6 +67,18 @@ def test_submit_phase111_vector_rollout_smoke_trains_sync_and_async() -> None:
     assert "--async-start-method forkserver" in text
     assert "PHASE111_VECTOR_ROLLOUT_SMOKE_OK" in text
     assert 'm_async.get("async_start_method") == "forkserver"' in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_submit_flow_sde_grpo_smoke_uses_live_flow_mode() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_grpo_smoke_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --export=NIL" in text
+    assert "scripts/slurm/common_env.sh" in text
+    assert "--logprob-mode flow_sde" in text
+    assert "--flow-sde-noise-level 0.5" in text
+    assert "--fail-on-parity-violation" in text
+    assert "FLOW_SDE_GRPO_SMOKE_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
