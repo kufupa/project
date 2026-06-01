@@ -96,7 +96,18 @@ def main() -> int:
         help="Exit non-zero if pre-update logprob ratio parity fails",
     )
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--min-log-std", type=float, default=-4.0)
+    p.add_argument("--kl-beta", type=float, default=0.0)
+    p.add_argument("--entropy-coef", type=float, default=0.0)
+    p.add_argument(
+        "--logprob-mode",
+        choices=("gaussian", "flow_sde"),
+        default="gaussian",
+        help="flow_sde requires venv denoise hook (Phase B)",
+    )
     args = p.parse_args()
+    if args.logprob_mode != "gaussian":
+        raise SystemExit("logprob_mode flow_sde not enabled yet; use gaussian for Phase46")
     if args.batch_size != 1:
         raise SystemExit("Only batch_size=1 supported (one seed context per update).")
     if float(args.euler_step_noise_std) > 0.0 and not args.allow_euler_noise:
@@ -128,6 +139,7 @@ def main() -> int:
         flip_corner2=flip_corner2,
         action_dim=action_dim,
         action_transform=args.action_transform,
+        min_log_std=float(args.min_log_std),
     )
     train_wrapper.assert_grpo_api()
     train_wrapper.set_log_std(args.init_log_std)
@@ -319,18 +331,23 @@ def main() -> int:
                 t_len = len(traj.proc_snapshots)
                 for cs in range(0, t_len, args.chunk_size):
                     ce = min(cs + args.chunk_size, t_len)
-                    u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(device)
+                    scored_chunk = torch.stack([traj.logprob_actions[t] for t in range(cs, ce)]).to(
+                        device
+                    )
                     mean_stored = torch.stack([traj.distr_means[t] for t in range(cs, ce)]).to(device)
                     log_std_stored = torch.stack([traj.distr_log_stds[t] for t in range(cs, ce)]).to(device)
                     old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
                     if train_wrapper.action_transform == "tanh_norm_ablation":
+                        u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(
+                            device
+                        )
                         squished = torch.tanh(u_chunk)
                         replay_lp = train_wrapper.calculate_log_prob(
                             mean_stored, log_std_stored, u_chunk, squished, eps=train_wrapper.eps
                         ).reshape(-1)
                     else:
                         replay_lp = train_wrapper.calculate_gaussian_log_prob(
-                            mean_stored, log_std_stored, u_chunk
+                            mean_stored, log_std_stored, scored_chunk
                         ).reshape(-1)
                     parity_old.append(old_lp.detach().cpu())
                     parity_new.append(replay_lp.detach().cpu())
@@ -360,11 +377,13 @@ def main() -> int:
                 for cs in range(0, T, args.chunk_size):
                     ce = min(cs + args.chunk_size, T)
                     procs = traj.proc_snapshots[cs:ce]
-                    u_chunk = torch.stack([traj.unsquashed_actions[t] for t in range(cs, ce)]).to(
+                    scored_chunk = torch.stack([traj.logprob_actions[t] for t in range(cs, ce)]).to(
                         device
                     )
                     old_lp = torch.stack([traj.log_probs[t] for t in range(cs, ce)]).to(device).reshape(-1)
-                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, u_chunk).reshape(-1)
+                    new_lp = train_wrapper.get_action_probs_from_proc_list(procs, scored_chunk).reshape(
+                        -1
+                    )
                     ratio = torch.exp(new_lp - old_lp)
                     unclipped = ratio * A
                     clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * A
