@@ -56,28 +56,24 @@ class _TracePolicy(_DummyPolicy):
     def select_action_distr_params(self, proc, **kwargs):
         assert kwargs["flow_sde_trace"] is True
         b = int(proc["x"].shape[0])
-        mu = torch.zeros(b, 1, 4)
-        sigma = torch.full((b, 1, 4), 0.5)
-        a_next = torch.full((b, 1, 4), 0.25)
+        mu = torch.zeros(b, 1, 8)
+        sigma = torch.full((b, 1, 8), 0.5)
+        a_next = torch.full((b, 1, 8), 0.25)
         self.last_flow_sde_trace = {
             "tau_idx": torch.zeros(b, dtype=torch.long),
-            "A_tau": torch.zeros(b, 1, 4),
-            "v_tau": torch.ones(b, 1, 4),
+            "A_tau": torch.zeros(b, 1, 8),
+            "v_tau": torch.ones(b, 1, 8),
             "mu_tau": mu,
             "sigma_tau": sigma,
             "A_next": a_next,
             "noise_seed": kwargs.get("flow_sde_noise_seed"),
         }
-        return a_next[:, 0, :], torch.zeros(b, 4)
+        return a_next[:, 0, :4], torch.zeros(b, 4)
 
     def flow_sde_logprob_from_trace(self, proc, flow_sde_trace, *, flow_sde_noise_level: float):
         assert flow_sde_noise_level == 0.5
         return (
-            sde_step_logprob(
-                flow_sde_trace["A_next"],
-                flow_sde_trace["mu_tau"],
-                flow_sde_trace["sigma_tau"],
-            ),
+            torch.zeros(flow_sde_trace["A_next"].shape[:2]),
             flow_sde_trace["mu_tau"],
             flow_sde_trace["sigma_tau"],
         )
@@ -198,7 +194,12 @@ def test_flow_sde_mode_scores_and_exports_trace() -> None:
     assert trace is not None
     for key in ("tau_idx", "A_tau", "v_tau", "mu_tau", "sigma_tau", "A_next", "noise_seed"):
         assert key in trace
-    expected = sde_step_logprob(trace["A_next"], trace["mu_tau"], trace["sigma_tau"]).reshape(())
+    assert trace["A_tau"].shape[-1] == 8
+    expected = sde_step_logprob(
+        trace["A_next"][..., :4],
+        trace["mu_tau"][..., :4],
+        trace["sigma_tau"][..., :4],
+    ).reshape(())
     assert torch.allclose(step.log_prob.reshape(()), expected, atol=1e-6)
 
 

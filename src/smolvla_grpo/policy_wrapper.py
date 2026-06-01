@@ -296,18 +296,18 @@ class MetaWorldSmolVLAGRPOPolicy:
                 t = value
                 if row is not None and t.dim() > 0 and int(t.shape[0]) > row:
                     t = t[row : row + 1]
-                if t.dim() >= 3:
-                    t = t[:, :1, : self.action_dim]
-                elif t.dim() >= 2 and key != "tau_idx":
-                    t = t[:, : self.action_dim]
                 out[key] = t.detach()
             else:
                 out[key] = value
         return out
 
     @staticmethod
-    def _flow_sde_log_prob_from_trace(trace: dict[str, Any]) -> torch.Tensor:
-        return sde_step_logprob(trace["A_next"], trace["mu_tau"], trace["sigma_tau"]).reshape(-1)
+    def _flow_sde_log_prob_from_trace(trace: dict[str, Any], *, action_dim: int) -> torch.Tensor:
+        return sde_step_logprob(
+            trace["A_next"][..., :action_dim],
+            trace["mu_tau"][..., :action_dim],
+            trace["sigma_tau"][..., :action_dim],
+        ).reshape(-1)
 
     def _get_distr_params_chunk(
         self,
@@ -412,15 +412,18 @@ class MetaWorldSmolVLAGRPOPolicy:
             flow_trace = self._slice_flow_sde_trace(self._get_last_flow_sde_trace())
             policy_tensor = mean
             exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
-            log_prob = self._flow_sde_log_prob_from_trace(flow_trace)
+            log_prob = self._flow_sde_log_prob_from_trace(flow_trace, action_dim=self.action_dim)
+            trace_action = flow_trace["A_next"][..., : self.action_dim].reshape(mean.shape)
+            trace_mu = flow_trace["mu_tau"][..., : self.action_dim].reshape(mean.shape)
+            trace_sigma = flow_trace["sigma_tau"][..., : self.action_dim].reshape(mean.shape)
             return SampledStep(
                 exec_action_np=exec_np,
                 policy_tensor=policy_tensor.detach(),
                 unsquashed=policy_tensor.detach(),
-                logprob_action=flow_trace["A_next"].reshape(mean.shape).detach(),
+                logprob_action=trace_action.detach(),
                 log_prob=log_prob.detach(),
-                distr_mean=flow_trace["mu_tau"].reshape(mean.shape).detach(),
-                distr_log_std=torch.log(flow_trace["sigma_tau"].reshape(mean.shape).clamp(min=self.eps)).detach(),
+                distr_mean=trace_mu.detach(),
+                distr_log_std=torch.log(trace_sigma.clamp(min=self.eps)).detach(),
                 action_clip_fraction=clip_fraction,
                 action_clip_any=clip_any,
                 postprocessor_oob_mean=oob_mean,
@@ -506,15 +509,16 @@ class MetaWorldSmolVLAGRPOPolicy:
                 row_trace = self._slice_flow_sde_trace(full_trace, row=r)
                 policy_tensor = mean[r : r + 1]
                 exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
-                log_prob = self._flow_sde_log_prob_from_trace(row_trace)
+                log_prob = self._flow_sde_log_prob_from_trace(row_trace, action_dim=self.action_dim)
+                trace_action = row_trace["A_next"][..., : self.action_dim].reshape(policy_tensor.shape)
+                trace_mu = row_trace["mu_tau"][..., : self.action_dim].reshape(policy_tensor.shape)
+                trace_sigma = row_trace["sigma_tau"][..., : self.action_dim].reshape(policy_tensor.shape)
                 exec_rows.append(np.asarray(exec_np, dtype=np.float32))
                 policy_rows.append(policy_tensor.detach())
                 lp_rows.append(log_prob.detach())
-                scored_rows.append(row_trace["A_next"].reshape(policy_tensor.shape).detach())
-                mean_rows.append(row_trace["mu_tau"].reshape(policy_tensor.shape).detach())
-                log_std_rows.append(
-                    torch.log(row_trace["sigma_tau"].reshape(policy_tensor.shape).clamp(min=self.eps)).detach()
-                )
+                scored_rows.append(trace_action.detach())
+                mean_rows.append(trace_mu.detach())
+                log_std_rows.append(torch.log(trace_sigma.clamp(min=self.eps)).detach())
                 clip_frac_rows.append(clip_fraction)
                 clip_any_rows.append(clip_any)
                 oob_rows.append(oob_mean)
@@ -716,7 +720,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         hook = getattr(self._policy, "flow_sde_logprob_from_trace", None)
         if not callable(hook):
             raise RuntimeError("flow_sde recompute requires policy.flow_sde_logprob_from_trace")
-        log_probs, mu, sigma = hook(
+        _log_probs_full, mu, sigma = hook(
             batched,
             trace,
             flow_sde_noise_level=self.flow_sde_noise_level,
@@ -724,6 +728,8 @@ class MetaWorldSmolVLAGRPOPolicy:
         mu = mu.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
         sigma = sigma.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
         log_std = torch.log(sigma.clamp(min=self.eps))
+        action = trace["A_next"].reshape(len(proc_snapshots), -1)[:, : self.action_dim]
+        log_probs = sde_step_logprob(action, mu, sigma)
         return log_probs.reshape(-1), mu, log_std
 
     def get_action_probs_for_chunk_from_proc(
