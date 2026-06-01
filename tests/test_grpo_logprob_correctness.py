@@ -50,12 +50,11 @@ class _TracePolicy(_DummyPolicy):
     def __init__(self) -> None:
         super().__init__(torch.zeros(1, 4), torch.zeros(1, 4))
         self.model = self
-        self.config = type("Config", (), {"n_action_steps": 1})()
+        self.config = type("Config", (), {"n_action_steps": 1, "num_steps": 10})()
         self.last_flow_sde_trace = None
 
-    def select_action_distr_params(self, proc, **kwargs):
+    def _export_trace(self, b: int, *, kwargs) -> torch.Tensor:
         assert kwargs["flow_sde_trace"] is True
-        b = int(proc["x"].shape[0])
         mu = torch.zeros(b, 3, 8)
         sigma = torch.full((b, 3, 8), 0.5)
         a_next = torch.full((b, 3, 8), 0.25)
@@ -68,7 +67,17 @@ class _TracePolicy(_DummyPolicy):
             "A_next": a_next,
             "noise_seed": kwargs.get("flow_sde_noise_seed"),
         }
+        return a_next
+
+    def select_action_distr_params(self, proc, **kwargs):
+        b = int(proc["x"].shape[0])
+        a_next = self._export_trace(b, kwargs=kwargs)
         return a_next[:, 0, :4], torch.zeros(b, 4)
+
+    def _get_distr_params_chunk(self, proc, **kwargs):
+        b = int(proc["x"].shape[0])
+        a_next = self._export_trace(b, kwargs=kwargs)
+        return a_next[:, :3, :4], torch.zeros(b, 3, 4)
 
     def flow_sde_logprob_from_trace(self, proc, flow_sde_trace, *, flow_sde_noise_level: float):
         assert flow_sde_noise_level == 0.5
@@ -230,6 +239,77 @@ def test_flow_sde_recompute_uses_stored_trace() -> None:
     assert torch.allclose(recomputed.reshape(()), step.log_prob.reshape(()), atol=1e-6)
     assert torch.allclose(mu, step.distr_mean)
     assert torch.allclose(log_std, step.distr_log_std)
+
+
+def test_flow_sde_chunk_mode_preserves_chunk_axis() -> None:
+    bundle = _DummyBundle()
+    policy = _TracePolicy()
+    policy.config = type("Config", (), {"n_action_steps": 5, "num_steps": 10})()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+
+    chunk = wrapper.sample_action_chunk_from_proc(
+        {"x": torch.zeros(1, 1)},
+        chunk_len=3,
+        rng=torch.Generator().manual_seed(123),
+    )
+
+    assert chunk.flow_sde_trace is not None
+    assert chunk.flow_sde_trace["A_next"].shape == (1, 3, 8)
+    assert chunk.log_prob_steps.shape == (3,)
+    expected_steps = sde_step_logprob(
+        chunk.flow_sde_trace["A_next"][:, :3, :4],
+        chunk.flow_sde_trace["mu_tau"][:, :3, :4],
+        chunk.flow_sde_trace["sigma_tau"][:, :3, :4],
+    ).reshape(3)
+    torch.testing.assert_close(chunk.log_prob_steps, expected_steps)
+    torch.testing.assert_close(chunk.log_prob_sum, expected_steps.sum())
+
+
+def test_flow_sde_chunk_recompute_uses_stored_trace() -> None:
+    bundle = _DummyBundle()
+    policy = _TracePolicy()
+    policy.config = type("Config", (), {"n_action_steps": 5, "num_steps": 10})()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+    proc = {"x": torch.zeros(1, 1)}
+    chunk = wrapper.sample_action_chunk_from_proc(
+        proc,
+        chunk_len=3,
+        rng=torch.Generator().manual_seed(123),
+    )
+
+    recomputed, mu, log_std = wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
+        [proc],
+        [chunk.flow_sde_trace],
+        chunk_len=3,
+    )
+
+    torch.testing.assert_close(recomputed.reshape(3), chunk.log_prob_steps)
+    torch.testing.assert_close(mu.reshape(3, 4), chunk.distr_mean)
+    torch.testing.assert_close(log_std.reshape(3, 4), chunk.distr_log_std)
 
 
 def test_trainer_rejects_nonzero_euler_without_flag() -> None:

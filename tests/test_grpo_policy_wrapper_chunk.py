@@ -124,6 +124,7 @@ def test_sample_action_chunk_from_proc_returns_full_chunk_shapes() -> None:
     assert chunk.log_prob_sum.shape == ()
     assert chunk.action_clip_fraction.shape == (25,)
     assert chunk.action_clip_any.shape == (25,)
+    assert chunk.postprocessor_oob_mean.shape == (25,)
     assert isinstance(chunk.unique_action_rows, int)
     assert chunk.unique_action_rows >= 1
     assert policy.chunk_calls == [50]

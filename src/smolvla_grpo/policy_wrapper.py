@@ -61,11 +61,16 @@ class SampledActionChunk:
     exec_action_np: np.ndarray
     policy_tensor: torch.Tensor
     unsquashed_chunk: torch.Tensor
+    logprob_action: torch.Tensor
     log_prob_steps: torch.Tensor
     log_prob_sum: torch.Tensor
+    distr_mean: torch.Tensor
+    distr_log_std: torch.Tensor
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
+    postprocessor_oob_mean: np.ndarray
     unique_action_rows: int
+    flow_sde_trace: dict[str, Any] | None = None
 
 
 def collate_proc_snapshots(proc_snapshots: Sequence[Any]) -> dict[str, Any]:
@@ -277,6 +282,16 @@ class MetaWorldSmolVLAGRPOPolicy:
             return None
         return int(torch.randint(0, 2**31 - 1, (1,), generator=rng, device=device).item())
 
+    def _sample_flow_sde_trace_step(self, rng: torch.Generator | None, *, device: torch.device) -> int:
+        num_steps = int(getattr(getattr(self._policy, "config", None), "num_steps", 10))
+        if self.flow_sde_trace_step >= 0:
+            if self.flow_sde_trace_step >= num_steps:
+                raise ValueError(f"flow_sde_trace_step must be < {num_steps}, got {self.flow_sde_trace_step}")
+            return int(self.flow_sde_trace_step)
+        if rng is None:
+            return int(torch.randint(0, num_steps, (1,), device=device).item())
+        return int(torch.randint(0, num_steps, (1,), generator=rng, device=device).item())
+
     def _get_last_flow_sde_trace(self) -> dict[str, Any]:
         model = getattr(self._policy, "model", self._policy)
         trace = getattr(model, "last_flow_sde_trace", None)
@@ -308,6 +323,17 @@ class MetaWorldSmolVLAGRPOPolicy:
             trace["mu_tau"][:, 0, :action_dim],
             trace["sigma_tau"][:, 0, :action_dim],
         ).reshape(-1)
+
+    def _flow_sde_log_prob_steps_from_trace(
+        self,
+        trace: dict[str, Any],
+        *,
+        chunk_len: int,
+    ) -> torch.Tensor:
+        action = trace["A_next"][:, : int(chunk_len), : self.action_dim]
+        mu = trace["mu_tau"][:, : int(chunk_len), : self.action_dim]
+        sigma = trace["sigma_tau"][:, : int(chunk_len), : self.action_dim]
+        return sde_step_logprob(action, mu, sigma).reshape(-1)
 
     def _get_distr_params_chunk(
         self,
@@ -611,7 +637,78 @@ class MetaWorldSmolVLAGRPOPolicy:
         rng: torch.Generator | None = None,
     ) -> SampledActionChunk:
         proc_d = self._proc_to_device(proc)
+        if self.logprob_mode == "flow_sde":
+            if self.action_transform != "no_tanh":
+                raise RuntimeError("flow_sde chunk GRPO requires action_transform='no_tanh'")
+            policy_hook = getattr(self._policy, "_get_distr_params_chunk", None)
+            model_hook = getattr(getattr(self._policy, "model", None), "_get_distr_params_chunk", None)
+            hook = policy_hook if callable(policy_hook) else model_hook
+            if not callable(hook):
+                raise RuntimeError("flow_sde chunk GRPO requires _get_distr_params_chunk hook")
+            tau_idx = self._sample_flow_sde_trace_step(rng, device=self.bundle.device)
+            noise_seed = self._next_flow_sde_noise_seed(rng, device=self.bundle.device)
+            mean_full, log_std_full = hook(
+                proc_d,
+                flow_sde_trace=True,
+                flow_sde_noise_level=self.flow_sde_noise_level,
+                flow_sde_trace_step=tau_idx,
+                flow_sde_noise_seed=noise_seed,
+            )
+            mean, _log_std = self._reshape_chunk_params(
+                mean_full,
+                torch.zeros_like(mean_full),
+                chunk_len=int(chunk_len),
+            )
+            full_trace = self._slice_flow_sde_trace(self._get_last_flow_sde_trace())
+            full_trace["flow_sde_noise_level"] = self.flow_sde_noise_level
+            for key in ("A_tau", "v_tau", "mu_tau", "sigma_tau", "A_next"):
+                if torch.is_tensor(full_trace.get(key)):
+                    full_trace[key] = full_trace[key][:, : int(chunk_len), :].detach()
+            log_prob_steps = self._flow_sde_log_prob_steps_from_trace(
+                full_trace,
+                chunk_len=int(chunk_len),
+            )
+            policy_tensor = mean
+
+            exec_rows: list[np.ndarray] = []
+            clip_frac_rows: list[float] = []
+            clip_any_rows: list[bool] = []
+            oob_rows: list[float] = []
+            for row in policy_tensor:
+                exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(row.reshape(1, -1))
+                exec_rows.append(np.asarray(exec_np, dtype=np.float32))
+                clip_frac_rows.append(clip_fraction)
+                clip_any_rows.append(clip_any)
+                oob_rows.append(oob_mean)
+
+            exec_action_np = np.stack(exec_rows, axis=0)
+            trace_action = full_trace["A_next"][:, : int(chunk_len), : self.action_dim].reshape(
+                int(chunk_len), self.action_dim
+            )
+            trace_mu = full_trace["mu_tau"][:, : int(chunk_len), : self.action_dim].reshape(
+                int(chunk_len), self.action_dim
+            )
+            trace_sigma = full_trace["sigma_tau"][:, : int(chunk_len), : self.action_dim].reshape(
+                int(chunk_len), self.action_dim
+            )
+            return SampledActionChunk(
+                exec_action_np=exec_action_np,
+                policy_tensor=policy_tensor.detach(),
+                unsquashed_chunk=policy_tensor.detach(),
+                logprob_action=trace_action.detach(),
+                log_prob_steps=log_prob_steps.detach(),
+                log_prob_sum=log_prob_steps.detach().sum(),
+                distr_mean=trace_mu.detach(),
+                distr_log_std=torch.log(trace_sigma.clamp(min=self.eps)).detach(),
+                action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
+                action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+                postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
+                unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
+                flow_sde_trace=full_trace,
+            )
+
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=int(chunk_len))
+        log_std = self.clamp_log_std(log_std, self.min_log_std)
         std = torch.exp(log_std)
         if rng is None:
             noise = torch.randn_like(mean)
@@ -620,30 +717,42 @@ class MetaWorldSmolVLAGRPOPolicy:
         unsquashed = mean + std * noise
         if self.action_transform == "tanh_norm_ablation":
             policy_tensor = torch.tanh(unsquashed)
-            log_prob_steps = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
         else:
             policy_tensor = unsquashed
-            log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std, unsquashed)
 
         exec_rows: list[np.ndarray] = []
         clip_frac_rows: list[float] = []
         clip_any_rows: list[bool] = []
+        oob_rows: list[float] = []
         for row in policy_tensor:
-            exec_np, clip_fraction, clip_any = self._postprocess_and_clip(row.reshape(1, -1))
+            exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(row.reshape(1, -1))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             clip_frac_rows.append(clip_fraction)
             clip_any_rows.append(clip_any)
+            oob_rows.append(oob_mean)
 
         exec_action_np = np.stack(exec_rows, axis=0)
+        if self.action_transform == "tanh_norm_ablation":
+            logprob_action = unsquashed
+            log_prob_steps = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+        else:
+            exec_t = self._executed_tensor_from_np(exec_action_np, ref=mean)
+            logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
+            log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std, logprob_action)
         return SampledActionChunk(
             exec_action_np=exec_action_np,
             policy_tensor=policy_tensor.detach(),
             unsquashed_chunk=unsquashed.detach(),
+            logprob_action=logprob_action.detach(),
             log_prob_steps=log_prob_steps.detach().reshape(int(chunk_len)),
             log_prob_sum=log_prob_steps.detach().sum(),
+            distr_mean=mean.detach(),
+            distr_log_std=log_std.detach(),
             action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
             action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+            postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
             unique_action_rows=int(np.unique(exec_action_np, axis=0).shape[0]),
+            flow_sde_trace=None,
         )
 
     def sample_action(
@@ -732,6 +841,34 @@ class MetaWorldSmolVLAGRPOPolicy:
         log_probs = sde_step_logprob(action, mu, sigma)
         return log_probs.reshape(-1), mu, log_std
 
+    def get_flow_sde_log_probs_for_chunk_from_proc_list(
+        self,
+        proc_snapshots: Sequence[Any],
+        flow_sde_traces: Sequence[dict[str, Any] | None],
+        *,
+        chunk_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Recompute chunk Flow-SDE log p(A_next|A_tau,s) from stored traces."""
+        if len(proc_snapshots) != len(flow_sde_traces):
+            raise ValueError("proc_snapshots length must match flow_sde_traces length")
+        self._reset_policy_forward_state()
+        batched = self._proc_to_device(collate_proc_snapshots(proc_snapshots))
+        trace = self._proc_to_device(collate_flow_sde_traces(flow_sde_traces))
+        hook = getattr(self._policy, "flow_sde_logprob_from_trace", None)
+        if not callable(hook):
+            raise RuntimeError("flow_sde recompute requires policy.flow_sde_logprob_from_trace")
+        _log_probs_full, mu, sigma = hook(
+            batched,
+            trace,
+            flow_sde_noise_level=self.flow_sde_noise_level,
+        )
+        mu_env = mu[:, : int(chunk_len), : self.action_dim]
+        sigma_env = sigma[:, : int(chunk_len), : self.action_dim]
+        action = trace["A_next"][:, : int(chunk_len), : self.action_dim]
+        log_probs = sde_step_logprob(action, mu_env, sigma_env)
+        log_std = torch.log(sigma_env.clamp(min=self.eps))
+        return log_probs, mu_env, log_std
+
     def get_action_probs_for_chunk_from_proc(
         self,
         proc: Any,
@@ -740,6 +877,7 @@ class MetaWorldSmolVLAGRPOPolicy:
         proc_d = self._proc_to_device(proc)
         chunk_len = int(unsquashed_chunk.reshape(-1, self.action_dim).shape[0])
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=chunk_len)
+        log_std = self.clamp_log_std(log_std, self.min_log_std)
         u = unsquashed_chunk.to(mean.device).reshape(mean.shape)
         if self.action_transform == "tanh_norm_ablation":
             squished = torch.tanh(u)
