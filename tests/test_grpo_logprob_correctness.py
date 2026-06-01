@@ -114,3 +114,19 @@ def test_trainer_rejects_nonzero_euler_without_flag() -> None:
     assert "--allow-euler-noise" in text
     assert "summarize_logprob_ratio_parity" in text
     assert "parity_stats" in text
+
+
+def test_trainer_live_parity_uses_recompute_path_not_stored_params() -> None:
+    text = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "grpo"
+        / "train_phase11_env_on_policy_grpo.py"
+    ).read_text(encoding="utf-8")
+    assert "def compute_live_logprob_parity(" in text
+    parity_body = text.split("def compute_live_logprob_parity(", maxsplit=1)[1].split(
+        "\ndef main()", maxsplit=1
+    )[0]
+    assert "get_action_probs_from_proc_list" in parity_body
+    assert "calculate_gaussian_log_prob" not in parity_body
+    assert "mean_stored" not in parity_body
