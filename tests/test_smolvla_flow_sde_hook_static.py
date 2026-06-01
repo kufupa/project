@@ -31,3 +31,12 @@ def test_gaussian_sampling_path_does_not_require_flow_sde_trace() -> None:
 
     assert 'flow_sde_trace = bool(kwargs.get("flow_sde_trace", False))' in text
     assert "if flow_sde_trace:" in text
+
+
+def test_smolvla_venv_hook_can_recompute_flow_sde_logprob() -> None:
+    text = _modeling_smolvla_path().read_text(encoding="utf-8")
+
+    assert "def flow_sde_logprob_from_trace(" in text
+    assert "A_tau" in text
+    assert "A_next" in text
+    assert "self.denoise_step(" in text
