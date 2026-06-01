@@ -661,10 +661,14 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
             full_trace = self._slice_flow_sde_trace(self._get_last_flow_sde_trace())
             full_trace["flow_sde_noise_level"] = self.flow_sde_noise_level
-            log_prob_steps = self._flow_sde_log_prob_steps_from_trace(
-                full_trace,
-                chunk_len=int(chunk_len),
+            log_prob_steps_batched, trace_mu_batched, trace_log_std_batched = (
+                self.get_flow_sde_log_probs_for_chunk_from_proc_list(
+                    [proc_d],
+                    [full_trace],
+                    chunk_len=int(chunk_len),
+                )
             )
+            log_prob_steps = log_prob_steps_batched.reshape(-1)
             policy_tensor = mean
 
             exec_rows: list[np.ndarray] = []
@@ -682,12 +686,8 @@ class MetaWorldSmolVLAGRPOPolicy:
             trace_action = full_trace["A_next"][:, : int(chunk_len), : self.action_dim].reshape(
                 int(chunk_len), self.action_dim
             )
-            trace_mu = full_trace["mu_tau"][:, : int(chunk_len), : self.action_dim].reshape(
-                int(chunk_len), self.action_dim
-            )
-            trace_sigma = full_trace["sigma_tau"][:, : int(chunk_len), : self.action_dim].reshape(
-                int(chunk_len), self.action_dim
-            )
+            trace_mu = trace_mu_batched.reshape(int(chunk_len), self.action_dim)
+            trace_log_std = trace_log_std_batched.reshape(int(chunk_len), self.action_dim)
             return SampledActionChunk(
                 exec_action_np=exec_action_np,
                 policy_tensor=policy_tensor.detach(),
@@ -696,7 +696,7 @@ class MetaWorldSmolVLAGRPOPolicy:
                 log_prob_steps=log_prob_steps.detach(),
                 log_prob_sum=log_prob_steps.detach().sum(),
                 distr_mean=trace_mu.detach(),
-                distr_log_std=torch.log(trace_sigma.clamp(min=self.eps)).detach(),
+                distr_log_std=trace_log_std.detach(),
                 action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
                 action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
                 postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
