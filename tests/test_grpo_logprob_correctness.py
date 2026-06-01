@@ -257,3 +257,18 @@ def test_trainer_live_parity_uses_recompute_path_not_stored_params() -> None:
     assert "get_action_probs_from_proc_list" in parity_body
     assert "calculate_gaussian_log_prob" not in parity_body
     assert "mean_stored" not in parity_body
+
+
+def test_trainer_flow_sde_uses_live_trace_recompute() -> None:
+    text = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "grpo"
+        / "train_phase11_env_on_policy_grpo.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'if args.logprob_mode != "gaussian"' not in text
+    assert "get_flow_sde_log_probs_from_proc_list" in text
+    assert "logprob_mode=args.logprob_mode" in text
+    assert "--flow-sde-noise-level" in text
+    assert "--flow-sde-trace-step" in text
