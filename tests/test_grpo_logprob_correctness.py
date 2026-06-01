@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from smolvla_grpo.grpo_math import summarize_logprob_ratio_parity
+from smolvla_grpo.flow_logprob import sde_step_logprob
 from smolvla_grpo.policy_wrapper import MetaWorldSmolVLAGRPOPolicy
 
 
@@ -43,6 +44,31 @@ class _DummyPolicy:
 
     def eval(self):
         return None
+
+
+class _TracePolicy(_DummyPolicy):
+    def __init__(self) -> None:
+        super().__init__(torch.zeros(1, 4), torch.zeros(1, 4))
+        self.model = self
+        self.config = type("Config", (), {"n_action_steps": 1})()
+        self.last_flow_sde_trace = None
+
+    def select_action_distr_params(self, proc, **kwargs):
+        assert kwargs["flow_sde_trace"] is True
+        b = int(proc["x"].shape[0])
+        mu = torch.zeros(b, 1, 4)
+        sigma = torch.full((b, 1, 4), 0.5)
+        a_next = torch.full((b, 1, 4), 0.25)
+        self.last_flow_sde_trace = {
+            "tau_idx": torch.zeros(b, dtype=torch.long),
+            "A_tau": torch.zeros(b, 1, 4),
+            "v_tau": torch.ones(b, 1, 4),
+            "mu_tau": mu,
+            "sigma_tau": sigma,
+            "A_next": a_next,
+            "noise_seed": kwargs.get("flow_sde_noise_seed"),
+        }
+        return a_next[:, 0, :], torch.zeros(b, 4)
 
 
 def _wrapper(
@@ -134,6 +160,34 @@ def test_get_action_probs_resets_policy_before_batched_forward() -> None:
     unsq = torch.zeros(2, 4)
     wrapper.get_action_probs_from_proc_list(procs, unsq)
     assert policy.reset_calls >= 1
+
+
+def test_flow_sde_mode_scores_and_exports_trace() -> None:
+    bundle = _DummyBundle()
+    policy = _TracePolicy()
+    wrapper = MetaWorldSmolVLAGRPOPolicy(
+        bundle,
+        task="push-v3",
+        task_text="push",
+        camera_name="corner2",
+        flip_corner2=False,
+        action_dim=4,
+        policy_module=policy,
+        logprob_mode="flow_sde",
+        flow_sde_noise_level=0.5,
+        flow_sde_trace_step=0,
+        action_low=np.full((4,), -1.0, dtype=np.float32),
+        action_high=np.full((4,), 1.0, dtype=np.float32),
+    )
+
+    step = wrapper.sample_action_from_proc({"x": torch.zeros(1, 1)}, rng=torch.Generator().manual_seed(123))
+    trace = step.flow_sde_trace
+
+    assert trace is not None
+    for key in ("tau_idx", "A_tau", "v_tau", "mu_tau", "sigma_tau", "A_next", "noise_seed"):
+        assert key in trace
+    expected = sde_step_logprob(trace["A_next"], trace["mu_tau"], trace["sigma_tau"]).reshape(())
+    assert torch.allclose(step.log_prob.reshape(()), expected, atol=1e-6)
 
 
 def test_trainer_rejects_nonzero_euler_without_flag() -> None:
