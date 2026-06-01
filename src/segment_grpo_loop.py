@@ -2103,7 +2103,9 @@ def _load_replay_root(replay_root: str | Path | None, *, dry_run: bool, seed: in
         images_a = np.asarray(payload.get("images"), dtype=np.uint8)
         proprio_a = np.asarray(payload.get("proprio"), dtype=np.float32)
     else:
-        payload = torch.load(root, map_location="cpu")
+        from smolvla_grpo.checkpointing import torch_load_mmap_default
+
+        payload = torch_load_mmap_default(root, map_location="cpu")
         if isinstance(payload, dict):
             raw_images = payload.get("images")
             raw_proprio = payload.get("proprio")
@@ -2151,7 +2153,9 @@ def _load_goal_latent(
         elif p.suffix == ".npz":
             payload_obj = np.load(p, allow_pickle=True)
         else:
-            payload_obj = torch.load(p, map_location="cpu")
+            from smolvla_grpo.checkpointing import torch_load_mmap_default
+
+            payload_obj = torch_load_mmap_default(p, map_location="cpu")
 
         if isinstance(payload_obj, dict) and "latent" in payload_obj:
             return (
