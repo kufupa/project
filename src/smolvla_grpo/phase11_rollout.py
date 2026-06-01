@@ -56,6 +56,7 @@ class RolloutTrajectory:
     distr_means: list[torch.Tensor] = field(default_factory=list)
     distr_log_stds: list[torch.Tensor] = field(default_factory=list)
     log_probs: list[torch.Tensor] = field(default_factory=list)
+    flow_sde_traces: list[dict[str, Any] | None] = field(default_factory=list)
     action_clip_fractions: list[float] = field(default_factory=list)
     action_clip_any: list[bool] = field(default_factory=list)
     postprocessor_oob_means: list[float] = field(default_factory=list)
@@ -147,6 +148,7 @@ def collect_rollout_group(
     rollout_execution: str = "serial",
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
+    gaussian_logprob_action: str = "executed",
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` trajectories from same seed/task (GRPO group)."""
     if rollout_execution not in ("serial", "vector_sync", "vector_async"):
@@ -170,6 +172,7 @@ def collect_rollout_group(
             rollout_execution=rollout_execution,
             async_start_method=async_start_method,
             action_transform=action_transform,
+            gaussian_logprob_action=gaussian_logprob_action,
         )
 
     requested_max_steps = int(max_steps)
@@ -194,6 +197,7 @@ def collect_rollout_group(
         action_dim=action_dim,
         policy_module=policy_old,
         action_transform=action_transform,
+        gaussian_logprob_action=gaussian_logprob_action,
         action_low=action_low,
         action_high=action_high,
     )
@@ -208,6 +212,7 @@ def collect_rollout_group(
         traj.metadata["env_backend"] = env_backend
         traj.metadata["rollout_execution"] = rollout_execution
         traj.metadata["action_transform"] = action_transform
+        traj.metadata["gaussian_logprob_action"] = gaussian_logprob_action
         traj.metadata["async_start_method"] = (
             str(async_start_method) if rollout_execution == "vector_async" else "none"
         )
@@ -241,6 +246,7 @@ def collect_rollout_group(
             traj.distr_means.append(step.distr_mean.cpu())
             traj.distr_log_stds.append(step.distr_log_std.cpu())
             traj.log_probs.append(step.log_prob.cpu())
+            traj.flow_sde_traces.append(step.flow_sde_trace)
             traj.action_clip_fractions.append(float(step.action_clip_fraction))
             traj.action_clip_any.append(bool(step.action_clip_any))
             traj.postprocessor_oob_means.append(float(step.postprocessor_oob_mean))

@@ -54,6 +54,7 @@ def collect_official_lerobot_vector_rollout_group(
     rollout_execution: str,
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
+    gaussian_logprob_action: str = "executed",
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` one-episode trajectories with one vector env step per timestep."""
     if rollout_execution not in ("vector_sync", "vector_async"):
@@ -85,6 +86,7 @@ def collect_official_lerobot_vector_rollout_group(
             action_dim=action_dim,
             policy_module=policy_old,
             action_transform=action_transform,
+            gaussian_logprob_action=gaussian_logprob_action,
             action_low=action_low,
             action_high=action_high,
         )
@@ -99,6 +101,7 @@ def collect_official_lerobot_vector_rollout_group(
             tr.metadata["env_backend"] = "official_lerobot"
             tr.metadata["rollout_execution"] = rollout_execution
             tr.metadata["action_transform"] = action_transform
+            tr.metadata["gaussian_logprob_action"] = gaussian_logprob_action
             tr.metadata["async_start_method"] = async_start_method if use_async else "none"
             tr.metadata["requested_max_steps"] = requested_max_steps
             tr.metadata["resolved_max_steps"] = max_steps_i
@@ -139,6 +142,10 @@ def collect_official_lerobot_vector_rollout_group(
                 rollouts[i].distr_means.append(batch.distr_mean[i].detach().cpu())
                 rollouts[i].distr_log_stds.append(batch.distr_log_std[i].detach().cpu())
                 rollouts[i].log_probs.append(batch.log_prob[i].detach().cpu())
+                flow_trace = None
+                if batch.flow_sde_traces is not None:
+                    flow_trace = batch.flow_sde_traces[i]
+                rollouts[i].flow_sde_traces.append(flow_trace)
                 rollouts[i].action_clip_fractions.append(float(batch.action_clip_fraction[i]))
                 rollouts[i].action_clip_any.append(bool(batch.action_clip_any[i]))
                 rollouts[i].rewards.append(float(env_batch.reward[i]))

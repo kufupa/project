@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from smolvla_grpo.flow_logprob import sde_step_logprob
 from smolvla_pipeline.evaluator import (
     _SmolVLABundle,
     _collect_policy_rgb,
@@ -35,6 +36,7 @@ class SampledStep:
     action_clip_fraction: float = 0.0
     action_clip_any: bool = False
     postprocessor_oob_mean: float = 0.0
+    flow_sde_trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -51,6 +53,7 @@ class SampledBatchStep:
     action_clip_fraction: np.ndarray
     action_clip_any: np.ndarray
     postprocessor_oob_mean: np.ndarray
+    flow_sde_traces: list[dict[str, Any] | None] | None = None
 
 
 @dataclass
@@ -107,6 +110,9 @@ class MetaWorldSmolVLAGRPOPolicy:
         action_high: np.ndarray | None = None,
         min_log_std: float = -4.0,
         gaussian_logprob_action: str = "executed",
+        logprob_mode: str = "gaussian",
+        flow_sde_noise_level: float = 0.5,
+        flow_sde_trace_step: int = 0,
     ) -> None:
         self.bundle = bundle
         self.min_log_std = float(min_log_std)
@@ -121,8 +127,13 @@ class MetaWorldSmolVLAGRPOPolicy:
             raise ValueError("action_transform must be 'no_tanh' or 'tanh_norm_ablation'")
         if gaussian_logprob_action not in ("executed", "unsquashed"):
             raise ValueError("gaussian_logprob_action must be 'executed' or 'unsquashed'")
+        if logprob_mode not in ("gaussian", "flow_sde"):
+            raise ValueError("logprob_mode must be 'gaussian' or 'flow_sde'")
         self.action_transform = action_transform
         self.gaussian_logprob_action = gaussian_logprob_action
+        self.logprob_mode = logprob_mode
+        self.flow_sde_noise_level = float(flow_sde_noise_level)
+        self.flow_sde_trace_step = int(flow_sde_trace_step)
         self.action_low = (
             np.asarray(action_low, dtype=np.float32).reshape(self.action_dim)
             if action_low is not None
@@ -244,6 +255,43 @@ class MetaWorldSmolVLAGRPOPolicy:
         changed = np.not_equal(clipped, raw_np)
         return clipped, float(np.mean(changed)), bool(np.any(changed)), oob_mean
 
+    def _next_flow_sde_noise_seed(self, rng: torch.Generator | None, *, device: torch.device) -> int | None:
+        if rng is None:
+            return None
+        return int(torch.randint(0, 2**31 - 1, (1,), generator=rng, device=device).item())
+
+    def _get_last_flow_sde_trace(self) -> dict[str, Any]:
+        model = getattr(self._policy, "model", self._policy)
+        trace = getattr(model, "last_flow_sde_trace", None)
+        if not isinstance(trace, dict):
+            raise RuntimeError("flow_sde logprob requested but policy did not export last_flow_sde_trace")
+        return trace
+
+    def _slice_flow_sde_trace(
+        self,
+        trace: dict[str, Any],
+        *,
+        row: int | None = None,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in trace.items():
+            if torch.is_tensor(value):
+                t = value
+                if row is not None and t.dim() > 0 and int(t.shape[0]) > row:
+                    t = t[row : row + 1]
+                if t.dim() >= 3:
+                    t = t[:, :1, : self.action_dim]
+                elif t.dim() >= 2 and key != "tau_idx":
+                    t = t[:, : self.action_dim]
+                out[key] = t.detach()
+            else:
+                out[key] = value
+        return out
+
+    @staticmethod
+    def _flow_sde_log_prob_from_trace(trace: dict[str, Any]) -> torch.Tensor:
+        return sde_step_logprob(trace["A_next"], trace["mu_tau"], trace["sigma_tau"]).reshape(-1)
+
     def _get_distr_params_chunk(
         self,
         proc: Any,
@@ -332,6 +380,36 @@ class MetaWorldSmolVLAGRPOPolicy:
         rng: torch.Generator | None = None,
     ) -> SampledStep:
         proc_d = self._proc_to_device(proc)
+        if self.logprob_mode == "flow_sde":
+            n_action_steps = int(getattr(getattr(self._policy, "config", None), "n_action_steps", 1))
+            if n_action_steps != 1:
+                raise RuntimeError("flow_sde GRPO currently requires n_action_steps=1")
+            noise_seed = self._next_flow_sde_noise_seed(rng, device=self.bundle.device)
+            mean, log_std = self._policy.select_action_distr_params(
+                proc_d,
+                flow_sde_trace=True,
+                flow_sde_noise_level=self.flow_sde_noise_level,
+                flow_sde_trace_step=self.flow_sde_trace_step,
+                flow_sde_noise_seed=noise_seed,
+            )
+            flow_trace = self._slice_flow_sde_trace(self._get_last_flow_sde_trace())
+            policy_tensor = mean
+            exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
+            log_prob = self._flow_sde_log_prob_from_trace(flow_trace)
+            return SampledStep(
+                exec_action_np=exec_np,
+                policy_tensor=policy_tensor.detach(),
+                unsquashed=policy_tensor.detach(),
+                logprob_action=flow_trace["A_next"].reshape(mean.shape).detach(),
+                log_prob=log_prob.detach(),
+                distr_mean=flow_trace["mu_tau"].reshape(mean.shape).detach(),
+                distr_log_std=torch.log(flow_trace["sigma_tau"].reshape(mean.shape).clamp(min=self.eps)).detach(),
+                action_clip_fraction=clip_fraction,
+                action_clip_any=clip_any,
+                postprocessor_oob_mean=oob_mean,
+                flow_sde_trace=flow_trace,
+            )
+
         mean, log_std = self._policy.select_action_distr_params(proc_d)
         log_std = self.clamp_log_std(log_std, self.min_log_std)
         std = torch.exp(log_std)
@@ -363,6 +441,7 @@ class MetaWorldSmolVLAGRPOPolicy:
             action_clip_fraction=clip_fraction,
             action_clip_any=clip_any,
             postprocessor_oob_mean=oob_mean,
+            flow_sde_trace=None,
         )
 
     def sample_action_batch_from_proc(
@@ -376,6 +455,67 @@ class MetaWorldSmolVLAGRPOPolicy:
     ) -> SampledBatchStep:
         """Sample one action per batch row; RNG matches serial `collect_rollout_group` indexing."""
         proc_d = self._proc_to_device(proc)
+        if self.logprob_mode == "flow_sde":
+            if rngs is not None and len(rngs) != int(n_envs):
+                raise ValueError(f"rngs length {len(rngs)} != n_envs {int(n_envs)}")
+            if rngs is None and reset_seed is None:
+                raise ValueError("Either rngs or reset_seed must be provided")
+            seed_source = rngs[0] if rngs is not None and len(rngs) > 0 else None
+            noise_seed = self._next_flow_sde_noise_seed(seed_source, device=self.bundle.device)
+            if noise_seed is None and reset_seed is not None:
+                noise_seed = int(reset_seed) * 1000003 + int(rollout_index_offset) * 7919
+            mean, _log_std = self._policy.select_action_distr_params(
+                proc_d,
+                flow_sde_trace=True,
+                flow_sde_noise_level=self.flow_sde_noise_level,
+                flow_sde_trace_step=self.flow_sde_trace_step,
+                flow_sde_noise_seed=noise_seed,
+            )
+            b = int(mean.shape[0])
+            if b != int(n_envs):
+                raise ValueError(f"proc batch dim {b} != n_envs {int(n_envs)}")
+            full_trace = self._get_last_flow_sde_trace()
+            exec_rows: list[np.ndarray] = []
+            policy_rows: list[torch.Tensor] = []
+            lp_rows: list[torch.Tensor] = []
+            scored_rows: list[torch.Tensor] = []
+            mean_rows: list[torch.Tensor] = []
+            log_std_rows: list[torch.Tensor] = []
+            clip_frac_rows: list[float] = []
+            clip_any_rows: list[bool] = []
+            oob_rows: list[float] = []
+            flow_traces: list[dict[str, Any] | None] = []
+            for r in range(b):
+                row_trace = self._slice_flow_sde_trace(full_trace, row=r)
+                policy_tensor = mean[r : r + 1]
+                exec_np, clip_fraction, clip_any, oob_mean = self._postprocess_and_clip(policy_tensor)
+                log_prob = self._flow_sde_log_prob_from_trace(row_trace)
+                exec_rows.append(np.asarray(exec_np, dtype=np.float32))
+                policy_rows.append(policy_tensor.detach())
+                lp_rows.append(log_prob.detach())
+                scored_rows.append(row_trace["A_next"].reshape(policy_tensor.shape).detach())
+                mean_rows.append(row_trace["mu_tau"].reshape(policy_tensor.shape).detach())
+                log_std_rows.append(
+                    torch.log(row_trace["sigma_tau"].reshape(policy_tensor.shape).clamp(min=self.eps)).detach()
+                )
+                clip_frac_rows.append(clip_fraction)
+                clip_any_rows.append(clip_any)
+                oob_rows.append(oob_mean)
+                flow_traces.append(row_trace)
+            return SampledBatchStep(
+                exec_action_np=np.stack(exec_rows, axis=0),
+                policy_tensor=torch.cat(policy_rows, dim=0),
+                unsquashed=torch.cat(policy_rows, dim=0),
+                log_prob=torch.cat(lp_rows, dim=0).reshape(b),
+                logprob_action=torch.cat(scored_rows, dim=0),
+                distr_mean=torch.cat(mean_rows, dim=0),
+                distr_log_std=torch.cat(log_std_rows, dim=0),
+                action_clip_fraction=np.asarray(clip_frac_rows, dtype=np.float64),
+                action_clip_any=np.asarray(clip_any_rows, dtype=np.bool_),
+                postprocessor_oob_mean=np.asarray(oob_rows, dtype=np.float64),
+                flow_sde_traces=flow_traces,
+            )
+
         mean, log_std = self._policy.select_action_distr_params(proc_d)
         log_std = self.clamp_log_std(log_std, self.min_log_std)
         b = int(mean.shape[0])
