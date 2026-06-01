@@ -169,6 +169,26 @@ def follow_manifest(
                 row["poll_state"] = "OK"
                 row["sacct_state"] = sacct.state
                 print(f"phase46_autopilot OK job={jid} stage={stage}", flush=True)
+                if stage == "eval":
+                    eval_out = Path(str(row.get("eval_out", "")))
+                    summary = eval_out / "tiered_eval_summary.json"
+                    if summary.is_file():
+                        import subprocess
+
+                        gate = Path(__file__).resolve().parent / "phase46_gate.py"
+                        subprocess.run(
+                            [
+                                "python3",
+                                str(gate),
+                                "--summary",
+                                str(summary),
+                                "--run-id",
+                                run_root.name,
+                                "--logprob-mode",
+                                str(row.get("logprob_mode", "gaussian")),
+                            ],
+                            check=False,
+                        )
                 continue
 
             nretry = retries.get(jid, 0)
