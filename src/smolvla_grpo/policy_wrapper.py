@@ -91,6 +91,23 @@ def collate_proc_snapshots(proc_snapshots: Sequence[Any]) -> dict[str, Any]:
     return out
 
 
+def collate_flow_sde_traces(traces: Sequence[dict[str, Any] | None]) -> dict[str, Any]:
+    """Merge one-row Flow-SDE trace dicts into a batch trace."""
+    if not traces or any(t is None for t in traces):
+        raise ValueError("flow_sde traces must be present for every proc snapshot")
+    first = traces[0]
+    assert first is not None
+    out: dict[str, Any] = {}
+    for key in first.keys():
+        vals = [t[key] for t in traces if t is not None]
+        v0 = vals[0]
+        if torch.is_tensor(v0):
+            out[key] = torch.cat([v if torch.is_tensor(v) else torch.as_tensor(v) for v in vals], dim=0)
+        else:
+            out[key] = vals
+    return out
+
+
 class MetaWorldSmolVLAGRPOPolicy:
     """Wraps LeRobot SmolVLAPolicy + preprocessor/postprocessor for Push-v3 rollouts."""
 
@@ -684,6 +701,30 @@ class MetaWorldSmolVLAGRPOPolicy:
         else:
             log_probs = self.calculate_gaussian_log_prob(mean, log_std, u)
         return log_probs, mean, log_std
+
+    def get_flow_sde_log_probs_from_proc_list(
+        self,
+        proc_snapshots: Sequence[Any],
+        flow_sde_traces: Sequence[dict[str, Any] | None],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Recompute Flow-SDE transition log p(A_next|A_tau,s) from stored traces."""
+        if len(proc_snapshots) != len(flow_sde_traces):
+            raise ValueError("proc_snapshots length must match flow_sde_traces length")
+        self._reset_policy_forward_state()
+        batched = self._proc_to_device(collate_proc_snapshots(proc_snapshots))
+        trace = self._proc_to_device(collate_flow_sde_traces(flow_sde_traces))
+        hook = getattr(self._policy, "flow_sde_logprob_from_trace", None)
+        if not callable(hook):
+            raise RuntimeError("flow_sde recompute requires policy.flow_sde_logprob_from_trace")
+        log_probs, mu, sigma = hook(
+            batched,
+            trace,
+            flow_sde_noise_level=self.flow_sde_noise_level,
+        )
+        mu = mu.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
+        sigma = sigma.reshape(len(proc_snapshots), -1)[:, : self.action_dim]
+        log_std = torch.log(sigma.clamp(min=self.eps))
+        return log_probs.reshape(-1), mu, log_std
 
     def get_action_probs_for_chunk_from_proc(
         self,
