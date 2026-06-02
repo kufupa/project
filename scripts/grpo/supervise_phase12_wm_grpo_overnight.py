@@ -21,6 +21,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUN_DIR = PROJECT_ROOT / "artifacts" / "phase12_wm_g8_u20_strict_parity_20260602"
 STRICT_PBS = PROJECT_ROOT / "scripts" / "grpo" / "phase12_g8_u20_wm_train_eval100_stride5.pbs"
+EVAL_PBS = PROJECT_ROOT / "scripts" / "grpo" / "phase12_eval_last5_25ep.pbs"
+MAX_AUTO_RESUMES_PER_KEY = 1
 
 
 @dataclass
@@ -30,6 +32,7 @@ class SupervisorState:
     job_ids: list[str] = field(default_factory=list)
     latest_checkpoint: str | None = None
     failures: list[dict[str, Any]] = field(default_factory=list)
+    resume_attempts: dict[str, int] = field(default_factory=dict)
     last_action: str | None = None
 
 
@@ -87,9 +90,38 @@ def submit_strict(run_dir: Path, *, resume: Path | None = None, start_update: in
     return proc.stdout.strip().split()[0]
 
 
+def submit_eval100(run_dir: Path) -> str:
+    env = ",".join(
+        [
+            f"PHASE12_RUN_DIR={run_dir}",
+            "PHASE12_MIN_UPDATE=5",
+            "PHASE12_MAX_UPDATE=20",
+            "PHASE12_STRIDE=5",
+            "PHASE12_EVAL_EPISODES=100",
+            "PHASE12_EVAL_N_ENVS=25",
+            "PHASE12_EVAL_CHUNK_LEN=5",
+            "PHASE12_EVAL_MAX_STEPS=120",
+            "PHASE12_SWEEP_NAME=eval100_u0005_0020_stride5_nenv25_async",
+        ]
+    )
+    proc = run_cmd(["qsub", "-q", "v1_gpu72", "-v", env, str(EVAL_PBS)])
+    return proc.stdout.strip().split()[0]
+
+
 def qstat_visible(job_id: str) -> bool:
     proc = run_cmd(["qstat", job_id], check=False)
     return proc.returncode == 0
+
+
+def _read_checkpoint_meta(path: Path) -> int | None:
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    if not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return int(meta["update_index"]) + 1
+    except Exception:
+        return None
 
 
 def latest_checkpoint(run_dir: Path) -> tuple[Path | None, int | None]:
@@ -104,6 +136,10 @@ def latest_checkpoint(run_dir: Path) -> tuple[Path | None, int | None]:
         idx = int(match.group(1))
         if best is None or idx > best[0]:
             best = (idx, path)
+    latest = ckpt_dir / "latest.pt"
+    latest_start = _read_checkpoint_meta(latest)
+    if latest.is_file() and latest_start is not None and (best is None or latest_start > best[0]):
+        best = (latest_start, latest)
     if best is None:
         return None, None
     return best[1], best[0]
@@ -121,6 +157,21 @@ def read_recent_logs() -> str:
         except OSError:
             continue
     return "\n".join(chunks)
+
+
+def has_walltime_evidence(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "walltime",
+            "wall time",
+            "time limit",
+            "timelimit",
+            "exceeded limit",
+            "resources_used.walltime",
+        )
+    )
 
 
 def classify_failure(run_dir: Path) -> tuple[str, str]:
@@ -144,11 +195,24 @@ def classify_failure(run_dir: Path) -> tuple[str, str]:
         except Exception:
             pass
     ckpt, update = latest_checkpoint(run_dir)
-    if ckpt is not None and update is not None and update < 20:
+    if ckpt is not None and update is not None and update < 20 and has_walltime_evidence(text):
         return "pbs_walltime_timeout", f"Latest checkpoint update_{update:04d}.pt exists before target update_0020.pt."
+    if ckpt is not None and update is not None and update < 20:
+        return (
+            "partial_checkpoint_no_walltime_evidence",
+            f"Latest checkpoint can resume at update {update}, but logs lack walltime evidence.",
+        )
     if ckpt is None:
         return "missing_checkpoint", "No Phase12 checkpoint found."
     return "unknown", "No known root-cause signature found."
+
+
+def _attempt_count(state: SupervisorState, key: str) -> int:
+    return int(state.resume_attempts.get(key, 0))
+
+
+def _record_attempt(state: SupervisorState, key: str) -> None:
+    state.resume_attempts[key] = _attempt_count(state, key) + 1
 
 
 def handle_once(run_dir: Path, *, auto_resume: bool) -> SupervisorState:
@@ -169,6 +233,23 @@ def handle_once(run_dir: Path, *, auto_resume: bool) -> SupervisorState:
         save_state(state)
         return state
     if final_ckpt.is_file() and not eval100.is_file():
+        key = f"eval100:{final_ckpt}"
+        if auto_resume and _attempt_count(state, key) < MAX_AUTO_RESUMES_PER_KEY:
+            job_id = submit_eval100(run_dir)
+            _record_attempt(state, key)
+            state.job_ids.append(job_id)
+            state.phase = "resubmitted"
+            state.latest_checkpoint = str(final_ckpt)
+            state.last_action = f"submitted eval100-only job={job_id}"
+            append_ledger(
+                run_dir,
+                job_id=job_id,
+                symptom="Training reached update_0020.pt but eval100 summary is missing.",
+                root_cause="eval_cli_failure",
+                action="auto-submit eval100-only recovery",
+            )
+            save_state(state)
+            return state
         state.phase = "blocked"
         state.latest_checkpoint = str(final_ckpt)
         state.failures.append(
@@ -195,9 +276,18 @@ def handle_once(run_dir: Path, *, auto_resume: bool) -> SupervisorState:
     state.latest_checkpoint = str(ckpt) if ckpt is not None else None
     append_ledger(run_dir, job_id=state.job_ids[-1] if state.job_ids else None, symptom=symptom, root_cause=cause, action="diagnosed")
 
-    if auto_resume and cause == "pbs_walltime_timeout" and ckpt is not None and update is not None and update < 20:
+    key = f"train:{ckpt}:{update}" if ckpt is not None else ""
+    if (
+        auto_resume
+        and cause == "pbs_walltime_timeout"
+        and ckpt is not None
+        and update is not None
+        and update < 20
+        and _attempt_count(state, key) < MAX_AUTO_RESUMES_PER_KEY
+    ):
         next_update = int(update)
         job_id = submit_strict(run_dir, resume=ckpt, start_update=next_update)
+        _record_attempt(state, key)
         state.job_ids.append(job_id)
         state.phase = "resubmitted"
         state.last_action = f"resubmitted from {ckpt} start_update={next_update} job={job_id}"
