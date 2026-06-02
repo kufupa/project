@@ -214,7 +214,7 @@ def test_flow_sde_chunk_moonshot_scripts_encode_final_step_contract() -> None:
             "group_size": "--group-size 8",
             "reward_mode": "--reward-mode dense_return",
             "noise_level": "--flow-sde-noise-level 0.5",
-            "euler": "--allow-euler-noise",
+            "euler": "--euler-step-noise-std 0.0",
             "lr": "--lr 1e-5",
         },
         "submit_flow_sde_chunk_grpo_moonshot30_sparse_chain_a30.slurm": {
@@ -238,6 +238,8 @@ def test_flow_sde_chunk_moonshot_scripts_encode_final_step_contract() -> None:
         assert spec["noise_level"] in text
         assert spec["euler"] in text
         assert spec["lr"] in text
+        if "dense" in name:
+            assert "--allow-euler-noise" not in text
         assert "--num-updates 30" in text
         assert "--save-every 5" in text
         assert "--rollout-execution vector_async" in text
@@ -247,6 +249,21 @@ def test_flow_sde_chunk_moonshot_scripts_encode_final_step_contract() -> None:
         assert "--num-episodes 100" in text
         assert '--only-updates "10,20,30"' in text
         assert '"${GRPO_PYTHON_BIN}" -u "${PROJECT_ROOT}/scripts/grpo/train_phase11_env_on_policy_grpo.py"' in text
+        assert '--checkpoint "${BASE_CKPT}"' in text
+        assert "--policy-path" not in text
+        assert "--train-seed-base 2000" in text
+        train_text = text.split('CKPT_DIR="${TRAIN_OUT}/checkpoints"', maxsplit=1)[0]
+        for unsupported_flag in (
+            "--task-description",
+            "--num-envs",
+            "--horizon",
+            "--seed",
+            "--device",
+            "--dtype",
+            "--save-grpo-checkpoint",
+            "--save-rlinf-eval-checkpoint",
+        ):
+            assert unsupported_flag not in train_text
         assert "FLOW_SDE_MOONSHOT_" in text
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
