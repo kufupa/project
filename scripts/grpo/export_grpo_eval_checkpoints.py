@@ -15,8 +15,8 @@ if str(_REPO) not in sys.path:
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from scripts.grpo.train_phase11_env_on_policy_grpo import load_bundle_for_grpo
 from smolvla_grpo.checkpointing import torch_load_mmap_default
+from smolvla_grpo.phase11_rollout import load_bundle_for_grpo
 from smolvla_grpo.policy_wrapper import freeze_all_but_grpo_trainables
 
 
