@@ -41,6 +41,8 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_flow_sde_chunk_grpo_eval25_ablation_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval100_ablation_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval25_eval100_chain_a30.slurm",
+        "submit_flow_sde_chunk_grpo_moonshot30_dense_chain_a30.slurm",
+        "submit_flow_sde_chunk_grpo_moonshot30_sparse_chain_a30.slurm",
         "submit_phase111_eval_sweep.slurm",
         "submit_phase11_chain.sh",
         "submit_api_gate_smoke.slurm",
@@ -203,6 +205,49 @@ def test_flow_sde_chunk_eval25_eval100_chain_script_runs_both_sweeps() -> None:
     assert "eval100_summary.json" in text
     assert "FLOW_SDE_CHUNK_GRPO_EVAL25_EVAL100_CHAIN_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_flow_sde_chunk_moonshot_scripts_encode_final_step_contract() -> None:
+    scripts = {
+        "submit_flow_sde_chunk_grpo_moonshot30_dense_chain_a30.slurm": {
+            "walltime": "#SBATCH --time=05:15:00",
+            "group_size": "--group-size 8",
+            "reward_mode": "--reward-mode dense_return",
+            "noise_level": "--flow-sde-noise-level 0.5",
+            "euler": "--allow-euler-noise",
+            "lr": "--lr 1e-5",
+        },
+        "submit_flow_sde_chunk_grpo_moonshot30_sparse_chain_a30.slurm": {
+            "walltime": "#SBATCH --time=06:00:00",
+            "group_size": "--group-size 16",
+            "reward_mode": "--reward-mode sparse_success_delta",
+            "noise_level": "--flow-sde-noise-level 1.0",
+            "euler": "--euler-step-noise-std 0.0",
+            "lr": "--lr 7.5e-6",
+        },
+    }
+    for name, spec in scripts.items():
+        path = _REPO_ROOT / "scripts" / "grpo" / name
+        text = path.read_text(encoding="utf-8")
+        assert "#SBATCH --gres=gpu:1" in text
+        assert "#SBATCH --cpus-per-task=16" in text
+        assert "#SBATCH --mem=64G" in text
+        assert spec["walltime"] in text
+        assert spec["group_size"] in text
+        assert spec["reward_mode"] in text
+        assert spec["noise_level"] in text
+        assert spec["euler"] in text
+        assert spec["lr"] in text
+        assert "--num-updates 30" in text
+        assert "--save-every 5" in text
+        assert "--rollout-execution vector_async" in text
+        assert "--async-start-method forkserver" in text
+        assert "--flow-sde-trace-step 9" in text
+        assert "--num-episodes 25" in text
+        assert "--num-episodes 100" in text
+        assert '--only-updates "10,20,30"' in text
+        assert "FLOW_SDE_MOONSHOT_" in text
+        subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
 def test_submit_flow_sde_chunk_grpo_eval25_leaves_resolution_to_rlinf_eval() -> None:
