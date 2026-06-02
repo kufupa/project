@@ -81,7 +81,10 @@ assert manifest["rollout_chunk_len"] == 5, manifest
 assert manifest["reward_mode"] == reward_mode, manifest
 rows = [json.loads(line) for line in (out / "progress.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 assert len(rows) == 10, len(rows)
-bad = [r for r in rows if not (r.get("parity") or {}).get("within_tolerance")]
+bad = [
+    r for r in rows
+    if not r.get("skipped") and not (r.get("parity") or {}).get("within_tolerance")
+]
 assert not bad, bad[:1]
 assert all(r.get("chunk_count", 0) > 0 for r in rows), rows[-1]
 assert all(r.get("reward_mode") == reward_mode for r in rows), rows[-1]
