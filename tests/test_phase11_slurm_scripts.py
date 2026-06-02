@@ -154,6 +154,8 @@ def test_flow_sde_chunk_eval100_ablation_script_uses_bounded_resources() -> None
     assert "#SBATCH --mem=60G" in text
     assert "--num-episodes 100" in text
     assert "--num-envs 25" in text
+    assert 'ONLY_UPDATES="${4:-}"' in text
+    assert "--only-updates" in text
     assert "--chunk-len 5" in text
     assert '--checkpoint-dir "${CKPT_DIR}"' in text
     assert "eval100_summary.json" in text

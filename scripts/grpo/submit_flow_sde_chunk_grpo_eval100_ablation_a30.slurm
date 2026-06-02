@@ -36,13 +36,15 @@ require_python_bin
 CKPT_DIR="${1:?checkpoint dir}"
 OUT_DIR="${2:?eval output dir}"
 RUN_NAME="${3:-flow_sde_chunk_ablation_100ep}"
-MODEL_PATH="${4:-/vol/bitbucket/aa6622/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+ONLY_UPDATES="${4:-}"
+MODEL_PATH="${5:-/vol/bitbucket/aa6622/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
 
 mkdir -p "${OUT_DIR}"
 echo "[flow-sde-chunk-eval100-ablation] ckpt=${CKPT_DIR} out=${OUT_DIR} run=${RUN_NAME}"
 
 cd "${RLINF_ROOT}"
-"${PYTHON_BIN}" -u scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+cmd=(
+  "${PYTHON_BIN}" -u scripts/eval_smolvla_metaworld_ckpt_sweep.py
   --run-name "${RUN_NAME}" \
   --output-dir "${OUT_DIR}/eval_100ep" \
   --num-episodes 100 \
@@ -55,6 +57,11 @@ cd "${RLINF_ROOT}"
   --seed-base 1000 \
   --max-episode-steps 150 \
   --chunk-len 5
+)
+if [[ -n "${ONLY_UPDATES}" ]]; then
+  cmd+=(--only-updates "${ONLY_UPDATES}")
+fi
+"${cmd[@]}"
 
 "${PYTHON_BIN}" - "${OUT_DIR}" "${RUN_NAME}" <<'PY'
 import json
