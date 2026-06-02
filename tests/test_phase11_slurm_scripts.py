@@ -122,6 +122,8 @@ def test_flow_sde_chunk_train10_ablation_scripts_set_reward_modes() -> None:
         assert "#SBATCH --mem=48G" in text
         assert "--rollout-unit chunk" in text
         assert "--rollout-chunk-len 5" in text
+        assert "--rollout-execution vector_async" in text
+        assert "--async-start-method forkserver" in text
         assert "--num-updates 10" in text
         assert f"--reward-mode {reward_mode}" in text
         assert "--fail-on-parity-violation" in text

@@ -38,6 +38,17 @@ def test_chunk_mode_uses_chunk_rollout_collector() -> None:
     assert "collect_chunk_rollout_group" in text
 
 
+def test_chunk_mode_allows_vector_async_rollout() -> None:
+    text = TRAINER.read_text(encoding="utf-8")
+    assert "first chunk rollout implementation requires --rollout-execution serial" not in text
+    assert "collect_official_lerobot_vector_chunk_rollout_group" in (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smolvla_grpo"
+        / "phase11_chunk_rollout.py"
+    ).read_text(encoding="utf-8")
+
+
 def test_chunk_parity_replays_one_chunk_at_a_time() -> None:
     class _Wrapper:
         def get_flow_sde_log_probs_for_chunk_from_proc_list(self, procs, traces, *, chunk_len: int):

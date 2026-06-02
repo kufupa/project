@@ -249,8 +249,6 @@ def main() -> int:
         raise SystemExit("flow_sde requires --action-transform no_tanh")
     if args.rollout_unit == "chunk" and args.env_backend != "official_lerobot":
         raise SystemExit("chunk rollout requires --env-backend official_lerobot")
-    if args.rollout_unit == "chunk" and args.rollout_execution != "serial":
-        raise SystemExit("first chunk rollout implementation requires --rollout-execution serial")
     if int(args.rollout_chunk_len) < 1:
         raise SystemExit("--rollout-chunk-len must be >= 1")
     if float(args.euler_step_noise_std) > 0.0 and not args.allow_euler_noise:
@@ -414,6 +412,8 @@ def main() -> int:
                 action_dim=action_dim,
                 device=device,
                 chunk_len=int(args.rollout_chunk_len),
+                rollout_execution=args.rollout_execution,
+                async_start_method=args.async_start_method,
                 action_transform=args.action_transform,
                 gaussian_logprob_action=args.gaussian_logprob_action,
                 logprob_mode=args.logprob_mode,

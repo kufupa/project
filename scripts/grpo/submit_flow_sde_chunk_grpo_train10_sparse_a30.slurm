@@ -43,7 +43,8 @@ echo "[flow-sde-chunk-train10-sparse] checkpoint=${CHECKPOINT} out=${OUT}"
   --output-dir "${OUT}" \
   --task push-v3 \
   --env-backend official_lerobot \
-  --rollout-execution serial \
+  --rollout-execution vector_async \
+  --async-start-method forkserver \
   --rollout-unit chunk \
   --rollout-chunk-len 5 \
   --group-size 8 \
