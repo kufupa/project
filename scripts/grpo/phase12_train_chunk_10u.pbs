@@ -2,6 +2,7 @@
 #PBS -N p12tr10u
 #PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=04:00:00
+#PBS -q v1_gpu72
 #PBS -j oe
 #PBS -o logs/pbs/grpo/phase12_train_chunk_10u.out
 
@@ -29,6 +30,9 @@ END_UPDATE=$((START_UPDATE + NUM_UPDATES))
 SAVE_EVERY="${PHASE12_SAVE_EVERY:-2}"
 BATCH_SIZE="${PHASE12_BATCH_SIZE:-4}"
 GROUP_SIZE="${PHASE12_GROUP_SIZE:-8}"
+CHUNK_LEN="${PHASE12_CHUNK_LEN:-25}"
+MAX_STEPS="${PHASE12_MAX_STEPS:-120}"
+TRAIN_MODE="${PHASE12_TRAIN_MODE:-wm_only}"
 ACTION_PROFILE="${PHASE12_ACTION_PROFILE:-official_jepa_mirror}"
 LR="${PHASE12_LR:-1e-5}"
 CLIP_EPS="${PHASE12_CLIP_EPS:-0.2}"
@@ -68,7 +72,7 @@ trap 'status=$?; stop_cpu_mem_telemetry; exit "${status}"' EXIT
 args=(
   scripts/grpo/train_phase12_wm_chunk_grpo.py
   --mode wm_grpo_train
-  --phase12-train-mode wm_only
+  --phase12-train-mode "${TRAIN_MODE}"
   --checkpoint "${CHECKPOINT}"
   --jepa-ckpt "${JEPA_CKPT}"
   --jepa-repo "${JEPA_REPO}"
@@ -76,13 +80,13 @@ args=(
   --task push-v3
   --env-backend official_lerobot_guarded
   --action-profile "${ACTION_PROFILE}"
-  --chunk-len 25
+  --chunk-len "${CHUNK_LEN}"
   --batch-size "${BATCH_SIZE}"
   --group-size "${GROUP_SIZE}"
   --num-episodes "${NUM_UPDATES}"
   --num-updates "${NUM_UPDATES}"
   --start-update "${START_UPDATE}"
-  --max-steps 120
+  --max-steps "${MAX_STEPS}"
   --train-seed-base "${PHASE12_SEED_BASE:-10000}"
   --save-every "${SAVE_EVERY}"
   --lr "${LR}"
@@ -110,7 +114,7 @@ if [[ -n "${RESUME}" ]]; then
   args+=(--resume "${RESUME}")
 fi
 
-echo "[phase12-train-chunk] run=${RUN_DIR} start=${START_UPDATE} end=${END_UPDATE} b=${BATCH_SIZE} g=${GROUP_SIZE} wm=${WM_SCORE_MODE}/${WM_SCORE_BATCH_SIZE} job=${PBS_JOBID:-local}"
+echo "[phase12-train-chunk] run=${RUN_DIR} start=${START_UPDATE} end=${END_UPDATE} mode=${TRAIN_MODE} b=${BATCH_SIZE} g=${GROUP_SIZE} chunk=${CHUNK_LEN} max_steps=${MAX_STEPS} action=${ACTION_PROFILE} wm=${WM_SCORE_MODE}/${WM_SCORE_BATCH_SIZE} job=${PBS_JOBID:-local}"
 run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" "${args[@]}"
 
 if [[ "${PHASE12_DRY_RUN:-0}" != "1" ]]; then

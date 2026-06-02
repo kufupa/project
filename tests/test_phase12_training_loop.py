@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from scripts.grpo import train_phase12_wm_chunk_grpo as trainer
@@ -75,6 +76,8 @@ def test_wm_grpo_train_writes_update_row_and_nonempty_checkpoint(monkeypatch, tm
             "1",
             "--num-episodes",
             "1",
+            "--action-profile",
+            "bounded_executed",
         ]
     )
 
@@ -131,6 +134,8 @@ def test_wm_only_train_branch_does_not_call_selected_env_collector(monkeypatch, 
             "1",
             "--num-episodes",
             "1",
+            "--action-profile",
+            "bounded_executed",
         ]
     )
 
@@ -157,6 +162,11 @@ def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch
                 "old_logprob_sums": [-1.0, -1.1, -1.2],
                 "proc_root_snapshots": [{"x": torch.zeros(1, 1)} for _ in range(3)],
                 "unsquashed_chunks": chunks,
+                "action_clip_fraction": 0.1 + 0.1 * (seed - 2000),
+                "action_clip_any_fraction": 1.0 if seed % 2 == 0 else 0.0,
+                "raw_action_max_abs": 2.0 + (seed - 2000),
+                "clipped_action_max_abs": 1.0,
+                "clip_delta_max_abs": 1.0 + (seed - 2000),
                 "rollout_validation_video": "",
                 "selected_action_rollout_video": "",
                 "oracle_baseline_video": "",
@@ -186,6 +196,8 @@ def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch
             "1",
             "--num-episodes",
             "1",
+            "--action-profile",
+            "bounded_executed",
         ]
     )
 
@@ -198,6 +210,57 @@ def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch
     assert len(update["returns"]) == 6
     assert len(update["advantages"]) == 6
     assert update["per_seed_success_rate"] == [1.0, 0.0]
+    assert update["action_profile"] == "bounded_executed"
+    assert update["reward_key"] == "wm_latent_progress"
+    assert update["chunk_len"] == 25
+    assert update["action_clip_fraction"] == pytest.approx(0.15)
+    assert update["action_clip_any_fraction"] == 0.5
+    assert update["raw_action_max_abs"] == 3.0
+    assert update["clipped_action_max_abs"] == 1.0
+    assert update["clip_delta_max_abs"] == 2.0
+
+
+def test_combine_phase12_seed_batch_metadata_preserves_action_telemetry() -> None:
+    episodes = [
+        SimpleNamespace(
+            success_any=True,
+            metadata={
+                "candidate_rewards": [0.0, 1.0],
+                "segment_candidate_rewards": [[0.0, 1.0]],
+                "old_logprob_sums": [-1.0, -1.1],
+                "proc_root_snapshots": ["a", "b"],
+                "unsquashed_chunks": ["ca", "cb"],
+                "action_clip_fraction": 0.25,
+                "action_clip_any_fraction": 1.0,
+                "raw_action_max_abs": 2.0,
+                "clipped_action_max_abs": 1.0,
+                "clip_delta_max_abs": 1.0,
+            },
+        ),
+        SimpleNamespace(
+            success_any=False,
+            metadata={
+                "candidate_rewards": [2.0, 3.0],
+                "segment_candidate_rewards": [[2.0, 3.0]],
+                "old_logprob_sums": [-1.2, -1.3],
+                "proc_root_snapshots": ["c", "d"],
+                "unsquashed_chunks": ["cc", "cd"],
+                "action_clip_fraction": 0.75,
+                "action_clip_any_fraction": 0.0,
+                "raw_action_max_abs": 4.0,
+                "clipped_action_max_abs": 1.5,
+                "clip_delta_max_abs": 2.5,
+            },
+        ),
+    ]
+
+    meta = trainer._combine_phase12_seed_batch_metadata(episodes)
+
+    assert meta["action_clip_fraction"] == 0.5
+    assert meta["action_clip_any_fraction"] == 0.5
+    assert meta["raw_action_max_abs"] == 4.0
+    assert meta["clipped_action_max_abs"] == 1.5
+    assert meta["clip_delta_max_abs"] == 2.5
 
 
 def test_phase12_microbatch_loss_uses_explicit_group_size() -> None:
