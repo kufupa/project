@@ -27,17 +27,17 @@ slurm_resolve_project_root "scripts/grpo/train_phase11_env_on_policy_grpo.py"
 cd "${PROJECT_ROOT}"
 slurm_export_hf_torch_cache "flow-sde-chunk-grpo-eval25"
 
-RLINF_ROOT="${RLINF_ROOT:-/vol/bitbucket/aa6622/RLinf-smolvla-metaworld-ppo-grpo}"
-# shellcheck source=/dev/null
-source "${RLINF_ROOT}/scripts/slurm/rlinf_smolvla_common.sh"
-setup_rlinf_smolvla_env
-require_python_bin
-
 CKPT_DIR="$(realpath "${1:?checkpoint dir}")"
 OUT_DIR_RAW="${2:?eval output dir}"
 mkdir -p "${OUT_DIR_RAW}"
 OUT_DIR="$(realpath "${OUT_DIR_RAW}")"
 MODEL_PATH="${3:-/vol/bitbucket/aa6622/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+
+RLINF_ROOT="${RLINF_ROOT:-/vol/bitbucket/aa6622/RLinf-smolvla-metaworld-ppo-grpo}"
+# shellcheck source=/dev/null
+source "${RLINF_ROOT}/scripts/slurm/rlinf_smolvla_common.sh"
+setup_rlinf_smolvla_env
+require_python_bin
 
 echo "[flow-sde-chunk-eval25] ckpt=${CKPT_DIR} out=${OUT_DIR}"
 

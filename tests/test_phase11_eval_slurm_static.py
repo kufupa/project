@@ -9,6 +9,8 @@ _EVAL25 = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_eval25_a
 
 def test_flow_sde_chunk_eval25_absolutizes_paths_before_rlinf_chdir() -> None:
     text = _EVAL25.read_text(encoding="utf-8")
+    assert 'cd "${PROJECT_ROOT}"' in text
+    assert text.index('CKPT_DIR="$(realpath "${1:?checkpoint dir}")"') < text.index('source "${RLINF_ROOT}/scripts/slurm/rlinf_smolvla_common.sh"')
     assert 'CKPT_DIR="$(realpath "${1:?checkpoint dir}")"' in text
     assert 'OUT_DIR_RAW="${2:?eval output dir}"' in text
     assert 'mkdir -p "${OUT_DIR_RAW}"' in text
