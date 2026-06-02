@@ -36,6 +36,7 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_flow_sde_chunk_grpo_train10_dense_a30.slurm",
         "submit_flow_sde_chunk_grpo_train10_sparse_a30.slurm",
         "submit_flow_sde_chunk_grpo_train10_success_first_dense_a30.slurm",
+        "submit_flow_sde_chunk_grpo_resume30_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval25_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval25_ablation_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval100_ablation_a30.slurm",
@@ -131,6 +132,28 @@ def test_flow_sde_chunk_train10_ablation_scripts_set_reward_modes() -> None:
         assert 'if not r.get("skipped")' in text
         assert "FLOW_SDE_CHUNK_GRPO_TRAIN10_OK" in text
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_flow_sde_chunk_resume30_script_resumes_and_saves_every5() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_resume30_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --cpus-per-task=10" in text
+    assert "#SBATCH --mem=48G" in text
+    assert 'RESUME="${1:?resume checkpoint}"' in text
+    assert 'OUT="${2:?output dir}"' in text
+    assert 'REWARD_MODE="${3:?reward mode}"' in text
+    assert 'RUN_LABEL="${4:?run label}"' in text
+    assert "--resume" in text
+    assert "--num-updates 30" in text
+    assert "--save-every 5" in text
+    assert "--rollout-execution vector_async" in text
+    assert "--async-start-method forkserver" in text
+    assert "--rollout-unit chunk" in text
+    assert "--reward-mode" in text
+    assert 'test -f "${OUT}/checkpoints/update_0040.pt"' in text
+    assert "FLOW_SDE_CHUNK_GRPO_RESUME30_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
 def test_flow_sde_chunk_eval25_ablation_script_uses_bounded_resources() -> None:
