@@ -84,6 +84,7 @@ def test_submit_flow_sde_chunk_grpo_smoke_uses_chunk_flow_mode() -> None:
     assert "--flow-sde-noise-level 0.5" in text
     assert "--flow-sde-trace-step -1" in text
     assert "--fail-on-parity-violation" in text
+    assert 'test -f "${OUT}/checkpoints_eval/update_0001.pt"' in text
     assert "FLOW_SDE_CHUNK_GRPO_SMOKE_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
@@ -98,17 +99,20 @@ def test_submit_flow_sde_chunk_grpo_train16_has_gate_contract() -> None:
     assert "--rollout-execution serial" in text
     assert "--num-updates 16" in text
     assert 'test -f "${OUT}/checkpoints/update_0016.pt"' in text
+    assert 'test -f "${OUT}/checkpoints_eval/update_0016.pt"' in text
     assert "FLOW_SDE_CHUNK_GRPO_TRAIN16_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
-def test_submit_flow_sde_chunk_grpo_eval25_has_gate_contract() -> None:
+def test_submit_flow_sde_chunk_grpo_eval25_leaves_resolution_to_rlinf_eval() -> None:
     path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_eval25_a30.slurm"
     text = path.read_text(encoding="utf-8")
     assert "#SBATCH --export=NIL" in text
     assert "scripts/slurm/common_env.sh" in text
     assert "--num-episodes 25" in text
     assert "--chunk-len 5" in text
+    assert '--checkpoint-dir "${CKPT_DIR}"' in text
+    assert "eval_smolvla_metaworld_ckpt_sweep.py" in text
     assert "FLOW_SDE_CHUNK_GRPO_EVAL25_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
