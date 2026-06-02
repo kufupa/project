@@ -33,11 +33,12 @@ source "${RLINF_ROOT}/scripts/slurm/rlinf_smolvla_common.sh"
 setup_rlinf_smolvla_env
 require_python_bin
 
-CKPT_DIR="${1:?checkpoint dir}"
-OUT_DIR="${2:?eval output dir}"
+CKPT_DIR="$(realpath "${1:?checkpoint dir}")"
+OUT_DIR_RAW="${2:?eval output dir}"
+mkdir -p "${OUT_DIR_RAW}"
+OUT_DIR="$(realpath "${OUT_DIR_RAW}")"
 MODEL_PATH="${3:-/vol/bitbucket/aa6622/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
 
-mkdir -p "${OUT_DIR}"
 echo "[flow-sde-chunk-eval25] ckpt=${CKPT_DIR} out=${OUT_DIR}"
 
 cd "${RLINF_ROOT}"
