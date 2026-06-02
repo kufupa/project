@@ -49,19 +49,15 @@ mkdir -p "${TRAIN_OUT}" "${EVAL25_OUT}" "${EVAL100_OUT}"
 echo "[flow-sde-moon-d30] base_ckpt=${BASE_CKPT} train_out=${TRAIN_OUT}"
 cd "${PROJECT_ROOT}"
 "${GRPO_PYTHON_BIN}" -u "${PROJECT_ROOT}/scripts/grpo/train_phase11_env_on_policy_grpo.py" \
-  --policy-path "${BASE_CKPT}" \
+  --checkpoint "${BASE_CKPT}" \
   --output-dir "${TRAIN_OUT}" \
   --run-label "${RUN_LABEL}" \
   --task push-v3 \
-  --task-description "Push the puck to a goal" \
+  --env-backend official_lerobot \
   --num-updates 30 \
   --batch-size 1 \
   --group-size 8 \
-  --num-envs 8 \
-  --horizon 25 \
-  --seed 42 \
-  --device cuda \
-  --dtype float32 \
+  --train-seed-base 2000 \
   --lr 1e-5 \
   --clip-eps 0.2 \
   --max-steps 120 \
@@ -73,12 +69,9 @@ cd "${PROJECT_ROOT}"
   --logprob-mode flow_sde \
   --flow-sde-trace-step 9 \
   --flow-sde-noise-level 0.5 \
-  --euler-step-noise-std 0.2 \
-  --allow-euler-noise \
+  --euler-step-noise-std 0.0 \
   --action-transform no_tanh \
   --save-every 5 \
-  --save-grpo-checkpoint \
-  --save-rlinf-eval-checkpoint \
   --fail-on-parity-violation
 
 CKPT_DIR="${TRAIN_OUT}/checkpoints"
