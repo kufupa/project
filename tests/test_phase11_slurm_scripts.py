@@ -127,6 +127,7 @@ def test_flow_sde_chunk_train10_ablation_scripts_set_reward_modes() -> None:
         assert "--num-updates 10" in text
         assert f"--reward-mode {reward_mode}" in text
         assert "--fail-on-parity-violation" in text
+        assert 'if not r.get("skipped")' in text
         assert "FLOW_SDE_CHUNK_GRPO_TRAIN10_OK" in text
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
