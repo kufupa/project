@@ -47,7 +47,8 @@ EVAL100_OUT="${OUT_ROOT}/eval100_${SLURM_JOB_ID}"
 mkdir -p "${TRAIN_OUT}" "${EVAL25_OUT}" "${EVAL100_OUT}"
 
 echo "[flow-sde-moon-s30] base_ckpt=${BASE_CKPT} train_out=${TRAIN_OUT}"
-"${GRPO_PYTHON_BIN}" -u scripts/grpo/train_phase11_env_on_policy_grpo.py \
+cd "${PROJECT_ROOT}"
+"${GRPO_PYTHON_BIN}" -u "${PROJECT_ROOT}/scripts/grpo/train_phase11_env_on_policy_grpo.py" \
   --policy-path "${BASE_CKPT}" \
   --output-dir "${TRAIN_OUT}" \
   --run-label "${RUN_LABEL}" \
