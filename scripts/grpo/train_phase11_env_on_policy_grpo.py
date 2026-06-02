@@ -149,7 +149,7 @@ def main() -> int:
         MetaWorldSmolVLAGRPOPolicy,
         freeze_all_but_grpo_trainables,
     )
-    from smolvla_grpo.reward_backends import EnvRewardBackend
+    from smolvla_grpo.reward_backends import EnvRewardBackend, episode_return_for_mode
     from smolvla_pipeline.evaluator import (
         _resolve_camera_name,
         _resolve_flip_corner2,
@@ -225,6 +225,12 @@ def main() -> int:
     )
     p.add_argument("--flow-sde-noise-level", type=float, default=0.5)
     p.add_argument("--flow-sde-trace-step", type=int, default=0)
+    p.add_argument(
+        "--reward-mode",
+        choices=("dense_return", "sparse_success_delta", "success_first_dense"),
+        default="dense_return",
+        help="Scalar return used for GRPO advantages; dense_return preserves legacy Phase11 behavior.",
+    )
     p.add_argument(
         "--gaussian-logprob-action",
         choices=("executed", "unsquashed"),
@@ -352,6 +358,7 @@ def main() -> int:
         "logprob_mode": args.logprob_mode,
         "flow_sde_noise_level": float(args.flow_sde_noise_level),
         "flow_sde_trace_step": int(args.flow_sde_trace_step),
+        "reward_mode": args.reward_mode,
         "run_label": args.run_label,
         "euler_step_noise_std": float(args.euler_step_noise_std),
         "parity_tolerance": float(args.parity_tolerance),
@@ -433,7 +440,11 @@ def main() -> int:
             )
         rollout_seconds = float(time.perf_counter() - rollout_t0)
         if args.rollout_unit == "chunk":
-            returns = torch.tensor([tr.total_return() for tr in rollouts], dtype=torch.float32, device=device)
+            returns = torch.tensor(
+                [episode_return_for_mode(tr, reward_mode=args.reward_mode) for tr in rollouts],
+                dtype=torch.float32,
+                device=device,
+            )
             successes = [any(bool(s) for s in tr.successes) for tr in rollouts]
             episode_lengths = [len(tr.rewards) for tr in rollouts]
             num_env_steps = int(sum(episode_lengths))
@@ -477,7 +488,7 @@ def main() -> int:
             )
         else:
             returns = torch.tensor(
-                [reward_backend.episode_return(tr) for tr in rollouts],
+                [episode_return_for_mode(tr, reward_mode=args.reward_mode) for tr in rollouts],
                 dtype=torch.float32,
                 device=device,
             )
@@ -532,6 +543,15 @@ def main() -> int:
         success_advantages = [
             float(advantages_cpu[i].item()) for i, ok in enumerate(successes) if bool(ok)
         ]
+        failure_advantages = [
+            float(advantages_cpu[i].item()) for i, ok in enumerate(successes) if not bool(ok)
+        ]
+        success_negative_advantage_count = int(sum(1 for x in success_advantages if x < 0.0))
+        failure_positive_advantage_count = int(sum(1 for x in failure_advantages if x > 0.0))
+        success_returns = [float(returns_cpu[i].item()) for i, ok in enumerate(successes) if bool(ok)]
+        failure_returns = [float(returns_cpu[i].item()) for i, ok in enumerate(successes) if not bool(ok)]
+        max_success_return = max(success_returns) if success_returns else None
+        max_failed_return = max(failure_returns) if failure_returns else None
         # region agent log
         _agent_debug_log(
             run_id="pre-fix",
@@ -550,6 +570,11 @@ def main() -> int:
                 "best_return": float(returns_cpu[best_idx].item()) if best_idx >= 0 else None,
                 "best_advantage": float(advantages_cpu[best_idx].item()) if best_idx >= 0 else None,
                 "success_advantages": success_advantages,
+                "success_advantage_mean": float(sum(success_advantages) / max(len(success_advantages), 1)),
+                "success_negative_advantage_count": success_negative_advantage_count,
+                "failure_positive_advantage_count": failure_positive_advantage_count,
+                "max_success_return": max_success_return,
+                "max_failed_return": max_failed_return,
                 "group_return_std": float(pre_update_metrics["group_return_std"]),
                 "zero_adv_skip": bool(pre_update_metrics["zero_adv_skip"]),
                 "episode_lengths": [int(x) for x in episode_lengths],
@@ -585,6 +610,7 @@ def main() -> int:
                     "rollout_chunk_len": int(args.rollout_chunk_len),
                     "action_transform": args.action_transform,
                     "gaussian_logprob_action": args.gaussian_logprob_action,
+                    "reward_mode": args.reward_mode,
                     "run_label": args.run_label,
                     "async_start_method": (
                         args.async_start_method if args.rollout_execution == "vector_async" else None
@@ -595,6 +621,11 @@ def main() -> int:
                     "returns": returns.detach().cpu().tolist(),
                     "successes": successes,
                     "success_rate": success_rate,
+                    "success_advantage_mean": float(sum(success_advantages) / max(len(success_advantages), 1)),
+                    "success_negative_advantage_count": success_negative_advantage_count,
+                    "failure_positive_advantage_count": failure_positive_advantage_count,
+                    "max_success_return": max_success_return,
+                    "max_failed_return": max_failed_return,
                     "episode_lengths": episode_lengths,
                     "num_env_steps": num_env_steps,
                     "chunk_count": int(chunk_count),
@@ -616,6 +647,12 @@ def main() -> int:
                 "avg_return": avg_ret,
                 "success_rate": success_rate,
                 "successes": successes,
+                "reward_mode": args.reward_mode,
+                "success_advantage_mean": float(sum(success_advantages) / max(len(success_advantages), 1)),
+                "success_negative_advantage_count": success_negative_advantage_count,
+                "failure_positive_advantage_count": failure_positive_advantage_count,
+                "max_success_return": max_success_return,
+                "max_failed_return": max_failed_return,
                 "skipped": True,
                 "resolved_max_steps": resolved_max_steps,
                 "episode_lengths": episode_lengths,
@@ -748,6 +785,7 @@ def main() -> int:
                     "rollout_chunk_len": int(args.rollout_chunk_len),
                     "action_transform": args.action_transform,
                     "gaussian_logprob_action": args.gaussian_logprob_action,
+                    "reward_mode": args.reward_mode,
                     "run_label": args.run_label,
                     "async_start_method": None,
                     "max_steps": args.max_steps,
@@ -756,6 +794,11 @@ def main() -> int:
                     "returns": returns.detach().cpu().tolist(),
                     "successes": successes,
                     "success_rate": success_rate,
+                    "success_advantage_mean": float(sum(success_advantages) / max(len(success_advantages), 1)),
+                    "success_negative_advantage_count": success_negative_advantage_count,
+                    "failure_positive_advantage_count": failure_positive_advantage_count,
+                    "max_success_return": max_success_return,
+                    "max_failed_return": max_failed_return,
                     "advantages": advantages.detach().cpu().tolist(),
                     "episode_lengths": episode_lengths,
                     "num_env_steps": num_env_steps,
@@ -785,6 +828,12 @@ def main() -> int:
                 "avg_return": avg_ret,
                 "success_rate": success_rate,
                 "successes": successes,
+                "reward_mode": args.reward_mode,
+                "success_advantage_mean": float(sum(success_advantages) / max(len(success_advantages), 1)),
+                "success_negative_advantage_count": success_negative_advantage_count,
+                "failure_positive_advantage_count": failure_positive_advantage_count,
+                "max_success_return": max_success_return,
+                "max_failed_return": max_failed_return,
                 "resolved_max_steps": resolved_max_steps,
                 "episode_lengths": episode_lengths,
                 "num_env_steps": num_env_steps,

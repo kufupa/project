@@ -78,6 +78,16 @@ def test_trainer_writes_rlinf_eval_checkpoints_next_to_resume_checkpoints() -> N
     assert "source_checkpoint=full_path" in text
 
 
+def test_trainer_exposes_reward_mode_for_chunk_ablation() -> None:
+    text = TRAINER.read_text(encoding="utf-8")
+    assert "--reward-mode" in text
+    assert "dense_return" in text
+    assert "sparse_success_delta" in text
+    assert "success_first_dense" in text
+    assert "episode_return_for_mode" in text
+    assert '"reward_mode": args.reward_mode' in text
+
+
 def test_trainer_keeps_full_resume_checkpoints_unchanged() -> None:
     text = TRAINER.read_text(encoding="utf-8")
     assert "save_grpo_checkpoint(" in text

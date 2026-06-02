@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import math
 from typing import Any, Protocol, Sequence
+
+import torch
 
 
 class TrajectoryForReward(Protocol):
@@ -27,6 +30,56 @@ class EnvRewardBackend(RewardBackend):
         if rewards is None and isinstance(traj, dict):
             rewards = traj.get("rewards", [])
         return float(sum(float(r) for r in rewards))
+
+
+def _iter_chunks(traj: Any) -> Sequence[Any]:
+    chunks = getattr(traj, "chunks", None)
+    if chunks is None and isinstance(traj, dict):
+        chunks = traj.get("chunks")
+    return chunks or ()
+
+
+def _valid_dense_return(traj: Any) -> float:
+    chunks = _iter_chunks(traj)
+    if chunks:
+        total = 0.0
+        for chunk in chunks:
+            rewards = torch.as_tensor(getattr(chunk, "rewards"))
+            valid = torch.as_tensor(getattr(chunk, "valid_action_mask")).bool()
+            total += float((rewards.float() * valid.float()).sum().item())
+        return total
+    return EnvRewardBackend().episode_return(traj)
+
+
+def _valid_success_once(traj: Any) -> bool:
+    chunks = _iter_chunks(traj)
+    if chunks:
+        for chunk in chunks:
+            successes = torch.as_tensor(getattr(chunk, "successes")).bool()
+            valid = torch.as_tensor(getattr(chunk, "valid_action_mask")).bool()
+            if bool((successes & valid).any().item()):
+                return True
+        return False
+    successes = getattr(traj, "successes", None)
+    if successes is None and isinstance(traj, dict):
+        successes = traj.get("successes", [])
+    return any(bool(x) for x in (successes or []))
+
+
+def episode_return_for_mode(traj: Any, *, reward_mode: str) -> float:
+    """Scalar episode return for Phase11 reward ablations."""
+    dense = _valid_dense_return(traj)
+    if reward_mode == "dense_return":
+        return dense
+    success = _valid_success_once(traj)
+    if reward_mode == "sparse_success_delta":
+        return 1.0 if success else 0.0
+    if reward_mode == "success_first_dense":
+        dense_tiebreak = math.tanh(dense / 1000.0) * 1e-3
+        return (1.0 if success else 0.0) + dense_tiebreak
+    raise ValueError(
+        "reward_mode must be one of: dense_return, sparse_success_delta, success_first_dense"
+    )
 
 
 class WMLatentRewardBackend(RewardBackend):

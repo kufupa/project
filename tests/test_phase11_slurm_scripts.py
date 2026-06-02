@@ -33,7 +33,11 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_phase111_vector_rollout_smoke.slurm",
         "submit_flow_sde_chunk_grpo_smoke_a30.slurm",
         "submit_flow_sde_chunk_grpo_train16_a30.slurm",
+        "submit_flow_sde_chunk_grpo_train10_dense_a30.slurm",
+        "submit_flow_sde_chunk_grpo_train10_sparse_a30.slurm",
+        "submit_flow_sde_chunk_grpo_train10_success_first_dense_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval25_a30.slurm",
+        "submit_flow_sde_chunk_grpo_eval25_ablation_a30.slurm",
         "submit_phase111_eval_sweep.slurm",
         "submit_phase11_chain.sh",
         "submit_api_gate_smoke.slurm",
@@ -101,6 +105,40 @@ def test_submit_flow_sde_chunk_grpo_train16_has_gate_contract() -> None:
     assert 'test -f "${OUT}/checkpoints/update_0016.pt"' in text
     assert 'test -f "${OUT}/checkpoints_eval/update_0016.pt"' in text
     assert "FLOW_SDE_CHUNK_GRPO_TRAIN16_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_flow_sde_chunk_train10_ablation_scripts_set_reward_modes() -> None:
+    scripts = {
+        "submit_flow_sde_chunk_grpo_train10_dense_a30.slurm": "dense_return",
+        "submit_flow_sde_chunk_grpo_train10_sparse_a30.slurm": "sparse_success_delta",
+        "submit_flow_sde_chunk_grpo_train10_success_first_dense_a30.slurm": "success_first_dense",
+    }
+    for name, reward_mode in scripts.items():
+        path = _REPO_ROOT / "scripts" / "grpo" / name
+        text = path.read_text(encoding="utf-8")
+        assert "#SBATCH --gres=gpu:1" in text
+        assert "#SBATCH --cpus-per-task=10" in text
+        assert "#SBATCH --mem=48G" in text
+        assert "--rollout-unit chunk" in text
+        assert "--rollout-chunk-len 5" in text
+        assert "--num-updates 10" in text
+        assert f"--reward-mode {reward_mode}" in text
+        assert "--fail-on-parity-violation" in text
+        assert "FLOW_SDE_CHUNK_GRPO_TRAIN10_OK" in text
+        subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_flow_sde_chunk_eval25_ablation_script_uses_bounded_resources() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_eval25_ablation_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --cpus-per-task=10" in text
+    assert "#SBATCH --mem=60G" in text
+    assert "--num-episodes 25" in text
+    assert "--chunk-len 5" in text
+    assert '--checkpoint-dir "${CKPT_DIR}"' in text
+    assert "FLOW_SDE_CHUNK_GRPO_EVAL25_ABLATION_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
