@@ -67,3 +67,19 @@ def test_chunk_parity_replays_one_chunk_at_a_time() -> None:
 
     assert stats.within_tolerance
     assert payload["max_abs_per_action_logprob"] == 0.0
+
+
+def test_trainer_writes_rlinf_eval_checkpoints_next_to_resume_checkpoints() -> None:
+    text = TRAINER.read_text(encoding="utf-8")
+    assert "save_rlinf_eval_checkpoint" in text
+    assert 'eval_ckpt_dir = out / "checkpoints_eval"' in text
+    assert "eval_ckpt_dir.mkdir(parents=True, exist_ok=True)" in text
+    assert "eval_ckpt_dir / name" in text
+    assert "source_checkpoint=full_path" in text
+
+
+def test_trainer_keeps_full_resume_checkpoints_unchanged() -> None:
+    text = TRAINER.read_text(encoding="utf-8")
+    assert "save_grpo_checkpoint(" in text
+    assert "policy_state=bundle.policy.state_dict()" in text
+    assert "optimizer_state=optimizer.state_dict()" in text

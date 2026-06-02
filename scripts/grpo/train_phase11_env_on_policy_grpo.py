@@ -132,7 +132,11 @@ def main() -> int:
     import torch
     from torch import nn
 
-    from smolvla_grpo.checkpointing import load_grpo_checkpoint, save_grpo_checkpoint
+    from smolvla_grpo.checkpointing import (
+        load_grpo_checkpoint,
+        save_grpo_checkpoint,
+        save_rlinf_eval_checkpoint,
+    )
     from smolvla_grpo.grpo_math import (
         apply_grpo_regularizers,
         compute_group_advantages,
@@ -253,6 +257,8 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     ckpt_dir = out / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    eval_ckpt_dir = out / "checkpoints_eval"
+    eval_ckpt_dir.mkdir(parents=True, exist_ok=True)
     roll_dir = out / "rollouts"
     roll_dir.mkdir(parents=True, exist_ok=True)
     progress_path = out / "progress.jsonl"
@@ -296,6 +302,24 @@ def main() -> int:
         if ck.get("optimizer_state_dict"):
             optimizer.load_state_dict(ck["optimizer_state_dict"])
         start_u = int(ck.get("update_index", start_u - 1)) + 1
+
+    def save_checkpoint_pair(name: str, *, update_index: int, extra: dict) -> None:
+        full_path = ckpt_dir / name
+        save_grpo_checkpoint(
+            full_path,
+            policy_state=bundle.policy.state_dict(),
+            optimizer_state=optimizer.state_dict(),
+            update_index=update_index,
+            args=vars(args),
+            extra=extra,
+        )
+        save_rlinf_eval_checkpoint(
+            eval_ckpt_dir / name,
+            policy=bundle.policy,
+            update_index=update_index,
+            metrics=extra,
+            source_checkpoint=full_path,
+        )
 
     old_policy = copy.deepcopy(bundle.policy).eval().to(device)
     bundle.policy.train()
@@ -605,23 +629,9 @@ def main() -> int:
                 "truncated": truncated_flags,
                 **pre_update_metrics,
             }
-            save_grpo_checkpoint(
-                ckpt_dir / "latest.pt",
-                policy_state=bundle.policy.state_dict(),
-                optimizer_state=optimizer.state_dict(),
-                update_index=update,
-                args=vars(args),
-                extra=skipped_extra,
-            )
+            save_checkpoint_pair("latest.pt", update_index=update, extra=skipped_extra)
             if (update + 1) % args.save_every == 0 or update == end_u - 1:
-                save_grpo_checkpoint(
-                    ckpt_dir / f"update_{update + 1:04d}.pt",
-                    policy_state=bundle.policy.state_dict(),
-                    optimizer_state=optimizer.state_dict(),
-                    update_index=update,
-                    args=vars(args),
-                    extra=skipped_extra,
-                )
+                save_checkpoint_pair(f"update_{update + 1:04d}.pt", update_index=update, extra=skipped_extra)
             print(
                 "phase111_grpo_update",
                 f"update={update}",
@@ -785,23 +795,9 @@ def main() -> int:
                 "terminated": terminated_flags,
                 "truncated": truncated_flags,
             }
-            save_grpo_checkpoint(
-                ckpt_dir / "latest.pt",
-                policy_state=bundle.policy.state_dict(),
-                optimizer_state=optimizer.state_dict(),
-                update_index=update,
-                args=vars(args),
-                extra=extra,
-            )
+            save_checkpoint_pair("latest.pt", update_index=update, extra=extra)
             if (update + 1) % args.save_every == 0 or update == end_u - 1:
-                save_grpo_checkpoint(
-                    ckpt_dir / f"update_{update + 1:04d}.pt",
-                    policy_state=bundle.policy.state_dict(),
-                    optimizer_state=optimizer.state_dict(),
-                    update_index=update,
-                    args=vars(args),
-                    extra=extra,
-                )
+                save_checkpoint_pair(f"update_{update + 1:04d}.pt", update_index=update, extra=extra)
             print(
                 "phase111_grpo_update",
                 f"update={update}",
@@ -1026,44 +1022,21 @@ def main() -> int:
         old_policy.load_state_dict(state)
         old_policy.eval()
 
-        save_grpo_checkpoint(
-            ckpt_dir / "latest.pt",
-            policy_state=bundle.policy.state_dict(),
-            optimizer_state=optimizer.state_dict(),
-            update_index=update,
-            args=vars(args),
-            extra={
-                "avg_return": avg_ret,
-                "success_rate": success_rate,
-                "successes": successes,
-                "resolved_max_steps": resolved_max_steps,
-                "episode_lengths": episode_lengths,
-                "num_env_steps": num_env_steps,
-                "action_clip_fraction": action_clip_fraction,
-                "action_clip_any_fraction": action_clip_any_fraction,
-                "terminated": terminated_flags,
-                "truncated": truncated_flags,
-            },
-        )
+        extra = {
+            "avg_return": avg_ret,
+            "success_rate": success_rate,
+            "successes": successes,
+            "resolved_max_steps": resolved_max_steps,
+            "episode_lengths": episode_lengths,
+            "num_env_steps": num_env_steps,
+            "action_clip_fraction": action_clip_fraction,
+            "action_clip_any_fraction": action_clip_any_fraction,
+            "terminated": terminated_flags,
+            "truncated": truncated_flags,
+        }
+        save_checkpoint_pair("latest.pt", update_index=update, extra=extra)
         if (update + 1) % args.save_every == 0 or update == end_u - 1:
-            save_grpo_checkpoint(
-                ckpt_dir / f"update_{update + 1:04d}.pt",
-                policy_state=bundle.policy.state_dict(),
-                optimizer_state=optimizer.state_dict(),
-                update_index=update,
-                args=vars(args),
-                extra={
-                    "avg_return": avg_ret,
-                    "success_rate": success_rate,
-                    "successes": successes,
-                    "resolved_max_steps": resolved_max_steps,
-                    "episode_lengths": episode_lengths,
-                    "terminated": terminated_flags,
-                    "truncated": truncated_flags,
-                    "action_clip_fraction": action_clip_fraction,
-                    "action_clip_any_fraction": action_clip_any_fraction,
-                },
-            )
+            save_checkpoint_pair(f"update_{update + 1:04d}.pt", update_index=update, extra=extra)
         print(
             "phase111_grpo_update",
             f"update={update}",
