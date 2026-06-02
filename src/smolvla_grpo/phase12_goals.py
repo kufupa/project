@@ -36,6 +36,13 @@ class Phase12Goal:
     source: str
 
 
+@dataclass(frozen=True)
+class Phase12LocalTransition:
+    subgoal_index: int
+    root_frame_1based: int
+    goal_frame_1based: int
+
+
 def frame_index_to_filename(frame_index_1based: int) -> str:
     idx = int(frame_index_1based)
     if idx < 1:
@@ -63,6 +70,35 @@ def build_subgoal_schedule(
         primary_frames_1based=[int(x) for x in primary],
         companion_frames_1based=[int(x) for x in companion],
     )
+
+
+def build_local_transition_schedule(
+    *,
+    max_frame_1based: int,
+    chunk_len: int,
+    success_frame_1based: int | None = None,
+) -> list[Phase12LocalTransition]:
+    terminal = int(success_frame_1based if success_frame_1based is not None else max_frame_1based)
+    if terminal < 1:
+        raise ValueError("max_frame_1based must be >= 1")
+    stride = int(chunk_len)
+    if stride < 1:
+        raise ValueError("chunk_len must be >= 1")
+
+    goals = list(range(stride, terminal + 1, stride))
+    if not goals or goals[-1] != terminal:
+        goals.append(terminal)
+    roots = [1]
+    roots.extend(goals[:-1])
+
+    return [
+        Phase12LocalTransition(
+            subgoal_index=int(i),
+            root_frame_1based=int(root),
+            goal_frame_1based=int(goal),
+        )
+        for i, (root, goal) in enumerate(zip(roots, goals, strict=True))
+    ]
 
 
 def select_required_oracle_frame_indices(

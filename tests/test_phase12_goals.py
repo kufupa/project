@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from smolvla_grpo.phase12_goals import (
+    build_local_transition_schedule,
     build_subgoal_schedule,
     compute_reset_parity,
     frame_index_to_filename,
@@ -33,6 +34,21 @@ def test_goal_schedule_uses_success_frame_as_terminal_goal() -> None:
 
     assert schedule.primary_frames_1based == [25, 50, 63]
     assert schedule.companion_frames_1based == [26, 51, 64]
+
+
+def test_local_transition_schedule_pairs_roots_with_next_goals() -> None:
+    transitions = build_local_transition_schedule(
+        max_frame_1based=60,
+        chunk_len=5,
+        success_frame_1based=17,
+    )
+
+    assert [(t.root_frame_1based, t.goal_frame_1based) for t in transitions] == [
+        (1, 5),
+        (5, 10),
+        (10, 15),
+        (15, 17),
+    ]
 
 
 def test_required_oracle_frames_keep_init_and_goal_neighbors() -> None:
