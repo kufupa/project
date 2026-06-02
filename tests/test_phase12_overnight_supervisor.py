@@ -22,7 +22,7 @@ def test_classify_failure_marks_partial_checkpoint_as_walltime(monkeypatch, tmp_
     ckpt_dir = tmp_path / "checkpoints"
     ckpt_dir.mkdir()
     (ckpt_dir / "update_0010.pt").write_bytes(b"10")
-    monkeypatch.setattr(sup, "read_recent_logs", lambda: "PBS: job killed after walltime limit")
+    monkeypatch.setattr(sup, "read_recent_logs", lambda _run_dir, _job_ids=None: "PBS: job killed after walltime limit")
 
     cause, symptom = sup.classify_failure(tmp_path)
 
@@ -31,7 +31,7 @@ def test_classify_failure_marks_partial_checkpoint_as_walltime(monkeypatch, tmp_
 
 
 def test_classify_failure_detects_cuda_oom(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(sup, "read_recent_logs", lambda: "RuntimeError: CUDA out of memory")
+    monkeypatch.setattr(sup, "read_recent_logs", lambda _run_dir, _job_ids=None: "RuntimeError: CUDA out of memory")
 
     cause, symptom = sup.classify_failure(tmp_path)
 
@@ -47,7 +47,7 @@ def test_auto_resume_uses_checkpoint_filename_as_next_start(monkeypatch, tmp_pat
     submitted: dict[str, object] = {}
 
     monkeypatch.setattr(sup, "qstat_visible", lambda _job_id: False)
-    monkeypatch.setattr(sup, "read_recent_logs", lambda: "resources_used.walltime exceeded")
+    monkeypatch.setattr(sup, "read_recent_logs", lambda _run_dir, _job_ids=None: "resources_used.walltime exceeded")
 
     def fake_submit(run_dir, *, resume=None, start_update=None):
         submitted["run_dir"] = run_dir
@@ -81,7 +81,7 @@ def test_partial_checkpoint_without_walltime_evidence_does_not_auto_resume(monke
     ckpt_dir.mkdir()
     (ckpt_dir / "update_0010.pt").write_bytes(b"10")
     monkeypatch.setattr(sup, "qstat_visible", lambda _job_id: False)
-    monkeypatch.setattr(sup, "read_recent_logs", lambda: "RuntimeError: deterministic crash")
+    monkeypatch.setattr(sup, "read_recent_logs", lambda _run_dir, _job_ids=None: "RuntimeError: deterministic crash")
 
     state = sup.handle_once(tmp_path, auto_resume=True)
 
@@ -101,6 +101,37 @@ def test_latest_checkpoint_uses_latest_meta_when_newer(tmp_path: Path) -> None:
 
     assert path == latest
     assert start_update == 8
+
+
+def test_latest_checkpoint_falls_back_to_payload_when_meta_missing(tmp_path: Path) -> None:
+    import torch
+
+    ckpt_dir = tmp_path / "checkpoints"
+    ckpt_dir.mkdir()
+    latest = ckpt_dir / "latest.pt"
+    torch.save({"update_index": 3}, latest)
+
+    path, start_update = sup.latest_checkpoint(tmp_path)
+
+    assert path == latest
+    assert start_update == 4
+
+
+def test_read_recent_logs_scopes_to_run_dir_and_job_id(monkeypatch, tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs" / "pbs" / "grpo"
+    log_dir.mkdir(parents=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (log_dir / "phase12_other.log").write_text("walltime other run", encoding="utf-8")
+    (log_dir / "phase12_train_chunk_10u.12345.log").write_text("job-specific walltime", encoding="utf-8")
+    (log_dir / "phase12_run.log").write_text(f"run={run_dir} CUDA out of memory", encoding="utf-8")
+    monkeypatch.setattr(sup, "PROJECT_ROOT", tmp_path)
+
+    text = sup.read_recent_logs(run_dir, ["12345.pbs-7"])
+
+    assert "job-specific walltime" in text
+    assert "CUDA out of memory" in text
+    assert "other run" not in text
 
 
 def test_eval_missing_auto_submits_eval_once(monkeypatch, tmp_path: Path) -> None:

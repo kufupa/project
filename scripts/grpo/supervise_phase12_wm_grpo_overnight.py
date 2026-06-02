@@ -113,15 +113,30 @@ def qstat_visible(job_id: str) -> bool:
     return proc.returncode == 0
 
 
+def _checkpoint_start_from_payload(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        import torch
+
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(path, map_location="cpu")
+        return int(payload["update_index"]) + 1
+    except Exception:
+        return None
+
+
 def _read_checkpoint_meta(path: Path) -> int | None:
     meta_path = path.with_suffix(path.suffix + ".meta.json")
     if not meta_path.is_file():
-        return None
+        return _checkpoint_start_from_payload(path)
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         return int(meta["update_index"]) + 1
     except Exception:
-        return None
+        return _checkpoint_start_from_payload(path)
 
 
 def latest_checkpoint(run_dir: Path) -> tuple[Path | None, int | None]:
@@ -145,17 +160,20 @@ def latest_checkpoint(run_dir: Path) -> tuple[Path | None, int | None]:
     return best[1], best[0]
 
 
-def read_recent_logs() -> str:
+def read_recent_logs(run_dir: Path, job_ids: list[str] | None = None) -> str:
     log_dir = PROJECT_ROOT / "logs" / "pbs" / "grpo"
     if not log_dir.is_dir():
         return ""
-    files = sorted(log_dir.glob("phase12*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+    job_tokens = {job_id.split(".")[0] for job_id in (job_ids or [])}
+    files = sorted(log_dir.glob("phase12*"), key=lambda p: p.stat().st_mtime, reverse=True)[:25]
     chunks: list[str] = []
     for path in files:
         try:
-            chunks.append(path.read_text(encoding="utf-8", errors="replace")[-12000:])
+            text = path.read_text(encoding="utf-8", errors="replace")[-12000:]
         except OSError:
             continue
+        if str(run_dir) in text or any(token and token in path.name for token in job_tokens):
+            chunks.append(text)
     return "\n".join(chunks)
 
 
@@ -174,8 +192,8 @@ def has_walltime_evidence(text: str) -> bool:
     )
 
 
-def classify_failure(run_dir: Path) -> tuple[str, str]:
-    text = read_recent_logs()
+def classify_failure(run_dir: Path, job_ids: list[str] | None = None) -> tuple[str, str]:
+    text = read_recent_logs(run_dir, job_ids)
     progress = run_dir / "progress.jsonl"
     if "CUDA out of memory" in text or "OutOfMemoryError" in text:
         return "oom_or_cuda_memory", "CUDA OOM in recent Phase12 logs."
@@ -270,7 +288,7 @@ def handle_once(run_dir: Path, *, auto_resume: bool) -> SupervisorState:
         save_state(state)
         return state
 
-    cause, symptom = classify_failure(run_dir)
+    cause, symptom = classify_failure(run_dir, state.job_ids)
     state.failures.append({"created_at": utc_now(), "root_cause": cause, "symptom": symptom})
     ckpt, update = latest_checkpoint(run_dir)
     state.latest_checkpoint = str(ckpt) if ckpt is not None else None
