@@ -246,6 +246,7 @@ def test_flow_sde_chunk_moonshot_scripts_encode_final_step_contract() -> None:
         assert "--num-episodes 25" in text
         assert "--num-episodes 100" in text
         assert '--only-updates "10,20,30"' in text
+        assert '"${GRPO_PYTHON_BIN}" -u "${PROJECT_ROOT}/scripts/grpo/train_phase11_env_on_policy_grpo.py"' in text
         assert "FLOW_SDE_MOONSHOT_" in text
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
