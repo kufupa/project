@@ -7,13 +7,65 @@ import json
 import pytest
 
 torch = pytest.importorskip("torch")
+from torch import nn
 
 from smolvla_grpo.checkpointing import (
+    build_rlinf_eval_trainable_model,
     load_grpo_checkpoint,
     save_grpo_checkpoint,
+    save_rlinf_eval_checkpoint,
     torch_load_mmap_default,
     torch_load_mmap_with_mode,
 )
+
+
+class _ToyPolicy(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frozen = nn.Linear(2, 2)
+        self.model = nn.Module()
+        self.model.log_std = nn.Parameter(torch.tensor([1.0, 2.0]))
+        self.model.vlm_with_expert = nn.Module()
+        self.model.vlm_with_expert.lm_expert = nn.Linear(2, 1)
+        for param in self.frozen.parameters():
+            param.requires_grad = False
+
+
+def test_build_rlinf_eval_trainable_model_prefixes_policy_keys() -> None:
+    policy = _ToyPolicy()
+    payload = build_rlinf_eval_trainable_model(policy)
+
+    assert "policy.model.log_std" in payload
+    assert "policy.model.vlm_with_expert.lm_expert.weight" in payload
+    assert "policy.model.vlm_with_expert.lm_expert.bias" in payload
+    assert all(name.startswith("policy.") for name in payload)
+    assert not any("frozen" in name for name in payload)
+    assert payload["policy.model.log_std"].device.type == "cpu"
+    assert payload["policy.model.log_std"].tolist() == [1.0, 2.0]
+
+
+def test_save_rlinf_eval_checkpoint_is_slim_and_one_based_update(tmp_path) -> None:
+    policy = _ToyPolicy()
+    path = tmp_path / "checkpoints_eval" / "update_0016.pt"
+
+    save_rlinf_eval_checkpoint(
+        path,
+        policy=policy,
+        update_index=15,
+        metrics={"success_rate": 0.28},
+        source_checkpoint="checkpoints/update_0016.pt",
+    )
+
+    loaded = torch.load(path, map_location="cpu", weights_only=False)
+    assert loaded["checkpoint_type"] == "trainable_delta"
+    assert loaded["update"] == 16
+    assert loaded["source_update_index"] == 15
+    assert loaded["metrics"] == {"success_rate": 0.28}
+    assert loaded["source_checkpoint"] == "checkpoints/update_0016.pt"
+    assert "trainable_model" in loaded
+    assert "policy_state_dict" not in loaded
+    assert "optimizer_state_dict" not in loaded
+    assert "policy.model.log_std" in loaded["trainable_model"]
 
 
 def test_save_load_roundtrip(tmp_path) -> None:

@@ -39,6 +39,43 @@ def save_grpo_checkpoint(
     )
 
 
+def build_rlinf_eval_trainable_model(
+    policy: torch.nn.Module,
+    *,
+    key_prefix: str = "policy.",
+) -> dict[str, torch.Tensor]:
+    trainable: dict[str, torch.Tensor] = {}
+    for name, param in policy.named_parameters():
+        if not param.requires_grad:
+            continue
+        trainable[f"{key_prefix}{name}"] = param.detach().cpu().clone()
+    if not trainable:
+        raise ValueError("No trainable parameters found for RLinf eval checkpoint")
+    return trainable
+
+
+def save_rlinf_eval_checkpoint(
+    path: Path,
+    *,
+    policy: torch.nn.Module,
+    update_index: int,
+    metrics: dict[str, Any] | None = None,
+    source_checkpoint: str | Path | None = None,
+    key_prefix: str = "policy.",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "checkpoint_type": "trainable_delta",
+        "update": int(update_index) + 1,
+        "source_update_index": int(update_index),
+        "trainable_model": build_rlinf_eval_trainable_model(policy, key_prefix=key_prefix),
+        "metrics": metrics or {},
+    }
+    if source_checkpoint is not None:
+        payload["source_checkpoint"] = str(source_checkpoint)
+    torch.save(payload, path)
+
+
 def torch_load_mmap_default(
     path: str | Path,
     *,
