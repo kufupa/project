@@ -23,12 +23,13 @@ def _score_value(score: Any, key: str) -> float:
 
 def collect_phase12_wm_only_episode(
     *,
-    root_source: Any,
+    root_source: Any | None,
     reset_seed: int,
     policy_sampler: Callable[..., Iterable[Any]],
     score_fn: Callable[..., Any],
     score_candidates_fn: Callable[..., Sequence[Any]] | None = None,
     goals: Sequence[Any],
+    segment_roots: Sequence[Any] | None = None,
     group_size: int,
     reward_key: str,
     action_profile: str = "official_jepa_mirror",
@@ -39,7 +40,17 @@ def collect_phase12_wm_only_episode(
     wm_action_dim: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Phase12EpisodeResult:
-    root = root_source.reset(int(reset_seed))
+    if segment_roots is None:
+        if root_source is None:
+            raise ValueError("root_source is required when segment_roots is not provided")
+        root = root_source.reset(int(reset_seed))
+        roots = [root for _ in goals]
+        root_mode = "single_root"
+    else:
+        roots = list(segment_roots)
+        if len(roots) != len(goals):
+            raise ValueError(f"segment_roots length {len(roots)} must match goals length {len(goals)}")
+        root_mode = "oracle_teacher_forced"
     low = action_low if action_low is not None else np.full((int(env_action_dim or 4),), -1.0, dtype=np.float32)
     high = action_high if action_high is not None else np.full((int(env_action_dim or 4),), 1.0, dtype=np.float32)
 
@@ -51,6 +62,7 @@ def collect_phase12_wm_only_episode(
     unsquashed_chunks: list[Any] = []
 
     for segment_index, goal in enumerate(goals):
+        root = roots[int(segment_index)]
         samples = list(
             policy_sampler(
                 root,
@@ -116,6 +128,8 @@ def collect_phase12_wm_only_episode(
             "unsquashed_chunks": unsquashed_chunks,
             "success_any": False,
             "success_last": False,
+            "wm_only_root_mode": root_mode,
+            "wm_only_segment_count": len(goals),
         }
     )
     return Phase12EpisodeResult(

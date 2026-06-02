@@ -144,6 +144,52 @@ def test_wm_only_train_branch_does_not_call_selected_env_collector(monkeypatch, 
     assert any(row.get("event") == "update_complete" and row.get("optimizer_step") is True for row in rows)
 
 
+def test_phase12_pure_wm_args_are_recorded_in_manifest(tmp_path) -> None:
+    args = trainer.parse_args(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--phase12-train-mode",
+            "wm_only",
+            "--wm-only-root-mode",
+            "oracle_teacher_forced",
+            "--loss-normalizer-mode",
+            "group_sqrt_segments",
+            "--wm-action-l2-penalty",
+            "0.003",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    manifest = trainer.build_manifest(args)
+
+    assert manifest["wm_only_root_mode"] == "oracle_teacher_forced"
+    assert manifest["rollout_execution"] == "wm_only_oracle_teacher_forced"
+    assert manifest["loss_normalizer_mode"] == "group_sqrt_segments"
+    assert manifest["wm_action_l2_penalty"] == 0.003
+
+
+def test_phase12_loss_normalizer_modes() -> None:
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group") == 8
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group_sqrt_segments") == 28
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group_times_segments") == 96
+
+
+def test_phase12_action_l2_penalty_adjusts_reward() -> None:
+    candidate = SimpleNamespace(exec_actions_for_env=np.ones((5, 4), dtype=np.float32))
+
+    adjusted = trainer._apply_phase12_action_l2_penalty(
+        {"candidate_index": 0, "wm_latent_progress": 0.2, "final_combined_distance": 1.0},
+        candidate,
+        reward_key="wm_latent_progress",
+        penalty=0.003,
+    )
+
+    assert adjusted["wm_latent_progress"] == pytest.approx(0.197)
+    assert adjusted["action_l2"] == pytest.approx(1.0)
+
+
 def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch, tmp_path) -> None:
     calls: list[int] = []
 

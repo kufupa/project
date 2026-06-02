@@ -71,3 +71,48 @@ def test_wm_only_collector_scores_candidates_without_env_step() -> None:
     assert len(result.metadata["old_logprob_sums"]) == 3
     assert len(result.metadata["unsquashed_chunks"]) == 3
     assert result.segments[0].goal_frame_index_1based == 25
+
+
+def test_wm_only_collector_uses_teacher_forced_segment_roots() -> None:
+    seen_roots: list[str] = []
+
+    class RootSource:
+        def reset(self, _seed: int):
+            raise AssertionError("teacher-forced roots should bypass reset root")
+
+    def sampler(root, *, num_candidates: int, segment_index: int, goal):
+        del goal
+        seen_roots.append(root["id"])
+        for i in range(num_candidates):
+            yield {
+                "candidate_index": i,
+                "proc_root_snapshot": root["proc"],
+                "unsquashed_chunk": torch.full((2, 4), float(segment_index + i), dtype=torch.float32),
+                "old_logprob_steps": np.array([-0.1, -0.2], dtype=np.float32),
+                "exec_actions_raw_postprocessed": np.full((2, 4), float(i), dtype=np.float32),
+            }
+
+    def score_fn(root, candidate, goal, *, segment_index: int):
+        del goal
+        assert root["id"] == f"root-{segment_index}"
+        return _score(candidate.candidate_index, progress=float(candidate.candidate_index))
+
+    roots = [
+        {"id": "root-0", "proc": {"x": torch.zeros(1, 1)}},
+        {"id": "root-1", "proc": {"x": torch.ones(1, 1)}},
+    ]
+    result = collect_phase12_wm_only_episode(
+        root_source=RootSource(),
+        reset_seed=123,
+        policy_sampler=sampler,
+        score_fn=score_fn,
+        goals=[SimpleNamespace(frame_index_1based=5), SimpleNamespace(frame_index_1based=10)],
+        segment_roots=roots,
+        group_size=2,
+        reward_key="wm_latent_progress",
+    )
+
+    assert seen_roots == ["root-0", "root-1"]
+    assert result.metadata["wm_only_root_mode"] == "oracle_teacher_forced"
+    assert result.metadata["wm_only_segment_count"] == 2
+    assert result.metadata["selected_candidate_indices"] == [1, 1]
