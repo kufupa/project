@@ -50,6 +50,38 @@ def test_bounded_executed_scores_exactly_what_it_executes() -> None:
     np.testing.assert_allclose(result.exec_actions_for_wm, result.exec_actions_for_env)
     assert result.metadata["exec_action_source"] == "clipped"
     assert result.metadata["wm_action_source"] == "clipped"
+    assert result.metadata["action_profile"] == "bounded_executed"
+    assert result.metadata["clip_fraction"] == pytest.approx(0.75)
+    assert result.metadata["clip_any"] is True
+
+
+def test_action_profile_keyword_is_required() -> None:
+    raw = np.array([[0.0, 0.1, 0.2, 0.3]], dtype=np.float32)
+
+    with pytest.raises(TypeError):
+        apply_phase12_action_profile(raw, -1.0, 1.0)  # type: ignore[misc]
+
+
+def test_official_and_bounded_profiles_expose_different_wm_contracts() -> None:
+    raw = np.array([[3.0, -3.0, 0.0, 0.5]], dtype=np.float32)
+
+    official = apply_phase12_action_profile(
+        raw,
+        action_profile="official_jepa_mirror",
+        action_low=-1.0,
+        action_high=1.0,
+    )
+    bounded = apply_phase12_action_profile(
+        raw,
+        action_profile="bounded_executed",
+        action_low=-1.0,
+        action_high=1.0,
+    )
+
+    np.testing.assert_allclose(official.exec_actions_for_wm, raw)
+    np.testing.assert_allclose(bounded.exec_actions_for_wm, np.clip(raw, -1.0, 1.0))
+    assert official.metadata["wm_action_source"] == "raw_postprocessed"
+    assert bounded.metadata["wm_action_source"] == "clipped"
 
 
 def test_action_metadata_includes_jepa_normalized_and_packed_shape() -> None:
