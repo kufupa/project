@@ -2,6 +2,7 @@
 #PBS -N p12ev5x25
 #PBS -l select=1:ncpus=32:mem=32gb:ngpus=1:gpu_type=RTX6000
 #PBS -l walltime=00:30:00
+#PBS -q v1_gpu72
 #PBS -j oe
 #PBS -o logs/pbs/grpo/phase12_eval_last5_25ep.out
 
@@ -26,6 +27,8 @@ MAX_UPDATE="${PHASE12_MAX_UPDATE:?set PHASE12_MAX_UPDATE}"
 STRIDE="${PHASE12_STRIDE:-2}"
 EPISODES="${PHASE12_EVAL_EPISODES:-25}"
 N_ENVS="${PHASE12_EVAL_N_ENVS:-25}"
+CHUNK_LEN="${PHASE12_EVAL_CHUNK_LEN:-25}"
+MAX_STEPS="${PHASE12_EVAL_MAX_STEPS:-120}"
 SWEEP_NAME="${PHASE12_SWEEP_NAME:-eval_last5_${MIN_UPDATE}_${MAX_UPDATE}_25ep_nenv25}"
 
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
@@ -48,7 +51,7 @@ test -d "${PROJECT_ROOT}/src"
 if [[ ! -d "${BASE_CKPT}" && ! -f "${BASE_CKPT}" ]]; then echo "missing BASE_CKPT=${BASE_CKPT}" >&2; exit 2; fi
 test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${MAX_UPDATE}").pt"
 
-echo "[phase12-eval-last5] run=${RUN_DIR} updates=${MIN_UPDATE}-${MAX_UPDATE} stride=${STRIDE} episodes=${EPISODES} nenv=${N_ENVS} job=${PBS_JOBID:-local}"
+echo "[phase12-eval-last5] run=${RUN_DIR} updates=${MIN_UPDATE}-${MAX_UPDATE} stride=${STRIDE} episodes=${EPISODES} nenv=${N_ENVS} chunk=${CHUNK_LEN} max_steps=${MAX_STEPS} job=${PBS_JOBID:-local}"
 "${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
   --base-checkpoint "${BASE_CKPT}" \
   --run-dir "${RUN_DIR}" \
@@ -59,8 +62,8 @@ echo "[phase12-eval-last5] run=${RUN_DIR} updates=${MIN_UPDATE}-${MAX_UPDATE} st
   --execution-mode inprocess_vector \
   --n-envs "${N_ENVS}" \
   --rollout-execution vector_async \
-  --chunk-len 25 \
-  --max-steps 120 \
+  --chunk-len "${CHUNK_LEN}" \
+  --max-steps "${MAX_STEPS}" \
   --min-update "${MIN_UPDATE}" \
   --max-update "${MAX_UPDATE}" \
   --stride "${STRIDE}"
@@ -73,9 +76,9 @@ from pathlib import Path
 summary = json.loads(Path(sys.argv[1]).read_text())
 min_u, max_u, episodes, n_envs = map(int, sys.argv[2:6])
 rows = summary["rows"]
-assert [int(r["update"]) for r in rows] == list(range(min_u, max_u + 1, 2)), rows
+stride = int(summary["stride"])
+assert [int(r["update"]) for r in rows] == list(range(min_u, max_u + 1, stride)), rows
 assert int(summary["episodes"]) == episodes
 assert int(summary["n_envs"]) == n_envs
-assert int(summary["chunk_len"]) == 25
 PY
 echo "PHASE12_EVAL_LAST5_DONE summary=${SUMMARY}"

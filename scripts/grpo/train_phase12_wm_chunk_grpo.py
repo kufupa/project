@@ -1382,6 +1382,8 @@ def _chunk_grpo_loss_with_group_normalizer(
 
 
 def _combine_phase12_seed_batch_metadata(episodes: list[Any]) -> dict[str, Any]:
+    action_clip_fractions: list[float] = []
+    action_clip_any_fractions: list[float] = []
     combined: dict[str, Any] = {
         "candidate_rewards": [],
         "segment_candidate_rewards": [],
@@ -1395,6 +1397,11 @@ def _combine_phase12_seed_batch_metadata(episodes: list[Any]) -> dict[str, Any]:
         "wm_score_candidate_count": 0,
         "wm_score_cuda_peak_allocated_bytes": 0,
         "wm_score_mode": "",
+        "action_clip_fraction": 0.0,
+        "action_clip_any_fraction": 0.0,
+        "raw_action_max_abs": 0.0,
+        "clipped_action_max_abs": 0.0,
+        "clip_delta_max_abs": 0.0,
     }
     for episode in episodes:
         meta = dict(getattr(episode, "metadata", {}) or {})
@@ -1415,6 +1422,28 @@ def _combine_phase12_seed_batch_metadata(episodes: list[Any]) -> dict[str, Any]:
         combined["wm_score_cuda_peak_allocated_bytes"] = max(
             int(combined["wm_score_cuda_peak_allocated_bytes"]),
             int(meta.get("wm_score_cuda_peak_allocated_bytes", 0)),
+        )
+        if "action_clip_fraction" in meta:
+            action_clip_fractions.append(float(meta.get("action_clip_fraction", 0.0)))
+        if "action_clip_any_fraction" in meta:
+            action_clip_any_fractions.append(float(meta.get("action_clip_any_fraction", 0.0)))
+        combined["raw_action_max_abs"] = max(
+            float(combined["raw_action_max_abs"]),
+            float(meta.get("raw_action_max_abs", 0.0)),
+        )
+        combined["clipped_action_max_abs"] = max(
+            float(combined["clipped_action_max_abs"]),
+            float(meta.get("clipped_action_max_abs", 0.0)),
+        )
+        combined["clip_delta_max_abs"] = max(
+            float(combined["clip_delta_max_abs"]),
+            float(meta.get("clip_delta_max_abs", 0.0)),
+        )
+    if action_clip_fractions:
+        combined["action_clip_fraction"] = float(sum(action_clip_fractions) / len(action_clip_fractions))
+    if action_clip_any_fractions:
+        combined["action_clip_any_fraction"] = float(
+            sum(action_clip_any_fractions) / len(action_clip_any_fractions)
         )
     return combined
 
@@ -1510,6 +1539,9 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
         old_lp = torch.tensor(meta["old_logprob_sums"], dtype=torch.float32, device=bundle.device)
         progress_common = {
             "phase12_train_mode": str(args.phase12_train_mode),
+            "action_profile": str(args.action_profile),
+            "reward_key": str(args.reward_key),
+            "chunk_len": int(args.chunk_len),
             "group_size": int(args.group_size),
             "batch_size": batch_size_i,
             "reset_seed": int(reset_seeds[0]),
@@ -1527,6 +1559,11 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
             "wm_score_batch_count": int(meta.get("wm_score_batch_count", 0)),
             "wm_score_candidate_count": int(meta.get("wm_score_candidate_count", 0)),
             "wm_score_cuda_peak_allocated_bytes": int(meta.get("wm_score_cuda_peak_allocated_bytes", 0)),
+            "action_clip_fraction": float(meta.get("action_clip_fraction", 0.0)),
+            "action_clip_any_fraction": float(meta.get("action_clip_any_fraction", 0.0)),
+            "raw_action_max_abs": float(meta.get("raw_action_max_abs", 0.0)),
+            "clipped_action_max_abs": float(meta.get("clipped_action_max_abs", 0.0)),
+            "clip_delta_max_abs": float(meta.get("clip_delta_max_abs", 0.0)),
             **proc_mem_update_start,
             **proc_mem_after_rollout,
         }
@@ -1620,11 +1657,6 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "checkpoint_path": str(ckpt_path),
                 "optimize_seconds": float(optimize_seconds),
                 "update_seconds": float(time.perf_counter() - update_t0),
-                "action_clip_fraction": float(meta.get("action_clip_fraction", 0.0)),
-                "action_clip_any_fraction": float(meta.get("action_clip_any_fraction", 0.0)),
-                "raw_action_max_abs": float(meta.get("raw_action_max_abs", 0.0)),
-                "clipped_action_max_abs": float(meta.get("clipped_action_max_abs", 0.0)),
-                "clip_delta_max_abs": float(meta.get("clip_delta_max_abs", 0.0)),
                 **proc_mem_after_optimize,
                 **ratio_stats,
             },
