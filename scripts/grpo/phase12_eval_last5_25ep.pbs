@@ -25,6 +25,7 @@ RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
 MIN_UPDATE="${PHASE12_MIN_UPDATE:?set PHASE12_MIN_UPDATE}"
 MAX_UPDATE="${PHASE12_MAX_UPDATE:?set PHASE12_MAX_UPDATE}"
 STRIDE="${PHASE12_STRIDE:-2}"
+UPDATES="${PHASE12_EVAL_UPDATES:-}"
 EPISODES="${PHASE12_EVAL_EPISODES:-25}"
 N_ENVS="${PHASE12_EVAL_N_ENVS:-25}"
 CHUNK_LEN="${PHASE12_EVAL_CHUNK_LEN:-25}"
@@ -49,9 +50,24 @@ export TOKENIZERS_PARALLELISM=false
 test -x "${PYTHON_BIN}"
 test -d "${PROJECT_ROOT}/src"
 if [[ ! -d "${BASE_CKPT}" && ! -f "${BASE_CKPT}" ]]; then echo "missing BASE_CKPT=${BASE_CKPT}" >&2; exit 2; fi
-test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${MAX_UPDATE}").pt"
+if [[ -n "${UPDATES}" ]]; then
+  max_requested="$("${PYTHON_BIN}" - "${UPDATES}" <<'PY'
+import sys
+updates = [int(x) for x in sys.argv[1].replace(":", ",").replace(";", ",").split(",") if x.strip()]
+print(max(updates))
+PY
+)"
+  test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${max_requested}").pt"
+else
+  test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${MAX_UPDATE}").pt"
+fi
 
-echo "[phase12-eval-last5] run=${RUN_DIR} updates=${MIN_UPDATE}-${MAX_UPDATE} stride=${STRIDE} episodes=${EPISODES} nenv=${N_ENVS} chunk=${CHUNK_LEN} max_steps=${MAX_STEPS} job=${PBS_JOBID:-local}"
+update_args=()
+if [[ -n "${UPDATES}" ]]; then
+  update_args=(--updates "${UPDATES}")
+fi
+
+echo "[phase12-eval-last5] run=${RUN_DIR} updates=${UPDATES:-${MIN_UPDATE}-${MAX_UPDATE}} stride=${STRIDE} episodes=${EPISODES} nenv=${N_ENVS} chunk=${CHUNK_LEN} max_steps=${MAX_STEPS} job=${PBS_JOBID:-local}"
 "${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
   --base-checkpoint "${BASE_CKPT}" \
   --run-dir "${RUN_DIR}" \
@@ -66,19 +82,29 @@ echo "[phase12-eval-last5] run=${RUN_DIR} updates=${MIN_UPDATE}-${MAX_UPDATE} st
   --max-steps "${MAX_STEPS}" \
   --min-update "${MIN_UPDATE}" \
   --max-update "${MAX_UPDATE}" \
-  --stride "${STRIDE}"
+  --stride "${STRIDE}" \
+  "${update_args[@]}"
 
 SUMMARY="${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
 test -f "${SUMMARY}"
-"${PYTHON_BIN}" - "${SUMMARY}" "${MIN_UPDATE}" "${MAX_UPDATE}" "${EPISODES}" "${N_ENVS}" <<'PY'
+"${PYTHON_BIN}" - "${SUMMARY}" "${MIN_UPDATE}" "${MAX_UPDATE}" "${EPISODES}" "${N_ENVS}" "${UPDATES}" "${CHUNK_LEN}" <<'PY'
 import json, sys
 from pathlib import Path
 summary = json.loads(Path(sys.argv[1]).read_text())
 min_u, max_u, episodes, n_envs = map(int, sys.argv[2:6])
+updates_arg = sys.argv[6]
+chunk_len = int(sys.argv[7])
 rows = summary["rows"]
 stride = int(summary["stride"])
-assert [int(r["update"]) for r in rows] == list(range(min_u, max_u + 1, stride)), rows
+if updates_arg.strip():
+    expected = [int(x) for x in updates_arg.replace(":", ",").replace(";", ",").split(",") if x.strip()]
+else:
+    expected = list(range(min_u, max_u + 1, stride))
+assert [int(r["update"]) for r in rows] == expected, rows
 assert int(summary["episodes"]) == episodes
 assert int(summary["n_envs"]) == n_envs
+assert str(summary["execution_mode"]) == "inprocess_vector"
+assert str(summary["rollout_execution"]) == "vector_async"
+assert int(summary["chunk_len"]) == chunk_len
 PY
 echo "PHASE12_EVAL_LAST5_DONE summary=${SUMMARY}"
