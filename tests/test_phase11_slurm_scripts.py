@@ -40,6 +40,7 @@ def test_slurm_and_chain_scripts_bash_syntax() -> None:
         "submit_flow_sde_chunk_grpo_eval25_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval25_ablation_a30.slurm",
         "submit_flow_sde_chunk_grpo_eval100_ablation_a30.slurm",
+        "submit_flow_sde_chunk_grpo_eval25_eval100_chain_a30.slurm",
         "submit_phase111_eval_sweep.slurm",
         "submit_phase11_chain.sh",
         "submit_api_gate_smoke.slurm",
@@ -183,6 +184,24 @@ def test_flow_sde_chunk_eval100_ablation_script_uses_bounded_resources() -> None
     assert '--checkpoint-dir "${CKPT_DIR}"' in text
     assert "eval100_summary.json" in text
     assert "FLOW_SDE_CHUNK_GRPO_EVAL100_ABLATION_OK" in text
+    subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
+
+
+def test_flow_sde_chunk_eval25_eval100_chain_script_runs_both_sweeps() -> None:
+    path = _REPO_ROOT / "scripts" / "grpo" / "submit_flow_sde_chunk_grpo_eval25_eval100_chain_a30.slurm"
+    text = path.read_text(encoding="utf-8")
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --cpus-per-task=10" in text
+    assert "#SBATCH --mem=60G" in text
+    assert 'CKPT_DIR="${1:?checkpoint dir}"' in text
+    assert 'OUT25_DIR="${2:?25ep output dir}"' in text
+    assert 'OUT100_DIR="${4:?100ep output dir}"' in text
+    assert "--num-episodes 25" in text
+    assert "--num-episodes 100" in text
+    assert "--only-updates" in text
+    assert "eval25_summary.json" in text
+    assert "eval100_summary.json" in text
+    assert "FLOW_SDE_CHUNK_GRPO_EVAL25_EVAL100_CHAIN_OK" in text
     subprocess.run(["bash", "-n", str(path)], check=True, cwd=str(_REPO_ROOT))
 
 
