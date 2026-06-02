@@ -254,6 +254,22 @@ def _checkpoint_path(run_dir: Path, update: int) -> Path:
     return run_dir / "checkpoints" / f"update_{int(update):04d}.pt"
 
 
+def _parse_update_list(value: str | None) -> list[int]:
+    if value is None or not str(value).strip():
+        return []
+    updates: list[int] = []
+    for part in str(value).replace(":", ",").replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        update = int(item)
+        if update < 0:
+            raise ValueError("updates must be >= 0")
+        if update not in updates:
+            updates.append(update)
+    return updates
+
+
 def _load_existing_eval_row(out_dir: Path, *, update: int, episodes: int) -> dict[str, Any]:
     summary = json.loads((out_dir / "eval_summary.json").read_text(encoding="utf-8"))
     ckpt = summary.get("grpo_checkpoint", "base_checkpoint")
@@ -285,6 +301,7 @@ def run_sweep_inprocess_vector(
     max_steps: int | None,
     chunk_len: int = 1,
     skip_existing: bool = False,
+    updates: list[int] | None = None,
 ) -> dict[str, Any]:
     from smolvla_grpo.phase11_rollout import load_bundle_for_grpo
     from smolvla_grpo.phase12_vector_eval import (
@@ -303,9 +320,9 @@ def run_sweep_inprocess_vector(
     sweep_dir = run_dir / sweep_name
     sweep_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    updates = list(range(int(min_update), int(max_update) + 1, int(stride)))
+    selected_updates = list(updates or list(range(int(min_update), int(max_update) + 1, int(stride))))
 
-    for update in updates:
+    for update in selected_updates:
         out_dir = sweep_dir / f"update_{update:04d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         if skip_existing and (out_dir / "eval_summary.json").is_file():
@@ -350,6 +367,7 @@ def run_sweep_inprocess_vector(
         "min_update": int(min_update),
         "max_update": int(max_update),
         "stride": int(stride),
+        "updates": selected_updates if updates else None,
         "execution_mode": "inprocess_vector",
         "n_envs": int(n_envs),
         "rollout_execution": rollout_execution,
@@ -379,6 +397,7 @@ def run_sweep(
     max_steps: int | None = None,
     chunk_len: int = 1,
     skip_existing: bool = False,
+    updates: list[int] | None = None,
 ) -> dict[str, Any]:
     if int(stride) <= 0:
         raise ValueError("stride must be positive")
@@ -390,8 +409,8 @@ def run_sweep(
     sweep_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
-    updates = list(range(int(min_update), int(max_update) + 1, int(stride)))
-    for update in updates:
+    selected_updates = list(updates or list(range(int(min_update), int(max_update) + 1, int(stride))))
+    for update in selected_updates:
         ckpt = None if update == 0 else _checkpoint_path(run_dir, update)
         if ckpt is not None and not ckpt.is_file():
             missing.append(str(ckpt))
@@ -414,11 +433,12 @@ def run_sweep(
             max_steps=max_steps,
             chunk_len=int(chunk_len),
             skip_existing=skip_existing,
+            updates=selected_updates if updates else None,
         )
     if execution_mode != "subprocess":
         raise ValueError("execution_mode must be 'subprocess' or 'inprocess_vector'")
 
-    for update in updates:
+    for update in selected_updates:
         out_dir = sweep_dir / f"update_{update:04d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         if skip_existing and (out_dir / "eval_summary.json").is_file():
@@ -456,6 +476,7 @@ def run_sweep(
         "min_update": int(min_update),
         "max_update": int(max_update),
         "stride": int(stride),
+        "updates": selected_updates if updates else None,
         "rows": rows,
     }
     out_path = sweep_dir / "eval_sweep_summary.json"
@@ -475,6 +496,7 @@ def main() -> int:
     parser.add_argument("--min-update", type=int, default=0)
     parser.add_argument("--max-update", type=int, default=300)
     parser.add_argument("--stride", type=int, default=10)
+    parser.add_argument("--updates", type=str, default=None)
     parser.add_argument("--execution-mode", choices=("subprocess", "inprocess_vector"), default="subprocess")
     parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--rollout-execution", choices=("serial", "vector_sync", "vector_async"), default="vector_async")
@@ -497,6 +519,7 @@ def main() -> int:
         min_update=args.min_update,
         max_update=args.max_update,
         stride=args.stride,
+        updates=_parse_update_list(args.updates),
         execution_mode=args.execution_mode,
         n_envs=args.n_envs,
         rollout_execution=args.rollout_execution,

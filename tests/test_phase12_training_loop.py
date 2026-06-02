@@ -176,6 +176,11 @@ def test_phase12_loss_normalizer_modes() -> None:
     assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group_times_segments") == 96
 
 
+def test_phase12_save_every_list_parser() -> None:
+    assert trainer._parse_positive_int_list("2,5:10") == [2, 5, 10]
+    assert trainer._parse_positive_int_list(None) == []
+
+
 def test_phase12_action_l2_penalty_adjusts_reward() -> None:
     candidate = SimpleNamespace(exec_actions_for_env=np.ones((5, 4), dtype=np.float32))
 

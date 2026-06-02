@@ -80,6 +80,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--init-log-std", type=float, default=-2.0)
     p.add_argument("--euler-step-noise-std", type=float, default=0.2)
     p.add_argument("--save-every", type=int, default=5)
+    p.add_argument("--save-every-list", type=str, default=None)
     p.add_argument("--resume", type=Path, default=None)
     p.add_argument("--start-update", type=int, default=None)
     p.add_argument("--train-seed-base", type=int, default=2000)
@@ -152,6 +153,7 @@ def build_manifest(args: argparse.Namespace) -> dict:
         "lr": float(args.lr),
         "clip_eps": float(args.clip_eps),
         "save_every": int(args.save_every),
+        "save_every_list": _parse_positive_int_list(args.save_every_list) or [int(args.save_every)],
         "phase12_policy_frame_contract": "lerobot_corner2_vhflip",
         "phase12_wm_frame_contract": "jepa_corner2_vflip",
         "phase12_goal_frame_contract": "jepa_corner2_vflip",
@@ -380,6 +382,22 @@ def _phase12_loss_normalizer(*, group_size: int, segment_count: int, mode: str) 
     if mode == "group_times_segments":
         return int(group_size) * int(segment_count)
     raise ValueError("loss_normalizer_mode must be 'group', 'group_sqrt_segments', or 'group_times_segments'")
+
+
+def _parse_positive_int_list(value: str | None) -> list[int]:
+    if value is None or not str(value).strip():
+        return []
+    out: list[int] = []
+    for part in str(value).replace(":", ",").replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        parsed = int(item)
+        if parsed < 1:
+            raise ValueError("values must be >= 1")
+        if parsed not in out:
+            out.append(parsed)
+    return out
 
 
 def _phase12_action_l2(candidate: Any) -> float:
@@ -1367,9 +1385,12 @@ def _save_latest_and_numbered(
         args=vars(args),
         extra=extra,
     )
-    if (int(update_index) + 1) % int(args.save_every) == 0 or int(args.num_updates) == 1:
+    save_intervals = _parse_positive_int_list(getattr(args, "save_every_list", None)) or [int(args.save_every)]
+    numbered_update = int(update_index) + 1
+    should_save_numbered = any(numbered_update % int(interval) == 0 for interval in save_intervals)
+    if should_save_numbered or int(args.num_updates) == 1:
         save_grpo_checkpoint(
-            ckpt_dir / f"update_{int(update_index) + 1:04d}.pt",
+            ckpt_dir / f"update_{numbered_update:04d}.pt",
             policy_state=policy_state,
             optimizer_state=optimizer_state,
             update_index=update_index,

@@ -16,10 +16,13 @@ def test_phase12_train_chunk_pbs_contract() -> None:
     assert "#PBS -l walltime=04:00:00" in text
     assert "#PBS -q v1_gpu72" in text
     assert "--phase12-train-mode \"${TRAIN_MODE}\"" in text
+    assert "--wm-only-root-mode \"${WM_ONLY_ROOT_MODE}\"" in text
     assert "--start-update \"${START_UPDATE}\"" in text
     assert "--batch-size \"${BATCH_SIZE}\"" in text
     assert "--group-size \"${GROUP_SIZE}\"" in text
     assert "--chunk-len \"${CHUNK_LEN}\"" in text
+    assert "--loss-normalizer-mode \"${LOSS_NORMALIZER_MODE}\"" in text
+    assert "--wm-action-l2-penalty \"${WM_ACTION_L2_PENALTY}\"" in text
     assert "--max-steps \"${MAX_STEPS}\"" in text
     assert "--disable-videos" in text
     assert "--no-save-wm-decodes" in text
@@ -38,7 +41,28 @@ def test_phase12_eval_last5_pbs_contract() -> None:
     assert "--chunk-len \"${CHUNK_LEN}\"" in text
     assert "--max-steps \"${MAX_STEPS}\"" in text
     assert "--episodes \"${EPISODES}\"" in text
+    assert "PHASE12_EVAL_UPDATES" in text
+    assert "update_args=(--updates \"${UPDATES}\")" in text
     assert "PHASE12_EVAL_LAST5_DONE" in text
+
+
+def test_phase12_pure_wm_train_eval_pbs_contract() -> None:
+    text = _read("scripts/grpo/phase12_pure_wm_teacher_forced_train_eval.pbs")
+    assert "#PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000" in text
+    assert "#PBS -q v1_gpu72" in text
+    assert "PHASE12_TOTAL_UPDATES:-20" in text
+    assert "PHASE12_SAVE_EVERY_LIST:-2,5" in text
+    assert "PHASE12_SEED_BASE:-2000" in text
+    assert "PHASE12_WM_ONLY_ROOT_MODE:-oracle_teacher_forced" in text
+    assert "PHASE12_LOSS_NORMALIZER_MODE:-group" in text
+    assert "PHASE12_WM_ACTION_L2_PENALTY:-0.003" in text
+    assert "--save-every-list \"${SAVE_EVERY_LIST}\"" in text
+    assert "--updates \"${EVAL25_UPDATES}\"" in text
+    assert "--updates \"${EVAL100_UPDATES}\"" in text
+    assert "--episodes 25" in text
+    assert "--episodes 100" in text
+    assert "LIGHTWEIGHT_COPY_DIR" in text
+    assert "PHASE12_PURE_WM_TRAIN_EVAL_DONE" in text
 
 
 def test_phase12_two_exp_chain_contract() -> None:
