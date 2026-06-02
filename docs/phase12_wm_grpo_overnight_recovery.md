@@ -6,6 +6,7 @@ This note records the autonomous recovery contract for strict G8-u20 WM-GRPO run
 
 - PBS: `scripts/grpo/phase12_g8_u20_wm_train_eval100_stride5.pbs`
 - Supervisor: `scripts/grpo/supervise_phase12_wm_grpo_overnight.py`
+- Supervisor PBS: `scripts/grpo/phase12_wm_grpo_supervisor_loop.pbs`
 - Run dir: `artifacts/phase12_wm_g8_u20_strict_parity_20260602`
 - Action profile: `bounded_executed`
 - Train: `group_size=8`, `batch_size=1`, `chunk_len=5`, `num_updates=20`, `seed_base=2000`
@@ -31,6 +32,15 @@ cd /rds/general/user/aa6622/home/project
 
 `--auto-resume` only resubmits known-safe walltime-style failures where a latest
 checkpoint exists before `update_0020.pt`. Unknown failures stop with a blocker.
+
+For unattended overnight recovery, submit the supervisor as a non-GPU PBS job
+after the training job:
+
+```bash
+qsub -W depend=afterany:<TRAIN_JOB_ID> \
+  -v PHASE12_RUN_DIR=/rds/general/user/aa6622/home/project/artifacts/phase12_wm_g8_u20_strict_parity_20260602 \
+  scripts/grpo/phase12_wm_grpo_supervisor_loop.pbs
+```
 
 ## Outputs
 
