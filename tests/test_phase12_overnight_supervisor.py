@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.grpo import supervise_phase12_wm_grpo_overnight as sup
+from scripts.grpo import supervise_phase12_pure_wm_overnight as pure_sup
 
 
 def test_latest_checkpoint_picks_highest_update(tmp_path: Path) -> None:
@@ -146,3 +147,57 @@ def test_eval_missing_auto_submits_eval_once(monkeypatch, tmp_path: Path) -> Non
     assert state.phase == "resubmitted"
     assert state.job_ids[-1] == "456.pbs"
     assert state.resume_attempts
+
+
+def test_pure_wm_supervisor_classifies_eval_only_recovery(tmp_path: Path) -> None:
+    ckpt_dir = tmp_path / "checkpoints"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "update_0020.pt").write_bytes(b"20")
+
+    diagnosis = pure_sup.diagnose_run(tmp_path)
+
+    assert diagnosis["phase"] == "needs_eval_resume"
+    assert diagnosis["known_safe"] is True
+
+
+def test_pure_wm_qsub_resume_passes_all_hparams(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+    resume = tmp_path / "checkpoints" / "update_0010.pt"
+    resume.parent.mkdir()
+    resume.write_bytes(b"10")
+
+    class Result:
+        stdout = "12345.pbs\n"
+
+    def fake_run(cmd, *, cwd, check, text, capture_output):
+        seen["cmd"] = cmd
+        seen["cwd"] = cwd
+        seen["check"] = check
+        seen["text"] = text
+        seen["capture_output"] = capture_output
+        return Result()
+
+    monkeypatch.setattr(pure_sup.subprocess, "run", fake_run)
+
+    job_id = pure_sup.qsub_train_eval(
+        tmp_path,
+        root_mode="oracle_teacher_forced",
+        loss_mode="group_sqrt_segments",
+        action_l2=0.003,
+        lr="1e-5",
+        clip_eps="0.2",
+        init_log_std="-2.0",
+        euler_noise="0.2",
+        resume=resume,
+        start_update=10,
+        expected_update=20,
+    )
+
+    varlist = seen["cmd"][2]
+    assert job_id == "12345.pbs"
+    assert "PHASE12_WM_ONLY_ROOT_MODE=oracle_teacher_forced" in varlist
+    assert "PHASE12_LOSS_NORMALIZER_MODE=group_sqrt_segments" in varlist
+    assert "PHASE12_WM_ACTION_L2_PENALTY=0.003" in varlist
+    assert f"PHASE12_RESUME={resume}" in varlist
+    assert "PHASE12_START_UPDATE=10" in varlist
+    assert "PHASE12_NUM_UPDATES=10" in varlist

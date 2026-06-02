@@ -51,18 +51,32 @@ def test_phase12_pure_wm_train_eval_pbs_contract() -> None:
     assert "#PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000" in text
     assert "#PBS -q v1_gpu72" in text
     assert "PHASE12_TOTAL_UPDATES:-20" in text
+    assert "PHASE12_START_UPDATE:-0" in text
+    assert "PHASE12_RESUME:-" in text
     assert "PHASE12_SAVE_EVERY_LIST:-2,5" in text
     assert "PHASE12_SEED_BASE:-2000" in text
     assert "PHASE12_WM_ONLY_ROOT_MODE:-oracle_teacher_forced" in text
     assert "PHASE12_LOSS_NORMALIZER_MODE:-group" in text
     assert "PHASE12_WM_ACTION_L2_PENALTY:-0.003" in text
     assert "--save-every-list \"${SAVE_EVERY_LIST}\"" in text
+    assert "train_args+=(--resume \"${RESUME}\")" in text
     assert "--updates \"${EVAL25_UPDATES}\"" in text
     assert "--updates \"${EVAL100_UPDATES}\"" in text
     assert "--episodes 25" in text
     assert "--episodes 100" in text
     assert "LIGHTWEIGHT_COPY_DIR" in text
     assert "PHASE12_PURE_WM_TRAIN_EVAL_DONE" in text
+
+
+def test_phase12_pure_wm_supervisor_loop_is_non_gpu_and_autonomous() -> None:
+    text = _read("scripts/grpo/phase12_pure_wm_supervisor_loop.pbs")
+    assert "#PBS -l select=1:ncpus=1:mem=4gb" in text
+    assert "#PBS -q v1_small24" in text
+    assert "scripts/grpo/supervise_phase12_pure_wm_overnight.py" in text
+    assert "--auto-resume" in text
+    assert "--loop" in text
+    assert "--poll-seconds \"${POLL_SECONDS}\"" in text
+    assert "PHASE12_WM_ONLY_ROOT_MODE:-oracle_teacher_forced" in text
 
 
 def test_phase12_two_exp_chain_contract() -> None:

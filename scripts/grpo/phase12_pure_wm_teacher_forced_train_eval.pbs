@@ -27,6 +27,9 @@ RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
 LIGHTWEIGHT_COPY_DIR="${LIGHTWEIGHT_COPY_DIR:-}"
 
 TOTAL_UPDATES="${PHASE12_TOTAL_UPDATES:-20}"
+START_UPDATE="${PHASE12_START_UPDATE:-0}"
+NUM_UPDATES="${PHASE12_NUM_UPDATES:-$((TOTAL_UPDATES - START_UPDATE))}"
+RESUME="${PHASE12_RESUME:-}"
 SAVE_EVERY="${PHASE12_SAVE_EVERY:-5}"
 SAVE_EVERY_LIST="${PHASE12_SAVE_EVERY_LIST:-2,5}"
 BATCH_SIZE="${PHASE12_BATCH_SIZE:-4}"
@@ -94,9 +97,9 @@ train_args=(
   --chunk-len "${CHUNK_LEN}"
   --batch-size "${BATCH_SIZE}"
   --group-size "${GROUP_SIZE}"
-  --num-episodes "${TOTAL_UPDATES}"
-  --num-updates "${TOTAL_UPDATES}"
-  --start-update 0
+  --num-episodes "${NUM_UPDATES}"
+  --num-updates "${NUM_UPDATES}"
+  --start-update "${START_UPDATE}"
   --max-steps "${MAX_STEPS}"
   --train-seed-base "${TRAIN_SEED_BASE}"
   --save-every "${SAVE_EVERY}"
@@ -120,10 +123,19 @@ train_args=(
   --no-save-wm-decodes
   --disable-videos
 )
+if [[ -n "${RESUME}" ]]; then
+  test -f "${RESUME}"
+  train_args+=(--resume "${RESUME}")
+fi
 
-echo "[phase12-pure-wm] train run=${RUN_DIR} updates=${TOTAL_UPDATES} root=${WM_ONLY_ROOT_MODE} loss=${LOSS_NORMALIZER_MODE} l2=${WM_ACTION_L2_PENALTY} lr=${LR} clip=${CLIP_EPS} logstd=${INIT_LOG_STD} noise=${EULER_NOISE}"
-run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" "${train_args[@]}"
-test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${TOTAL_UPDATES}").pt"
+FINAL_CKPT="${RUN_DIR}/checkpoints/update_$(printf '%04d' "${TOTAL_UPDATES}").pt"
+if [[ -f "${FINAL_CKPT}" ]]; then
+  echo "[phase12-pure-wm] skip train final checkpoint exists ${FINAL_CKPT}"
+else
+  echo "[phase12-pure-wm] train run=${RUN_DIR} start=${START_UPDATE} updates=${NUM_UPDATES} target=${TOTAL_UPDATES} root=${WM_ONLY_ROOT_MODE} loss=${LOSS_NORMALIZER_MODE} l2=${WM_ACTION_L2_PENALTY} lr=${LR} clip=${CLIP_EPS} logstd=${INIT_LOG_STD} noise=${EULER_NOISE}"
+  run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" "${train_args[@]}"
+fi
+test -f "${FINAL_CKPT}"
 
 echo "[phase12-pure-wm] eval25 updates=${EVAL25_UPDATES}"
 "${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \

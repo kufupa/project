@@ -2,6 +2,27 @@
 
 This note records the autonomous recovery contract for strict G8-u20 WM-GRPO runs.
 
+## Pure-WM Thesis Protocol
+
+Preferred thesis path is pure-WM training:
+
+- Train with `--phase12-train-mode wm_only`.
+- Use `--wm-only-root-mode oracle_teacher_forced` so each 5-step segment starts from an offline oracle root frame/proprio/proc.
+- Score candidate chunks only with JEPA-WM latent progress toward the local subgoal.
+- Do not use policy-selected real environment transitions as training feedback. Real MetaWorld use is limited to offline oracle/cache generation and evaluation.
+- Primary RCA hparams match the old strict run: `lr=1e-5`, `clip_eps=0.2`, `init_log_std=-2.0`, `euler_step_noise_std=0.2`, `group_size=8`, `chunk_len=5`, `train_seed_base=2000`.
+- Default pure-WM regularization is `--wm-action-l2-penalty 0.003`; keep the explicit `0.0` ablation separate.
+
+Primary autonomous PBS chain:
+
+- PBS: `scripts/grpo/phase12_pure_wm_teacher_forced_train_eval.pbs`
+- Supervisor: `scripts/grpo/supervise_phase12_pure_wm_overnight.py`
+- Supervisor PBS: `scripts/grpo/phase12_pure_wm_supervisor_loop.pbs`
+- Train: 20 updates, `--save-every-list 2,5`
+- Eval25: explicit updates `2,4,5,6,8,10,12,14,15,16,18,20`
+- Eval100: explicit updates `5,10,15,20`
+- Selection: prefer best eval100 checkpoint; use eval25 only to decide where to spend eval100 if future runs expand beyond the fixed shortlist.
+
 ## Primary Run
 
 - PBS: `scripts/grpo/phase12_g8_u20_wm_train_eval100_stride5.pbs`
