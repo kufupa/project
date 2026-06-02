@@ -136,6 +136,7 @@ def main() -> int:
         load_grpo_checkpoint,
         save_grpo_checkpoint,
         save_rlinf_eval_checkpoint,
+        validate_rlinf_eval_checkpoint,
     )
     from smolvla_grpo.grpo_math import (
         apply_grpo_regularizers,
@@ -319,13 +320,15 @@ def main() -> int:
             args=vars(args),
             extra=extra,
         )
+        eval_path = eval_ckpt_dir / name
         save_rlinf_eval_checkpoint(
-            eval_ckpt_dir / name,
+            eval_path,
             policy=bundle.policy,
             update_index=update_index,
             metrics=extra,
             source_checkpoint=full_path,
         )
+        validate_rlinf_eval_checkpoint(eval_path, expected_update=update_index + 1)
 
     old_policy = copy.deepcopy(bundle.policy).eval().to(device)
     bundle.policy.train()

@@ -16,6 +16,7 @@ from smolvla_grpo.checkpointing import (
     save_rlinf_eval_checkpoint,
     torch_load_mmap_default,
     torch_load_mmap_with_mode,
+    validate_rlinf_eval_checkpoint,
 )
 
 
@@ -66,6 +67,15 @@ def test_save_rlinf_eval_checkpoint_is_slim_and_one_based_update(tmp_path) -> No
     assert "policy_state_dict" not in loaded
     assert "optimizer_state_dict" not in loaded
     assert "policy.model.log_std" in loaded["trainable_model"]
+
+
+def test_validate_rlinf_eval_checkpoint_rejects_missing_delta(tmp_path) -> None:
+    path = tmp_path / "checkpoints_eval" / "update_0010.pt"
+    path.parent.mkdir(parents=True)
+    torch.save({"checkpoint_type": "trainable_delta", "update": 10}, path)
+
+    with pytest.raises(ValueError, match="trainable_model"):
+        validate_rlinf_eval_checkpoint(path, expected_update=10)
 
 
 def test_save_load_roundtrip(tmp_path) -> None:

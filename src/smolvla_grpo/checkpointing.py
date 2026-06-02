@@ -76,6 +76,25 @@ def save_rlinf_eval_checkpoint(
     torch.save(payload, path)
 
 
+def validate_rlinf_eval_checkpoint(path: Path, *, expected_update: int) -> dict[str, Any]:
+    """Load and validate the slim RLinf eval checkpoint contract."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = torch_load_mmap_default(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: expected dict checkpoint payload")
+    if payload.get("checkpoint_type") != "trainable_delta":
+        raise ValueError(f"{path}: expected checkpoint_type='trainable_delta'")
+    if int(payload.get("update", -1)) != int(expected_update):
+        raise ValueError(f"{path}: expected update={expected_update}, got {payload.get('update')}")
+    trainable_model = payload.get("trainable_model")
+    if not isinstance(trainable_model, dict) or not trainable_model:
+        raise ValueError(f"{path}: missing non-empty trainable_model")
+    if not all(str(k).startswith("policy.") for k in trainable_model):
+        raise ValueError(f"{path}: trainable_model keys must use policy. prefix")
+    return payload
+
+
 def torch_load_mmap_default(
     path: str | Path,
     *,
