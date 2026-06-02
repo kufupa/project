@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#PBS -N p12wm-pure-sup
+#PBS -l select=1:ncpus=1:mem=4gb
+#PBS -l walltime=12:00:00
+#PBS -q v1_small24
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_pure_wm_supervisor_loop.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+exec >> "logs/pbs/grpo/phase12_pure_wm_supervisor_loop.${PBS_JOBID:-local}.$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1
+
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
+ROOT_MODE="${PHASE12_WM_ONLY_ROOT_MODE:-oracle_teacher_forced}"
+LOSS_MODE="${PHASE12_LOSS_NORMALIZER_MODE:-group}"
+ACTION_L2="${PHASE12_WM_ACTION_L2_PENALTY:-0.003}"
+LR="${PHASE12_LR:-1e-5}"
+CLIP_EPS="${PHASE12_CLIP_EPS:-0.2}"
+INIT_LOG_STD="${PHASE12_INIT_LOG_STD:--2.0}"
+EULER_NOISE="${PHASE12_EULER_NOISE:-0.2}"
+POLL_SECONDS="${PHASE12_SUPERVISOR_POLL_SECONDS:-300}"
+
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+
+echo "[phase12-pure-wm-supervisor] run=${RUN_DIR} root=${ROOT_MODE} loss=${LOSS_MODE} l2=${ACTION_L2} lr=${LR} clip=${CLIP_EPS} poll=${POLL_SECONDS} job=${PBS_JOBID:-local}"
+"${PYTHON_BIN}" scripts/grpo/supervise_phase12_pure_wm_overnight.py \
+  --run-dir "${RUN_DIR}" \
+  --root-mode "${ROOT_MODE}" \
+  --loss-mode "${LOSS_MODE}" \
+  --action-l2 "${ACTION_L2}" \
+  --lr "${LR}" \
+  --clip-eps "${CLIP_EPS}" \
+  --init-log-std "${INIT_LOG_STD}" \
+  --euler-noise "${EULER_NOISE}" \
+  --auto-resume \
+  --loop \
+  --poll-seconds "${POLL_SECONDS}"
