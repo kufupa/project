@@ -64,6 +64,7 @@ echo "[flow-sde-chunk-smoke] checkpoint=${CHECKPOINT} out=${OUT}"
   --fail-on-parity-violation
 
 test -f "${OUT}/checkpoints/update_0001.pt"
+test -f "${OUT}/checkpoints_eval/update_0001.pt"
 test -f "${OUT}/progress.jsonl"
 
 "${GRPO_PYTHON}" - "${OUT}" <<'PY'
