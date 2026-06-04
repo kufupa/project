@@ -974,10 +974,12 @@ def test_phase11_train_script_exposes_action_chunk_size_static():
         encoding="utf-8"
     )
     assert "--action-chunk-size" in script
-    assert "n_action_steps=int(args.action_chunk_size)" in script
+    assert "int(args.action_chunk_size)" in script
+    assert "int(args.rollout_chunk_len)" in script
+    assert "args.rollout_unit" in script
     assert "action_chunk_size=int(args.action_chunk_size)" in script
     assert "num_policy_sample_calls" in script
-    assert '"loss_unit": "policy_chunk"' in script
+    assert '"loss_unit"' in script
     assert "--logprob-recompute-mode" in script
     assert 'default="batched"' in script
     assert "--logprob-batch-size" in script

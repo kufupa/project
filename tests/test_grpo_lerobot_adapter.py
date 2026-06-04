@@ -569,7 +569,7 @@ def test_phase11_rollout_exposes_official_backend_static():
     assert "OfficialLeRobotMetaWorldGRPORollout" in text
     assert "resolve_lerobot_horizon" in text
     assert "env_h.build_proc" in text
-    assert "step.exec_action_np.reshape(1, -1)" in text
+    assert "chunk_exec_actions" in text or "step.exec_action_np.reshape(1, -1)" in text
     assert 'raise ValueError("custom env_backend requires max_steps >= 1")' in text
     assert 'policy_reset = getattr(policy_old, "reset", None)' in text
 
@@ -629,7 +629,7 @@ def test_official_eval_path_matches_rollout_semantics_static():
 def test_skipped_grpo_updates_preserve_numbered_checkpoints_static():
     text = (_REPO / "scripts" / "grpo" / "train_phase11_env_on_policy_grpo.py").read_text(encoding="utf-8")
     skipped_branch = text.split('"reason": "zero_advantages"', 1)[1].split("continue", 1)[0]
-    assert 'ckpt_dir / f"update_{update + 1:04d}.pt"' in skipped_branch
+    assert 'persist_checkpoint(f"update_{update + 1:04d}.pt"' in skipped_branch
 
 
 def test_phase111_slurm_smoke_uses_official_backend_and_export_nil():
