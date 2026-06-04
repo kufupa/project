@@ -37,8 +37,12 @@ def test_concat_sampled_action_batches_restores_order() -> None:
         policy_tensor=torch.tensor([[21, 21, 21, 21], [22, 22, 22, 22]], dtype=torch.float32),
         unsquashed=torch.tensor([[31, 31, 31, 31], [32, 32, 32, 32]], dtype=torch.float32),
         log_prob=torch.tensor([41, 42], dtype=torch.float32),
+        logprob_action=torch.tensor([[31, 31, 31, 31], [32, 32, 32, 32]], dtype=torch.float32),
+        distr_mean=torch.tensor([[0, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.float32),
+        distr_log_std=torch.tensor([[0, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.float32),
         action_clip_fraction=np.asarray([0.1, 0.2], dtype=np.float64),
         action_clip_any=np.asarray([False, True], dtype=np.bool_),
+        postprocessor_oob_mean=np.asarray([0.0, 0.0], dtype=np.float64),
     )
     second = SampledBatchStep(
         exec_action_np=np.asarray([[3, 3, 3, 3]], dtype=np.float32),
@@ -46,8 +50,12 @@ def test_concat_sampled_action_batches_restores_order() -> None:
         policy_tensor=torch.tensor([[23, 23, 23, 23]], dtype=torch.float32),
         unsquashed=torch.tensor([[33, 33, 33, 33]], dtype=torch.float32),
         log_prob=torch.tensor([43], dtype=torch.float32),
+        logprob_action=torch.tensor([[33, 33, 33, 33]], dtype=torch.float32),
+        distr_mean=torch.tensor([[0, 0, 0, 0]], dtype=torch.float32),
+        distr_log_std=torch.tensor([[0, 0, 0, 0]], dtype=torch.float32),
         action_clip_fraction=np.asarray([0.3], dtype=np.float64),
         action_clip_any=np.asarray([False], dtype=np.bool_),
+        postprocessor_oob_mean=np.asarray([0.0], dtype=np.float64),
     )
     out = concat_sampled_action_batches([first, second])
     assert out.exec_action_np.shape == (3, 4)

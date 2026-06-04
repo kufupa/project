@@ -59,6 +59,10 @@ def iter_compact_row_slices(n_active: int, policy_batch_size: int) -> list[tuple
 def concat_sampled_action_batches(parts: list[SampledBatchStep]) -> SampledBatchStep:
     if not parts:
         raise ValueError("parts must be non-empty")
+    flow_traces: list[dict[str, Any] | None] = []
+    for part in parts:
+        if part.flow_sde_traces is not None:
+            flow_traces.extend(part.flow_sde_traces)
     return SampledBatchStep(
         exec_action_np=np.concatenate([p.exec_action_np for p in parts], axis=0),
         raw_postprocessed_action_np=np.concatenate(
@@ -67,12 +71,19 @@ def concat_sampled_action_batches(parts: list[SampledBatchStep]) -> SampledBatch
         policy_tensor=torch.cat([p.policy_tensor for p in parts], dim=0),
         unsquashed=torch.cat([p.unsquashed for p in parts], dim=0),
         log_prob=torch.cat([p.log_prob.reshape(-1) for p in parts], dim=0),
+        logprob_action=torch.cat([p.logprob_action.reshape(-1) for p in parts], dim=0),
+        distr_mean=torch.cat([p.distr_mean.reshape(-1) for p in parts], dim=0),
+        distr_log_std=torch.cat([p.distr_log_std.reshape(-1) for p in parts], dim=0),
         action_clip_fraction=np.concatenate(
             [np.asarray(p.action_clip_fraction).reshape(-1) for p in parts], axis=0
         ),
         action_clip_any=np.concatenate(
             [np.asarray(p.action_clip_any).reshape(-1) for p in parts], axis=0
         ),
+        postprocessor_oob_mean=np.concatenate(
+            [np.asarray(p.postprocessor_oob_mean).reshape(-1) for p in parts], axis=0
+        ),
+        flow_sde_traces=flow_traces or None,
     )
 
 
