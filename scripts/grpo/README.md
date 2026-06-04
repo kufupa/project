@@ -4,10 +4,10 @@
 
 Safe-robot-steering pins `jsnchon/lerobot` at commit `f30fc2a1b904bb2ccd752cfff94f6f4423bd523b` for `select_action_distr_params` and `model.log_std`.
 
-**IC / Phase11 default:** use **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python`** with SmolVLA GRPO hooks patched in that venv’s `site-packages/lerobot` (see Phase11 plan amendment). Below is only for **greenfield** setups elsewhere:
+**IC / Phase11 default:** use **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`** with SmolVLA GRPO hooks patched in that venv’s `site-packages/lerobot` (see Phase11 plan amendment). Below is only for **greenfield** setups elsewhere:
 
 ```bash
-# Example: fresh venv + install forked lerobot at pinned commit (not required on IC if py310 patch is already applied)
+# Example: fresh venv + install forked lerobot at pinned commit (not required on IC if the MetaWorld venv patch is already applied)
 pip install -U pip
 pip install "git+https://github.com/jsnchon/lerobot.git@f30fc2a1b904bb2ccd752cfff94f6f4423bd523b"
 ```
@@ -56,7 +56,7 @@ Smoke rollout:
 
 ```bash
 cd /vol/bitbucket/aa6622/project
-PYTHONPATH=src /vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python scripts/grpo/smoke_phase11_rollout.py \
+PYTHONPATH=src /vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python scripts/grpo/smoke_phase11_rollout.py \
   --checkpoint /vol/bitbucket/aa6622/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900 \
   --task assembly-v3 \
   --env-backend official_lerobot \

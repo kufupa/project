@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -N msm_eval
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=32:mem=192gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_eval.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_TRAIN_PYTHON}"
+
+export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
+export MSM_SFT_OUT="${MSM_SFT_OUT:-${MSM_CHECKPOINT_ROOT}/sft_main_latest}"
+export MSM_EVAL_EPISODES="${MSM_EVAL_EPISODES:-25}"
+export MSM_EVAL_OBJ_SET="${MSM_EVAL_OBJ_SET:-train}"
+export MSM_EVAL_SUSTAINED_SUCCESS_STEPS="${MSM_EVAL_SUSTAINED_SUCCESS_STEPS:-3}"
+export MSM_EVAL_METRICS="${MSM_EVAL_METRICS:-${MSM_RUN_ROOT}/manifests/eval_metrics.json}"
+
+log="$(msm_stage_log benchmark)"
+(
+  echo "[msm-eval] policy=${MSM_SFT_OUT} dataset=${MSM_LEROBOT_DATASET} episodes=${MSM_EVAL_EPISODES}"
+  "${MSM_TRAIN_PYTHON}" "${MSM_SCRIPT_ROOT}/eval_maniskill_smolvla.py" \
+    --policy-path "${MSM_SFT_OUT}" \
+    --dataset-root "${MSM_LEROBOT_DATASET}" \
+    --repo-id "${MSM_REPO_ID}" \
+    --env-id "${MSM_ENV_ID}" \
+    --obj-set "${MSM_EVAL_OBJ_SET}" \
+    --episodes "${MSM_EVAL_EPISODES}" \
+    --max-steps 80 \
+    --sustained-success-steps "${MSM_EVAL_SUSTAINED_SUCCESS_STEPS}" \
+    --output "${MSM_EVAL_METRICS}"
+  echo "MSM_BENCHMARK_DONE metrics=${MSM_EVAL_METRICS}"
+) 2>&1 | tee "${log}"

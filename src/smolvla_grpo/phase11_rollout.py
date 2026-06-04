@@ -8,6 +8,7 @@ import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,19 @@ def detach_proc_snapshot(proc: Any) -> Any:
 
 
 @dataclass
+class RolloutActionChunk:
+    """One policy sample from one root observation, possibly executed partially."""
+
+    proc_snapshot: Any
+    unsquashed_chunk: torch.Tensor
+    log_prob_steps: torch.Tensor
+    log_prob_sum: torch.Tensor
+    start_step: int
+    executed_steps: int
+    logprob_mode: str = "chunk"
+
+
+@dataclass
 class RolloutTrajectory:
     reset_seed: int
     rollout_index: int
@@ -52,17 +66,13 @@ class RolloutTrajectory:
     rewards: list[float] = field(default_factory=list)
     successes: list[bool] = field(default_factory=list)
     unsquashed_actions: list[torch.Tensor] = field(default_factory=list)
-    logprob_actions: list[torch.Tensor] = field(default_factory=list)
-    distr_means: list[torch.Tensor] = field(default_factory=list)
-    distr_log_stds: list[torch.Tensor] = field(default_factory=list)
     log_probs: list[torch.Tensor] = field(default_factory=list)
-    flow_sde_traces: list[dict[str, Any] | None] = field(default_factory=list)
     action_clip_fractions: list[float] = field(default_factory=list)
     action_clip_any: list[bool] = field(default_factory=list)
-    postprocessor_oob_means: list[float] = field(default_factory=list)
     terminated: bool = False
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    action_chunks: list[RolloutActionChunk] = field(default_factory=list)
 
     @property
     def rewards_seq(self) -> list[float]:
@@ -70,6 +80,40 @@ class RolloutTrajectory:
 
     def total_return(self) -> float:
         return float(sum(self.rewards))
+
+
+def _validate_action_chunk_size(action_chunk_size: int) -> int:
+    value = int(action_chunk_size)
+    if value < 1:
+        raise ValueError("action_chunk_size must be >= 1")
+    return value
+
+
+def _record_executed_chunk(
+    traj: RolloutTrajectory,
+    *,
+    proc_snapshot: Any,
+    unsquashed_chunk: torch.Tensor,
+    log_prob_steps: torch.Tensor,
+    start_step: int,
+    executed_steps: int,
+    logprob_mode: str = "chunk",
+) -> None:
+    n = int(executed_steps)
+    if n <= 0:
+        return
+    old_steps = log_prob_steps[:n].detach().cpu().reshape(n)
+    traj.action_chunks.append(
+        RolloutActionChunk(
+            proc_snapshot=detach_proc_snapshot(proc_snapshot),
+            unsquashed_chunk=unsquashed_chunk[:n].detach().cpu(),
+            log_prob_steps=old_steps,
+            log_prob_sum=old_steps.sum(),
+            start_step=int(start_step),
+            executed_steps=n,
+            logprob_mode=str(logprob_mode),
+        )
+    )
 
 
 class PushV3GRPOEnv:
@@ -148,16 +192,15 @@ def collect_rollout_group(
     rollout_execution: str = "serial",
     async_start_method: str = "forkserver",
     action_transform: str = "no_tanh",
-    gaussian_logprob_action: str = "executed",
-    logprob_mode: str = "gaussian",
-    flow_sde_noise_level: float = 0.5,
-    flow_sde_trace_step: int = 0,
+    action_chunk_size: int = 1,
+    rollout_policy_batch_size: int = 32,
 ) -> list[RolloutTrajectory]:
     """Collect `group_size` trajectories from same seed/task (GRPO group)."""
     if rollout_execution not in ("serial", "vector_sync", "vector_async"):
         raise ValueError("rollout_execution must be 'serial', 'vector_sync', or 'vector_async'")
     if rollout_execution != "serial" and env_backend != "official_lerobot":
         raise ValueError("vector rollout modes require env_backend='official_lerobot'")
+    action_chunk_size_i = _validate_action_chunk_size(action_chunk_size)
     if env_backend == "official_lerobot" and rollout_execution in ("vector_sync", "vector_async"):
         from smolvla_grpo.official_lerobot_vector_rollout import collect_official_lerobot_vector_rollout_group
 
@@ -175,10 +218,8 @@ def collect_rollout_group(
             rollout_execution=rollout_execution,
             async_start_method=async_start_method,
             action_transform=action_transform,
-            gaussian_logprob_action=gaussian_logprob_action,
-            logprob_mode=logprob_mode,
-            flow_sde_noise_level=flow_sde_noise_level,
-            flow_sde_trace_step=flow_sde_trace_step,
+            action_chunk_size=action_chunk_size_i,
+            rollout_policy_batch_size=int(rollout_policy_batch_size),
         )
 
     requested_max_steps = int(max_steps)
@@ -203,10 +244,6 @@ def collect_rollout_group(
         action_dim=action_dim,
         policy_module=policy_old,
         action_transform=action_transform,
-        gaussian_logprob_action=gaussian_logprob_action,
-        logprob_mode=logprob_mode,
-        flow_sde_noise_level=flow_sde_noise_level,
-        flow_sde_trace_step=flow_sde_trace_step,
         action_low=action_low,
         action_high=action_high,
     )
@@ -221,13 +258,13 @@ def collect_rollout_group(
         traj.metadata["env_backend"] = env_backend
         traj.metadata["rollout_execution"] = rollout_execution
         traj.metadata["action_transform"] = action_transform
-        traj.metadata["gaussian_logprob_action"] = gaussian_logprob_action
-        traj.metadata["logprob_mode"] = logprob_mode
         traj.metadata["async_start_method"] = (
             str(async_start_method) if rollout_execution == "vector_async" else "none"
         )
         traj.metadata["requested_max_steps"] = requested_max_steps
         traj.metadata["resolved_max_steps"] = int(max_steps)
+        traj.metadata["action_chunk_size"] = action_chunk_size_i
+        traj.metadata["policy_sample_calls"] = 0
         if env_backend == "official_lerobot":
             obs = env_h.reset(reset_seed)
         else:
@@ -242,44 +279,165 @@ def collect_rollout_group(
                 pass
         terminated = False
         truncated = False
-        for _step in range(max_steps):
+        step_count = 0
+        while step_count < int(max_steps):
+            effective_chunk = min(action_chunk_size_i, int(max_steps) - int(step_count))
             if env_backend == "official_lerobot":
                 proc = env_h.build_proc(obs, bundle=bundle)
             else:
                 proc = old_wrapper.build_proc_batch(obs, env_h.inner)
-            traj.proc_snapshots.append(detach_proc_snapshot(proc))
+            proc_snapshot = detach_proc_snapshot(proc)
+            traj.metadata["policy_sample_calls"] = int(traj.metadata.get("policy_sample_calls", 0)) + 1
             with torch.no_grad():
-                step = old_wrapper.sample_action_from_proc(proc, rng=gen)
-            traj.exec_actions.append(step.exec_action_np.reshape(-1).tolist())
-            traj.unsquashed_actions.append(step.unsquashed.cpu())
-            traj.logprob_actions.append(step.logprob_action.cpu())
-            traj.distr_means.append(step.distr_mean.cpu())
-            traj.distr_log_stds.append(step.distr_log_std.cpu())
-            traj.log_probs.append(step.log_prob.cpu())
-            traj.flow_sde_traces.append(step.flow_sde_trace)
-            traj.action_clip_fractions.append(float(step.action_clip_fraction))
-            traj.action_clip_any.append(bool(step.action_clip_any))
-            traj.postprocessor_oob_means.append(float(step.postprocessor_oob_mean))
-            if env_backend == "official_lerobot":
-                action_batch = step.exec_action_np.reshape(1, -1).astype(np.float32)
-                env_step = env_h.step(action_batch)
-                obs = env_step.observation
-                reward = env_step.reward
-                terminated = env_step.terminated
-                truncated = env_step.truncated
-                success = env_step.success
-            else:
-                obs, reward, terminated, truncated, info = env_h.step(step.exec_action_np)
-                success = _safe_success(info)
-            traj.rewards.append(float(reward))
-            traj.successes.append(bool(success))
+                if action_chunk_size_i == 1:
+                    sampled = old_wrapper.sample_action_from_proc(proc, rng=gen)
+                    chunk_exec_actions = sampled.exec_action_np.reshape(1, -1)
+                    chunk_unsquashed = sampled.unsquashed.detach().cpu().reshape(1, -1)
+                    chunk_log_probs = sampled.log_prob.detach().cpu().reshape(1)
+                    chunk_clip_fraction = np.asarray([float(sampled.action_clip_fraction)], dtype=np.float64)
+                    chunk_clip_any = np.asarray([bool(sampled.action_clip_any)], dtype=np.bool_)
+                else:
+                    sampled = old_wrapper.sample_action_chunk_from_proc(
+                        proc,
+                        chunk_len=effective_chunk,
+                        rng=gen,
+                    )
+                    chunk_exec_actions = sampled.exec_action_np.reshape(effective_chunk, -1)
+                    chunk_unsquashed = sampled.unsquashed_chunk.detach().cpu().reshape(effective_chunk, -1)
+                    chunk_log_probs = sampled.log_prob_steps.detach().cpu().reshape(effective_chunk)
+                    chunk_clip_fraction = np.asarray(sampled.action_clip_fraction, dtype=np.float64).reshape(
+                        effective_chunk
+                    )
+                    chunk_clip_any = np.asarray(sampled.action_clip_any, dtype=np.bool_).reshape(effective_chunk)
+
+            executed_steps = 0
+            for chunk_step in range(effective_chunk):
+                traj.proc_snapshots.append(detach_proc_snapshot(proc_snapshot))
+                traj.exec_actions.append(chunk_exec_actions[chunk_step].reshape(-1).tolist())
+                traj.unsquashed_actions.append(chunk_unsquashed[chunk_step : chunk_step + 1].detach().cpu())
+                traj.log_probs.append(chunk_log_probs[chunk_step : chunk_step + 1].detach().cpu())
+                traj.action_clip_fractions.append(float(chunk_clip_fraction[chunk_step]))
+                traj.action_clip_any.append(bool(chunk_clip_any[chunk_step]))
+                if env_backend == "official_lerobot":
+                    action_batch = chunk_exec_actions[chunk_step].reshape(1, -1).astype(np.float32)
+                    env_step = env_h.step(action_batch)
+                    obs = env_step.observation
+                    reward = env_step.reward
+                    terminated = env_step.terminated
+                    truncated = env_step.truncated
+                    success = env_step.success
+                else:
+                    obs, reward, terminated, truncated, info = env_h.step(chunk_exec_actions[chunk_step])
+                    success = _safe_success(info)
+                traj.rewards.append(float(reward))
+                traj.successes.append(bool(success))
+                step_count += 1
+                executed_steps += 1
+                if success or terminated or truncated:
+                    traj.terminated = bool(terminated)
+                    traj.truncated = bool(truncated)
+                    break
+
+            _record_executed_chunk(
+                traj,
+                proc_snapshot=proc_snapshot,
+                unsquashed_chunk=chunk_unsquashed,
+                log_prob_steps=chunk_log_probs,
+                start_step=step_count - executed_steps,
+                executed_steps=executed_steps,
+                logprob_mode="step" if action_chunk_size_i == 1 else "chunk",
+            )
             if success or terminated or truncated:
-                traj.terminated = bool(terminated)
-                traj.truncated = bool(truncated)
                 break
         rollouts.append(traj)
     env_h.close()
     return rollouts
+
+
+def collect_rollout_seed_batch(
+    *,
+    bundle: _SmolVLABundle,
+    policy_old: torch.nn.Module,
+    task: str,
+    task_text: str,
+    reset_seeds: Sequence[int],
+    episode_index: int,
+    max_steps: int,
+    group_size: int,
+    action_dim: int,
+    device: torch.device,
+    env_backend: str = "custom",
+    rollout_execution: str = "serial",
+    async_start_method: str = "forkserver",
+    action_transform: str = "no_tanh",
+    action_chunk_size: int = 1,
+    rollout_policy_batch_size: int = 32,
+    rollout_seed_mode: str = "serial",
+    seed_wave_size: int = 1,
+    max_vector_envs: int = 32,
+) -> list[RolloutTrajectory]:
+    """Collect seed-major GRPO groups for multiple reset seeds."""
+    seeds = [int(seed) for seed in reset_seeds]
+    if not seeds:
+        raise ValueError("reset_seeds must be non-empty")
+    if int(group_size) < 1:
+        raise ValueError("group_size must be >= 1")
+    seed_mode = str(rollout_seed_mode)
+    if seed_mode not in {"serial", "reuse_env", "seed_wave"}:
+        raise ValueError("rollout_seed_mode must be 'serial', 'reuse_env', or 'seed_wave'")
+    if seed_mode != "serial":
+        if env_backend != "official_lerobot" or rollout_execution not in ("vector_sync", "vector_async"):
+            raise ValueError("reuse_env and seed_wave require official_lerobot vector rollout")
+        from smolvla_grpo.official_lerobot_vector_rollout import (
+            collect_official_lerobot_vector_rollout_seed_batch,
+        )
+
+        return collect_official_lerobot_vector_rollout_seed_batch(
+            bundle=bundle,
+            policy_old=policy_old,
+            task=task,
+            task_text=task_text,
+            reset_seeds=seeds,
+            episode_index=episode_index,
+            max_steps=max_steps,
+            group_size=group_size,
+            action_dim=action_dim,
+            device=device,
+            rollout_execution=rollout_execution,
+            async_start_method=async_start_method,
+            action_transform=action_transform,
+            action_chunk_size=action_chunk_size,
+            rollout_policy_batch_size=rollout_policy_batch_size,
+            rollout_seed_mode=seed_mode,
+            seed_wave_size=int(seed_wave_size),
+            max_vector_envs=int(max_vector_envs),
+        )
+
+    merged: list[RolloutTrajectory] = []
+    for batch_index, reset_seed in enumerate(seeds):
+        group = collect_rollout_group(
+            bundle=bundle,
+            policy_old=policy_old,
+            task=task,
+            task_text=task_text,
+            reset_seed=reset_seed,
+            episode_index=episode_index,
+            max_steps=max_steps,
+            group_size=group_size,
+            action_dim=action_dim,
+            device=device,
+            env_backend=env_backend,
+            rollout_execution=rollout_execution,
+            async_start_method=async_start_method,
+            action_transform=action_transform,
+            action_chunk_size=action_chunk_size,
+            rollout_policy_batch_size=rollout_policy_batch_size,
+        )
+        for traj in group:
+            traj.metadata["seed_batch_index"] = int(batch_index)
+            traj.metadata["seed_batch_size"] = len(seeds)
+        merged.extend(group)
+    return merged
 
 
 def _action_bounds(env_h: Any) -> tuple[np.ndarray, np.ndarray]:

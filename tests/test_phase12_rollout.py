@@ -105,6 +105,39 @@ def test_dummy_rollout_scores_all_candidates_from_same_root_observation() -> Non
     assert result.success_last is True
 
 
+def test_collect_phase12_episode_records_goal_frame_index_from_goal() -> None:
+    class DummyEnv:
+        def reset(self):
+            return {"id": "root", "success": False}
+
+        def step(self, action):
+            del action
+            return {"id": "next", "success": False}, 0.0, True, {}
+
+    def policy_sampler(*_args, **_kwargs):
+        yield {
+            "candidate_index": 0,
+            "proc_root_snapshot": "root",
+            "unsquashed_chunk": np.zeros((1, 4), dtype=np.float32),
+            "old_logprob_steps": np.zeros(1, dtype=np.float32),
+            "exec_actions_for_env": np.zeros((1, 4), dtype=np.float32),
+        }
+
+    def score_fn(_root_observation, candidate, _goal, **_kwargs):
+        return _score(candidate_index=candidate["candidate_index"], progress=1.0, final_distance=0.0)
+
+    goal = type("Goal", (), {"frame_index_1based": 25})()
+    result = collect_phase12_episode(
+        env=DummyEnv(),
+        policy_sampler=policy_sampler,
+        score_fn=score_fn,
+        goals=[goal],
+        num_candidates=1,
+    )
+
+    assert result.segments[0].goal_frame_index_1based == 25
+
+
 def test_dummy_two_segment_rollout_uses_fresh_observation_after_best_chunk_execution() -> None:
     sampled_roots: list[str] = []
     scored_roots: list[str] = []
@@ -204,3 +237,51 @@ def test_collect_phase12_episode_applies_action_profile_before_score_and_env() -
 
     np.testing.assert_allclose(seen_wm[0], np.array([[1.0, -1.0, 0.5, 1.0]], dtype=np.float32))
     np.testing.assert_allclose(seen_env[0], np.array([1.0, -1.0, 0.5, 1.0], dtype=np.float32))
+
+
+def test_collect_phase12_episode_official_profile_scores_raw_postprocessed_actions() -> None:
+    seen_wm: list[np.ndarray] = []
+    seen_env: list[np.ndarray] = []
+
+    class DummyEnv:
+        action_space = type(
+            "A",
+            (),
+            {
+                "low": np.full((4,), -1.0, dtype=np.float32),
+                "high": np.full((4,), 1.0, dtype=np.float32),
+            },
+        )()
+
+        def reset(self):
+            return {"id": "root"}
+
+        def step(self, action):
+            seen_env.append(np.asarray(action, dtype=np.float32).copy())
+            return {"id": "next"}, 0.0, True, {}
+
+    def sampler(*_args, **_kwargs):
+        yield {
+            "candidate_index": 0,
+            "unsquashed_chunk": np.zeros((1, 4), dtype=np.float32),
+            "old_logprob_steps": np.zeros(1, dtype=np.float32),
+            "exec_actions_raw_postprocessed": np.array([[2.0, -2.0, 0.5, 1.5]], dtype=np.float32),
+            "exec_actions_clipped": np.array([[1.0, -1.0, 0.5, 1.0]], dtype=np.float32),
+        }
+
+    def score_fn(_root, candidate, _goal, **_kwargs):
+        seen_wm.append(candidate.exec_actions_for_wm.copy())
+        return _score(candidate_index=0, progress=1.0, final_distance=0.0)
+
+    collect_phase12_episode(
+        env=DummyEnv(),
+        policy_sampler=sampler,
+        score_fn=score_fn,
+        goals=["goal"],
+        num_candidates=1,
+        action_profile="official_jepa_mirror",
+    )
+
+    expected = np.array([[2.0, -2.0, 0.5, 1.5]], dtype=np.float32)
+    np.testing.assert_allclose(seen_wm[0], expected)
+    np.testing.assert_allclose(seen_env[0], expected.reshape(4))

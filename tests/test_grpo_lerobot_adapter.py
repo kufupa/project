@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +107,8 @@ class FakeDeferredVectorEnv:
             return tuple(getattr(env, "_max_episode_steps", 500) for env in self.envs)
         if name == "task_description":
             return tuple(getattr(env, "task_description", "push the puck to the goal") for env in self.envs)
+        if name == "last_agent_pos":
+            return tuple(env.last_agent_pos() for env in self.envs)
         return tuple(getattr(env, name)() for env in self.envs)
 
     def close(self):
@@ -182,16 +186,29 @@ def _install_fake_deferred_deps(monkeypatch):
 
     class FakeInner:
         max_path_length = 500
-        model = type("Model", (), {"cam_pos": {2: [0.0, 0.0, 0.0]}})()
 
         def __init__(self, *args, **kwargs):
             self.raw = np.array([1.0, 2.0, 3.0, 4.0, 9.0], dtype=np.float64)
             self.seeded_rand_vec = False
             self.seed_calls: list[int] = []
             self.reset_calls: list[int | None] = []
+            self.model = types.SimpleNamespace(
+                cam_pos={2: [0.0, 0.0, 0.0]},
+                goal_pos=np.array([9.0, 9.0, 9.0], dtype=np.float64),
+            )
+            self.data = types.SimpleNamespace(
+                goal_xpos=np.array([-1.0, -1.0, -1.0], dtype=np.float64),
+                forward_calls=0,
+            )
+            self._target_site_config = [("goal", np.array([1.0, 2.0, 3.0], dtype=np.float64))]
+            self.render_goal_snapshots: list[np.ndarray] = []
 
         def set_task(self, task):
             self.task = task
+
+        def _set_pos_site(self, name, pos):
+            assert name == "goal"
+            self.model.goal_pos = np.asarray(pos, dtype=np.float64).copy()
 
         def seed(self, seed):
             self.seed_calls.append(int(seed))
@@ -208,6 +225,7 @@ def _install_fake_deferred_deps(monkeypatch):
             return self.raw.copy(), 1.0, False, False, {"success": False}
 
         def render(self):
+            self.render_goal_snapshots.append(self.data.goal_xpos.copy())
             return np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
 
         def close(self):
@@ -219,20 +237,30 @@ def _install_fake_deferred_deps(monkeypatch):
             self.train_classes = {task: FakeInner}
             self.train_tasks = [object()]
 
-    class FakeMetaworldModule:
-        TASK_DESCRIPTIONS = {"push-v3": "push the puck to the goal"}
-        TASK_POLICY_MAPPING = {"push-v3": FakeExpertPolicy}
-
     import gymnasium
     import gymnasium.vector
-    import lerobot.envs.metaworld as lr_mw
-    import metaworld
+    import lerobot.envs as lr_envs
+
+    fake_lr_mw = types.ModuleType("lerobot.envs.metaworld")
+    fake_lr_mw.TASK_DESCRIPTIONS = {"push-v3": "push the puck to the goal"}
+    fake_lr_mw.TASK_POLICY_MAPPING = {"push-v3": FakeExpertPolicy}
+
+    fake_metaworld = types.ModuleType("metaworld")
+    fake_metaworld.MT1 = FakeMT1
+    fake_mujoco = types.ModuleType("mujoco")
+
+    def fake_mj_forward(model, data):
+        data.forward_calls += 1
+        data.goal_xpos = np.asarray(model.goal_pos, dtype=np.float64).copy()
+
+    fake_mujoco.mj_forward = fake_mj_forward
 
     monkeypatch.setattr(gymnasium, "spaces", FakeSpaces)
     monkeypatch.setattr(gymnasium.vector, "SyncVectorEnv", FakeDeferredVectorEnv)
-    monkeypatch.setattr(lr_mw, "TASK_DESCRIPTIONS", FakeMetaworldModule.TASK_DESCRIPTIONS)
-    monkeypatch.setattr(lr_mw, "TASK_POLICY_MAPPING", FakeMetaworldModule.TASK_POLICY_MAPPING)
-    monkeypatch.setattr(metaworld, "MT1", FakeMT1)
+    monkeypatch.setitem(sys.modules, "lerobot.envs.metaworld", fake_lr_mw)
+    monkeypatch.setattr(lr_envs, "metaworld", fake_lr_mw, raising=False)
+    monkeypatch.setitem(sys.modules, "metaworld", fake_metaworld)
+    monkeypatch.setitem(sys.modules, "mujoco", fake_mujoco)
 
 
 class IdentityBundle:
@@ -246,7 +274,7 @@ def test_official_adapter_uses_make_env_and_vector_contract(monkeypatch):
     fake_vec = _install_fake_official_lerobot(monkeypatch)
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3")
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", reset_randomization_mode="lerobot_default")
     assert rollout.max_episode_steps == 500
     assert rollout.action_dim == 4
 
@@ -273,7 +301,9 @@ def test_official_adapter_reset_many_uses_per_row_seeds(monkeypatch):
     fake_vec = _install_fake_official_lerobot(monkeypatch, n_envs=3)
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=3)
+    rollout = OfficialLeRobotMetaWorldGRPORollout(
+        task="assembly-v3", n_envs=3, reset_randomization_mode="lerobot_default"
+    )
     try:
         obs = rollout.reset_many([1000, 1001, 1002])
         assert fake_vec.reset_seeds == [1000, 1001, 1002]
@@ -313,7 +343,54 @@ def test_deferred_metaworld_reset_observation_pixels_are_lerobot_vh(monkeypatch)
         env.close()
 
 
+def test_deferred_metaworld_reset_syncs_goal_site_before_render(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3", camera_name="corner2")
+    try:
+        env.reset(seed=123)
+        inner = env._env  # noqa: SLF001
+        np.testing.assert_allclose(inner.model.goal_pos, np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_allclose(inner.data.goal_xpos, np.array([1.0, 2.0, 3.0]))
+        assert inner.data.forward_calls >= 1
+        np.testing.assert_allclose(inner.render_goal_snapshots[-1], np.array([1.0, 2.0, 3.0]))
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_reset_forward_works_without_target_site_config(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3")
+    try:
+        env.reset(seed=123)
+        inner = env._env  # noqa: SLF001
+        delattr(inner, "_target_site_config")
+        obs, _info = env.reset(seed=124)
+        assert obs["pixels"].shape == (8, 8, 3)
+        assert inner.data.forward_calls >= 1
+    finally:
+        env.close()
+
+
 def test_deferred_metaworld_env_seeds_underlying_random_vector(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
+
+    env = DeferredLeRobotMetaworldEnv(task="push-v3", reset_randomization_mode="random_seeded")
+    try:
+        env.reset(seed=2000)
+        inner = env._env  # noqa: SLF001
+        assert inner.seed_calls[-1] == 2000
+        assert inner.reset_calls[-1] == 2000
+        assert inner.seeded_rand_vec is True
+    finally:
+        env.close()
+
+
+def test_deferred_metaworld_env_defaults_to_random_seeded_reset(monkeypatch):
     _install_fake_deferred_deps(monkeypatch)
     from smolvla_grpo.lerobot_metaworld_adapter import DeferredLeRobotMetaworldEnv
 
@@ -321,8 +398,8 @@ def test_deferred_metaworld_env_seeds_underlying_random_vector(monkeypatch):
     try:
         env.reset(seed=2000)
         inner = env._env  # noqa: SLF001
+        assert inner._freeze_rand_vec is False
         assert inner.seed_calls[-1] == 2000
-        assert inner.reset_calls[-1] == 2000
         assert inner.seeded_rand_vec is True
     finally:
         env.close()
@@ -394,7 +471,9 @@ def test_official_adapter_step_batch_matches_n_envs(monkeypatch):
     _install_fake_official_lerobot(monkeypatch, n_envs=2, step_info={"final_info": fin})
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=2)
+    rollout = OfficialLeRobotMetaWorldGRPORollout(
+        task="assembly-v3", n_envs=2, reset_randomization_mode="lerobot_default"
+    )
     try:
         rollout.reset(42)
         b = rollout.step_batch(np.zeros((2, 4), dtype=np.float32))
@@ -404,11 +483,29 @@ def test_official_adapter_step_batch_matches_n_envs(monkeypatch):
         rollout.close()
 
 
+def test_official_adapter_defaults_to_random_seeded_reset_for_vector_env(monkeypatch):
+    _install_fake_deferred_deps(monkeypatch)
+    from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
+
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="push-v3", n_envs=3)
+    try:
+        obs = rollout.reset_many([2000, 2001, 2002])
+        assert obs["pixels"].shape[0] == 3
+        assert rollout.vec_env.num_envs == 3
+        assert [env._env._freeze_rand_vec for env in rollout.vec_env.envs] == [False, False, False]  # noqa: SLF001
+        assert [env._env.seed_calls[-1] for env in rollout.vec_env.envs] == [2000, 2001, 2002]  # noqa: SLF001
+        assert [env._env.seeded_rand_vec for env in rollout.vec_env.envs] == [True, True, True]  # noqa: SLF001
+    finally:
+        rollout.close()
+
+
 def test_official_adapter_rejects_step_when_n_envs_gt_1(monkeypatch):
     _install_fake_official_lerobot(monkeypatch, n_envs=2)
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", n_envs=2)
+    rollout = OfficialLeRobotMetaWorldGRPORollout(
+        task="assembly-v3", n_envs=2, reset_randomization_mode="lerobot_default"
+    )
     try:
         rollout.reset(0)
         try:
@@ -425,7 +522,7 @@ def test_official_adapter_rejects_non_batched_vector_action(monkeypatch):
     _install_fake_official_lerobot(monkeypatch)
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3")
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", reset_randomization_mode="lerobot_default")
     try:
         try:
             rollout.step(np.zeros(4, dtype=np.float32))
@@ -446,7 +543,7 @@ def test_official_adapter_rejects_missing_task_without_fallback(monkeypatch):
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
     with pytest.raises(KeyError, match="missing-v3"):
-        OfficialLeRobotMetaWorldGRPORollout(task="missing-v3")
+        OfficialLeRobotMetaWorldGRPORollout(task="missing-v3", reset_randomization_mode="lerobot_default")
 
 
 def test_official_adapter_reads_vector_final_info_success(monkeypatch):
@@ -456,7 +553,7 @@ def test_official_adapter_reads_vector_final_info_success(monkeypatch):
     )
     from smolvla_grpo.lerobot_metaworld_adapter import OfficialLeRobotMetaWorldGRPORollout
 
-    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3")
+    rollout = OfficialLeRobotMetaWorldGRPORollout(task="assembly-v3", reset_randomization_mode="lerobot_default")
     try:
         step = rollout.step(np.zeros((1, 4), dtype=np.float32))
         assert step.success is True

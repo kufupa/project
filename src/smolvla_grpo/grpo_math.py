@@ -122,6 +122,31 @@ def compute_group_advantages(returns: torch.Tensor, *, eps: float = 1e-8) -> tor
     return torch.nan_to_num(adv, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def compute_seed_batch_advantages(
+    returns: torch.Tensor,
+    *,
+    group_size: int,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Normalize returns within each contiguous seed group."""
+    flat = returns.reshape(-1).float()
+    g = int(group_size)
+    if g < 1:
+        raise ValueError("group_size must be >= 1")
+    if flat.numel() == 0:
+        return flat
+    if flat.numel() % g != 0:
+        raise ValueError(
+            f"returns length {flat.numel()} must be a multiple of group_size={g}"
+        )
+    chunks = flat.reshape(-1, g)
+    advantages = torch.stack(
+        [compute_group_advantages(chunk, eps=eps) for chunk in chunks],
+        dim=0,
+    )
+    return advantages.reshape(-1)
+
+
 @dataclass
 class RatioStats:
     mean_ratio: float

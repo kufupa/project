@@ -18,6 +18,12 @@ def test_phase12_cli_defaults() -> None:
     assert args.action_profile == "official_jepa_mirror"
     assert args.chunk_len == 25
     assert args.group_size == 4
+    assert args.batch_size == 1
+    assert args.phase12_train_mode == "selected_env"
+    assert args.start_update is None
+    assert args.disable_videos is False
+    assert args.wm_score_mode == "serial"
+    assert args.wm_score_batch_size == 8
     assert args.goal_latent_mode == "visual_proprio"
     assert args.proprio_alpha == 0.1
     assert args.reward_key == "wm_latent_progress"
@@ -64,11 +70,46 @@ def test_manifest_records_phase12_contract(tmp_path) -> None:
     assert manifest["goal_latent_mode"] == "visual_proprio"
     assert manifest["proprio_alpha"] == 0.1
     assert manifest["action_profile"] == "official_jepa_mirror"
+    assert manifest["phase12_train_mode"] == "selected_env"
     assert manifest["uses_cem"] is False
+    assert manifest["env_vector_mode"] == "serial"
+    assert manifest["rollout_execution"] == "serial_selected_rollout"
+    assert manifest["real_env_selected_rollout"] is True
+    assert manifest["true_parallel_metaworld"] is False
+    assert "oracle/reset parity/WM scoring" in manifest["true_parallel_metaworld_note"]
     assert manifest["chunk_len"] == 25
+    assert manifest["batch_size"] == 1
+    assert manifest["start_update"] == 0
+    assert manifest["disable_videos"] is False
+    assert manifest["wm_score_mode"] == "serial"
+    assert manifest["wm_score_batch_size"] == 8
+    assert manifest["episodes_per_update_semantics"] == "one_update_may_include_batch_size_reset_seeds"
+    assert manifest["advantage_mode"] == "per_segment_group"
     assert manifest["logprob_backward_mode"] == "stack"
     assert manifest["old_policy_inference_mode"] is True
     assert json.dumps(manifest)
+
+
+def test_manifest_records_wm_only_train_mode(tmp_path) -> None:
+    args = parse_args(
+        [
+            "--output-dir",
+            str(tmp_path),
+            "--phase12-train-mode",
+            "wm_only",
+            "--batch-size",
+            "4",
+            "--disable-videos",
+        ]
+    )
+
+    manifest = build_manifest(args)
+
+    assert manifest["phase12_train_mode"] == "wm_only"
+    assert manifest["real_env_selected_rollout"] is False
+    assert manifest["rollout_execution"] == "wm_only_single_root"
+    assert manifest["batch_size"] == 4
+    assert manifest["disable_videos"] is True
 
 
 def test_manifest_records_phase12_pixel_contracts(tmp_path) -> None:

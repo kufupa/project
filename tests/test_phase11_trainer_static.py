@@ -30,7 +30,10 @@ def test_chunk_mode_is_flow_sde_only_for_first_implementation() -> None:
 
 def test_chunk_mode_loads_bundle_with_rollout_chunk_len() -> None:
     text = TRAINER.read_text(encoding="utf-8")
-    assert 'n_action_steps=(int(args.rollout_chunk_len) if args.rollout_unit == "chunk" else 1)' in text
+    assert (
+        'n_action_steps=(\n            int(args.rollout_chunk_len) if args.rollout_unit == "chunk" '
+        'else int(args.action_chunk_size)\n        )'
+    ) in text
 
 
 def test_chunk_mode_uses_chunk_rollout_collector() -> None:

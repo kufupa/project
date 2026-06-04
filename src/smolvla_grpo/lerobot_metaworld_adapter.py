@@ -11,7 +11,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("MUJOCO_GL", "osmesa")
+os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
 import numpy as np
 import gymnasium as gym
@@ -72,6 +73,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         camera_name: str = "corner2",
         observation_width: int = 480,
         observation_height: int = 480,
+        reset_randomization_mode: str | None = None,
     ) -> None:
         from gymnasium import spaces
         from lerobot.envs import metaworld as lr_mw
@@ -82,6 +84,13 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self.camera_name = str(camera_name)
         self.observation_width = int(observation_width)
         self.observation_height = int(observation_height)
+        self.reset_randomization_mode = str(
+            reset_randomization_mode or os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded")
+        )
+        if self.reset_randomization_mode not in {"fixed", "random_seeded", "random_unseeded", "lerobot_default"}:
+            raise ValueError(
+                "reset_randomization_mode must be fixed, random_seeded, random_unseeded, or lerobot_default"
+            )
         self._env: Any | None = None
         self._last_raw_obs: np.ndarray | None = None
         self._max_episode_steps = 500
@@ -125,10 +134,29 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         env.set_task(mt1.train_tasks[0])
         if self.camera_name == "corner2":
             env.model.cam_pos[2] = [0.75, 0.075, 0.7]
+        env._freeze_rand_vec = self.reset_randomization_mode == "fixed"
+        if self.reset_randomization_mode == "lerobot_default":
+            env._freeze_rand_vec = False
         env.reset()
-        env._freeze_rand_vec = False
         self._env = env
+        self._sync_metaworld_reset_sites()
         self._max_episode_steps = int(env.max_path_length)
+
+    def _sync_metaworld_reset_sites(self) -> None:
+        """Flush MetaWorld reset-time model edits into MuJoCo data before rendering."""
+        env = self._env
+        if env is None:
+            return
+
+        target_site_config = getattr(env, "_target_site_config", ())
+        set_pos_site = getattr(env, "_set_pos_site", None)
+        if callable(set_pos_site):
+            for site_args in target_site_config:
+                set_pos_site(*site_args)
+
+        import mujoco
+
+        mujoco.mj_forward(env.model, env.data)
 
     def render(self) -> np.ndarray:
         self._ensure_env()
@@ -167,11 +195,17 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
     def reset(self, seed: int | None = None, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self._ensure_env()
         super().reset(seed=seed)
-        if seed is not None:
+        self._env._freeze_rand_vec = self.reset_randomization_mode == "fixed"
+        if self.reset_randomization_mode == "lerobot_default":
+            self._env._freeze_rand_vec = False
+        if self.reset_randomization_mode == "random_seeded" and seed is not None:
             self._env.seed(int(seed))
             if hasattr(self._env, "seeded_rand_vec"):
                 self._env.seeded_rand_vec = True
+        elif hasattr(self._env, "seeded_rand_vec"):
+            self._env.seeded_rand_vec = False
         raw_obs, _info = self._env.reset(seed=seed)
+        self._sync_metaworld_reset_sites()
         self._last_raw_obs = np.asarray(raw_obs, dtype=np.float64).copy()
         return self._format_raw_obs(raw_obs), {"is_success": False}
 
@@ -223,6 +257,8 @@ def _first_success(value: Any) -> bool | None:
     if isinstance(value, dict):
         if "is_success" in value:
             return _coerce_success_value(value["is_success"])
+        if "success" in value:
+            return _coerce_success_value(value["success"])
         for item in value.values():
             found = _first_success(item)
             if found is not None:
@@ -281,6 +317,36 @@ def _successes_from_vector_info(info: dict[str, Any], n_envs: int) -> np.ndarray
             elif isinstance(v, (list, tuple)) and len(v) == n_envs:
                 chunk[k] = v[i]
         out[i] = bool(_first_success(chunk) or False)
+    return out
+
+
+def _restore_vector_final_obs(
+    obs: dict[str, Any],
+    info: dict[str, Any],
+    terminal: np.ndarray,
+    n_envs: int,
+) -> dict[str, Any]:
+    """Replace SAME_STEP autoreset observations with terminal observations where available."""
+    final_obs = info.get("final_obs") if isinstance(info, dict) else None
+    if final_obs is None or not isinstance(obs, dict):
+        return obs
+
+    out = {key: np.array(value, copy=True) if isinstance(value, np.ndarray) else value for key, value in obs.items()}
+    for i in range(int(n_envs)):
+        if not bool(terminal[i]):
+            continue
+        if isinstance(final_obs, dict):
+            item = {
+                key: (value[i] if isinstance(value, np.ndarray) and value.shape[0] == n_envs else value)
+                for key, value in final_obs.items()
+            }
+        else:
+            item = final_obs[i]
+        if not isinstance(item, dict):
+            continue
+        for key, value in item.items():
+            if key in out and isinstance(out[key], np.ndarray):
+                out[key][i] = value
     return out
 
 
@@ -397,10 +463,9 @@ class OfficialLeRobotMetaWorldGRPORollout:
         use_async_envs: bool = False,
         async_start_method: str = "forkserver",
         enable_expert_oracle: bool = False,
+        reset_randomization_mode: str | None = None,
     ) -> None:
         from lerobot.envs.configs import MetaworldEnv
-        from lerobot.envs.factory import make_env
-        from lerobot.envs.metaworld import create_metaworld_envs
 
         self.task_group = task
         self.task_id = 0
@@ -410,8 +475,31 @@ class OfficialLeRobotMetaWorldGRPORollout:
         self.use_async_envs = bool(use_async_envs)
         self.async_start_method = str(async_start_method)
         self.enable_expert_oracle = bool(enable_expert_oracle)
+        self.reset_randomization_mode = str(
+            reset_randomization_mode or os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded")
+        )
+        if self.reset_randomization_mode not in {"fixed", "random_seeded", "random_unseeded", "lerobot_default"}:
+            raise ValueError(
+                "reset_randomization_mode must be fixed, random_seeded, random_unseeded, or lerobot_default"
+            )
 
         self.env_cfg = MetaworldEnv(task=task, obs_type=obs_type)
+
+        if self.reset_randomization_mode == "lerobot_default" and not self.enable_expert_oracle:
+            from lerobot.envs.factory import make_env
+
+            envs = make_env(
+                self.env_cfg,
+                n_envs=self.n_envs,
+                use_async_envs=bool(self.use_async_envs),
+                trust_remote_code=False,
+            )
+        else:
+            gym_kwargs = dict(self.env_cfg.gym_kwargs)
+            mode_for_deferred = (
+                "random_unseeded" if self.reset_randomization_mode == "lerobot_default" else self.reset_randomization_mode
+            )
+            gym_kwargs["reset_randomization_mode"] = mode_for_deferred
 
         if self.enable_expert_oracle:
             if self.n_envs != 1:
@@ -421,18 +509,11 @@ class OfficialLeRobotMetaWorldGRPORollout:
             envs = {
                 task: {
                     0: SyncVectorEnv(
-                        [lambda tn=task: DeferredLeRobotMetaworldEnv(task=tn, **self.env_cfg.gym_kwargs)]
+                        [lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs)]
                     )
                 }
             }
-        elif self.n_envs == 1:
-            envs = make_env(
-                self.env_cfg,
-                n_envs=1,
-                use_async_envs=False,
-                trust_remote_code=False,
-            )
-        elif self.use_async_envs:
+        elif self.reset_randomization_mode != "lerobot_default" and self.use_async_envs:
             mp_ctx = self.async_start_method
             cached_obs_space: Any | None = None
             cached_act_space: Any | None = None
@@ -454,17 +535,23 @@ class OfficialLeRobotMetaWorldGRPORollout:
                 return lazy
 
             fns = [
-                (lambda tn=task: DeferredLeRobotMetaworldEnv(task=tn, **self.env_cfg.gym_kwargs))
+                (lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs))
                 for _ in range(self.n_envs)
             ]
             envs = {task: {0: _env_cls(fns)}}
-        else:
-            envs = make_env(
-                self.env_cfg,
-                n_envs=self.n_envs,
-                use_async_envs=False,
-                trust_remote_code=False,
-            )
+        elif self.reset_randomization_mode != "lerobot_default":
+            from gymnasium.vector import SyncVectorEnv
+
+            envs = {
+                task: {
+                    0: SyncVectorEnv(
+                        [
+                            (lambda tn=task, kwargs=gym_kwargs: DeferredLeRobotMetaworldEnv(task=tn, **kwargs))
+                            for _ in range(self.n_envs)
+                        ]
+                    )
+                }
+            }
 
         try:
             self.vec_env = envs[task][0]
@@ -533,13 +620,18 @@ class OfficialLeRobotMetaWorldGRPORollout:
         obs, reward, terminated, truncated, info = self.vec_env.step(action_np)
         info_d = info if isinstance(info, dict) else {}
         success = _successes_from_vector_info(info_d, self.n_envs)
+        terminated_np = np.asarray(terminated, dtype=np.bool_).reshape(self.n_envs)
+        truncated_np = np.asarray(truncated, dtype=np.bool_).reshape(self.n_envs)
+        success_np = success.reshape(self.n_envs)
+        terminal = np.logical_or(np.logical_or(terminated_np, truncated_np), success_np)
+        obs = _restore_vector_final_obs(obs, info_d, terminal, self.n_envs)
 
         return OfficialBatchStep(
             observation=obs,
             reward=np.asarray(reward, dtype=np.float64).reshape(self.n_envs),
-            terminated=np.asarray(terminated, dtype=np.bool_).reshape(self.n_envs),
-            truncated=np.asarray(truncated, dtype=np.bool_).reshape(self.n_envs),
-            success=success.reshape(self.n_envs),
+            terminated=terminated_np,
+            truncated=truncated_np,
+            success=success_np,
             info=info_d,
         )
 

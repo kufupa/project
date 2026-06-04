@@ -4,9 +4,11 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from scripts.grpo import train_phase12_wm_chunk_grpo as trainer
+from smolvla_grpo.phase12_decode_compare import _structured_field, decode_phase12_prediction_frames
 from smolvla_grpo.phase12_rollout import Phase12EpisodeResult
 
 
@@ -74,6 +76,8 @@ def test_wm_grpo_train_writes_update_row_and_nonempty_checkpoint(monkeypatch, tm
             "1",
             "--num-episodes",
             "1",
+            "--action-profile",
+            "bounded_executed",
         ]
     )
 
@@ -83,6 +87,271 @@ def test_wm_grpo_train_writes_update_row_and_nonempty_checkpoint(monkeypatch, tm
     ckpt = torch.load(tmp_path / "checkpoints" / "latest.pt", map_location="cpu", weights_only=False)
     assert ckpt["policy_state_dict"]
     assert ckpt["optimizer_state_dict"]
+
+
+def test_wm_only_train_branch_does_not_call_selected_env_collector(monkeypatch, tmp_path) -> None:
+    chunks = [torch.full((4, 4), 0.1 * (i + 1), dtype=torch.float32) for i in range(4)]
+    episode = SimpleNamespace(
+        total_env_reward=0.0,
+        success_any=False,
+        success_last=False,
+        metadata={
+            "phase12_train_mode": "wm_only",
+            "segment_candidate_rewards": [[0.0, 1.0, 2.0, 3.0]],
+            "candidate_rewards": [0.0, 1.0, 2.0, 3.0],
+            "old_logprob_sums": [-1.0, -1.1, -1.2, -1.3],
+            "proc_root_snapshots": [{"x": torch.zeros(1, 1)} for _ in range(4)],
+            "unsquashed_chunks": chunks,
+            "rollout_validation_video": "",
+            "selected_action_rollout_video": "",
+            "oracle_baseline_video": "",
+            "oracle_baseline_video_status": "disabled",
+            "wm_decode_status": "disabled",
+        },
+    )
+
+    monkeypatch.setattr(trainer, "load_phase12_train_resources", lambda args: (_TinyBundle(), object(), 4))
+    monkeypatch.setattr(
+        trainer,
+        "collect_phase12_training_episode",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("selected-env collector called")),
+    )
+    monkeypatch.setattr(trainer, "collect_phase12_wm_only_training_episode", lambda **_kwargs: episode)
+
+    code = trainer.main(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--phase12-train-mode",
+            "wm_only",
+            "--output-dir",
+            str(tmp_path),
+            "--jepa-repo",
+            "/tmp/jepa",
+            "--jepa-ckpt",
+            "wm.pt",
+            "--num-updates",
+            "1",
+            "--num-episodes",
+            "1",
+            "--action-profile",
+            "bounded_executed",
+        ]
+    )
+
+    assert code == 0
+    rows = [json.loads(x) for x in (tmp_path / "progress.jsonl").read_text().splitlines() if x.strip()]
+    assert any(row.get("event") == "update_complete" and row.get("optimizer_step") is True for row in rows)
+
+
+def test_phase12_pure_wm_args_are_recorded_in_manifest(tmp_path) -> None:
+    args = trainer.parse_args(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--phase12-train-mode",
+            "wm_only",
+            "--wm-only-root-mode",
+            "oracle_teacher_forced",
+            "--loss-normalizer-mode",
+            "group_sqrt_segments",
+            "--wm-action-l2-penalty",
+            "0.003",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    manifest = trainer.build_manifest(args)
+
+    assert manifest["wm_only_root_mode"] == "oracle_teacher_forced"
+    assert manifest["rollout_execution"] == "wm_only_oracle_teacher_forced"
+    assert manifest["loss_normalizer_mode"] == "group_sqrt_segments"
+    assert manifest["wm_action_l2_penalty"] == 0.003
+
+
+def test_phase12_loss_normalizer_modes() -> None:
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group") == 8
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group_sqrt_segments") == 28
+    assert trainer._phase12_loss_normalizer(group_size=8, segment_count=12, mode="group_times_segments") == 96
+
+
+def test_phase12_save_every_list_parser() -> None:
+    assert trainer._parse_positive_int_list("2,5:10") == [2, 5, 10]
+    assert trainer._parse_positive_int_list(None) == []
+
+
+def test_phase12_action_l2_penalty_adjusts_reward() -> None:
+    candidate = SimpleNamespace(exec_actions_for_env=np.ones((5, 4), dtype=np.float32))
+
+    adjusted = trainer._apply_phase12_action_l2_penalty(
+        {"candidate_index": 0, "wm_latent_progress": 0.2, "final_combined_distance": 1.0},
+        candidate,
+        reward_key="wm_latent_progress",
+        penalty=0.003,
+    )
+
+    assert adjusted["wm_latent_progress"] == pytest.approx(0.197)
+    assert adjusted["action_l2"] == pytest.approx(1.0)
+
+
+def test_phase12_seed_batch_collects_seed_major_and_logs_reset_seeds(monkeypatch, tmp_path) -> None:
+    calls: list[int] = []
+
+    def fake_collect(**kwargs):
+        seed = int(kwargs["reset_seed"])
+        calls.append(seed)
+        base = float(seed - 2000)
+        chunks = [torch.full((2, 4), 0.1 * (i + 1), dtype=torch.float32) for i in range(3)]
+        return SimpleNamespace(
+            total_env_reward=base,
+            success_any=seed % 2 == 0,
+            success_last=seed % 2 == 0,
+            metadata={
+                "segment_candidate_rewards": [[base, base + 1.0, base + 2.0]],
+                "candidate_rewards": [base, base + 1.0, base + 2.0],
+                "old_logprob_sums": [-1.0, -1.1, -1.2],
+                "proc_root_snapshots": [{"x": torch.zeros(1, 1)} for _ in range(3)],
+                "unsquashed_chunks": chunks,
+                "action_clip_fraction": 0.1 + 0.1 * (seed - 2000),
+                "action_clip_any_fraction": 1.0 if seed % 2 == 0 else 0.0,
+                "raw_action_max_abs": 2.0 + (seed - 2000),
+                "clipped_action_max_abs": 1.0,
+                "clip_delta_max_abs": 1.0 + (seed - 2000),
+                "rollout_validation_video": "",
+                "selected_action_rollout_video": "",
+                "oracle_baseline_video": "",
+                "oracle_baseline_video_status": "disabled",
+                "wm_decode_status": "disabled",
+            },
+        )
+
+    monkeypatch.setattr(trainer, "load_phase12_train_resources", lambda args: (_TinyBundle(), object(), 4))
+    monkeypatch.setattr(trainer, "collect_phase12_training_episode", fake_collect)
+
+    code = trainer.main(
+        [
+            "--mode",
+            "wm_grpo_train",
+            "--output-dir",
+            str(tmp_path),
+            "--jepa-repo",
+            "/tmp/jepa",
+            "--jepa-ckpt",
+            "wm.pt",
+            "--group-size",
+            "3",
+            "--batch-size",
+            "2",
+            "--num-updates",
+            "1",
+            "--num-episodes",
+            "1",
+            "--action-profile",
+            "bounded_executed",
+        ]
+    )
+
+    assert code == 0
+    assert calls == [2000, 2001]
+    rows = [json.loads(x) for x in (tmp_path / "progress.jsonl").read_text().splitlines() if x.strip()]
+    update = [row for row in rows if row.get("event") == "update_complete"][-1]
+    assert update["batch_size"] == 2
+    assert update["reset_seeds"] == [2000, 2001]
+    assert len(update["returns"]) == 6
+    assert len(update["advantages"]) == 6
+    assert update["per_seed_success_rate"] == [1.0, 0.0]
+    assert update["action_profile"] == "bounded_executed"
+    assert update["reward_key"] == "wm_latent_progress"
+    assert update["chunk_len"] == 25
+    assert update["action_clip_fraction"] == pytest.approx(0.15)
+    assert update["action_clip_any_fraction"] == 0.5
+    assert update["raw_action_max_abs"] == 3.0
+    assert update["clipped_action_max_abs"] == 1.0
+    assert update["clip_delta_max_abs"] == 2.0
+
+
+def test_combine_phase12_seed_batch_metadata_preserves_action_telemetry() -> None:
+    episodes = [
+        SimpleNamespace(
+            success_any=True,
+            metadata={
+                "candidate_rewards": [0.0, 1.0],
+                "segment_candidate_rewards": [[0.0, 1.0]],
+                "old_logprob_sums": [-1.0, -1.1],
+                "proc_root_snapshots": ["a", "b"],
+                "unsquashed_chunks": ["ca", "cb"],
+                "action_clip_fraction": 0.25,
+                "action_clip_any_fraction": 1.0,
+                "raw_action_max_abs": 2.0,
+                "clipped_action_max_abs": 1.0,
+                "clip_delta_max_abs": 1.0,
+            },
+        ),
+        SimpleNamespace(
+            success_any=False,
+            metadata={
+                "candidate_rewards": [2.0, 3.0],
+                "segment_candidate_rewards": [[2.0, 3.0]],
+                "old_logprob_sums": [-1.2, -1.3],
+                "proc_root_snapshots": ["c", "d"],
+                "unsquashed_chunks": ["cc", "cd"],
+                "action_clip_fraction": 0.75,
+                "action_clip_any_fraction": 0.0,
+                "raw_action_max_abs": 4.0,
+                "clipped_action_max_abs": 1.5,
+                "clip_delta_max_abs": 2.5,
+            },
+        ),
+    ]
+
+    meta = trainer._combine_phase12_seed_batch_metadata(episodes)
+
+    assert meta["action_clip_fraction"] == 0.5
+    assert meta["action_clip_any_fraction"] == 0.5
+    assert meta["raw_action_max_abs"] == 4.0
+    assert meta["clipped_action_max_abs"] == 1.5
+    assert meta["clip_delta_max_abs"] == 2.5
+
+
+def test_phase12_microbatch_loss_uses_explicit_group_size() -> None:
+    class Wrapper:
+        def __init__(self) -> None:
+            self.scale = torch.nn.Parameter(torch.tensor(0.0))
+
+        def get_action_probs_for_chunk_from_proc(self, proc, chunk):
+            del proc
+            return self.scale + torch.as_tensor(chunk).float().reshape(-1) * 0.0
+
+    chunks = [torch.zeros((1, 4), dtype=torch.float32) for _ in range(4)]
+    old_lp = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    advantages = torch.tensor([2.0, 1.0, 3.0, 0.0], dtype=torch.float32)
+
+    good = Wrapper()
+    trainer._backward_chunk_grpo_loss_microbatched(
+        train_wrapper=good,
+        proc_snapshots=[{} for _ in chunks],
+        unsquashed_chunks=chunks,
+        old_lp=old_lp,
+        advantages=advantages,
+        clip_eps=0.2,
+        grpo_group_size=2,
+    )
+
+    wrong = Wrapper()
+    trainer._backward_chunk_grpo_loss_microbatched(
+        train_wrapper=wrong,
+        proc_snapshots=[{} for _ in chunks],
+        unsquashed_chunks=chunks,
+        old_lp=old_lp,
+        advantages=advantages,
+        clip_eps=0.2,
+        grpo_group_size=None,
+    )
+
+    assert good.scale.grad is not None
+    assert wrong.scale.grad is not None
+    assert not torch.allclose(good.scale.grad, wrong.scale.grad)
 
 
 def test_phase12_reset_gate_tolerates_sparse_render_jitter_when_raw_state_matches() -> None:
@@ -129,9 +398,9 @@ def test_structured_field_reads_tensordict_like_values() -> None:
 
     td = TensorDictLike()
 
-    assert trainer._structured_field(td, "visual") == "v"
-    assert trainer._structured_field(td, "proprio") == "p"
-    assert trainer._structured_field(td, "missing") is None
+    assert _structured_field(td, "visual") == "v"
+    assert _structured_field(td, "proprio") == "p"
+    assert _structured_field(td, "missing") is None
 
 
 def test_with_episode_metadata_handles_frozen_phase12_episode_result() -> None:
@@ -214,7 +483,7 @@ def test_phase12_decode_uses_final_unroll_timestep(monkeypatch) -> None:
         device=torch.device("cpu"),
     )
 
-    frames = trainer._decode_phase12_prediction_frames(
+    frames = decode_phase12_prediction_frames(
         wm_bundle,
         image=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.zeros(1, dtype=np.float32),
@@ -426,4 +695,23 @@ def test_phase12_old_policy_sampling_uses_inference_mode_when_enabled() -> None:
 
     assert sample.unique_action_rows == 1
     assert seen == {"grad_enabled": False, "inference_mode": True}
+
+
+def test_phase12_sample_candidate_dict_uses_raw_postprocessed_actions() -> None:
+    sample = SimpleNamespace(
+        raw_postprocessed_action_np=np.array([[2.0, -2.0, 0.0, 1.5]], dtype=np.float32),
+        exec_action_np=np.array([[1.0, -1.0, 0.0, 1.0]], dtype=np.float32),
+        unsquashed_chunk=torch.zeros(1, 4),
+        log_prob_steps=torch.zeros(1),
+        log_prob_sum=torch.tensor(0.0),
+        action_clip_fraction=np.array([0.75]),
+        action_clip_any=np.array([True]),
+        unique_action_rows=1,
+    )
+
+    row = trainer._phase12_sample_to_candidate_dict(sample, candidate_index=3)
+
+    np.testing.assert_allclose(row["exec_actions_raw_postprocessed"], sample.raw_postprocessed_action_np)
+    np.testing.assert_allclose(row["exec_actions_clipped"], sample.exec_action_np)
+    assert row["candidate_index"] == 3
 

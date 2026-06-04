@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 from smolvla_grpo.grpo_math import (
     compute_clipped_grpo_loss,
     compute_group_advantages,
+    compute_seed_batch_advantages,
     summarize_ratio_stats,
     update_metrics,
 )
@@ -25,6 +26,31 @@ def test_advantage_normalized() -> None:
     a = compute_group_advantages(r)
     assert abs(float(a.mean())) < 1e-5
     assert float(a.std()) > 0.9
+
+
+def test_compute_seed_batch_advantages_matches_per_group_manual() -> None:
+    returns = torch.tensor([10.0, 12.0, 8.0, 1.0, 1.0, 1.0], dtype=torch.float32)
+    got = compute_seed_batch_advantages(returns, group_size=3)
+    expected = torch.cat(
+        [
+            compute_group_advantages(returns[:3]),
+            compute_group_advantages(returns[3:]),
+        ],
+        dim=0,
+    )
+    torch.testing.assert_close(got, expected)
+
+
+def test_compute_seed_batch_advantages_one_group_zero_variance() -> None:
+    returns = torch.tensor([0.0, 4.0, 8.0, 5.0, 5.0, 5.0], dtype=torch.float32)
+    got = compute_seed_batch_advantages(returns, group_size=3)
+    assert not torch.allclose(got[:3], torch.zeros(3))
+    assert torch.allclose(got[3:], torch.zeros(3))
+
+
+def test_compute_seed_batch_advantages_rejects_bad_shape() -> None:
+    with pytest.raises(ValueError, match="multiple of group_size"):
+        compute_seed_batch_advantages(torch.tensor([1.0, 2.0]), group_size=3)
 
 
 def test_clipped_loss_changes_when_ratio_large() -> None:

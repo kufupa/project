@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 from statistics import mean
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -22,6 +24,64 @@ class EpisodeResult:
     successes: list[bool]
     terminated: bool
     truncated: bool
+
+
+TIMING_SECOND_FIELDS = (
+    "load_bundle_seconds",
+    "rollout_seconds",
+    "reset_seconds",
+    "proc_build_seconds",
+    "policy_prepare_seconds",
+    "policy_forward_seconds",
+    "postprocess_seconds",
+    "action_coerce_seconds",
+    "metaworld_step_seconds_including_obs_render",
+    "metaworld_step_batch_seconds_including_obs_render",
+    "frame_extract_seconds",
+    "video_write_seconds",
+    "close_seconds",
+)
+
+TIMING_COUNT_FIELDS = ("n_policy_calls", "n_env_steps", "n_env_batch_steps", "n_video_frames")
+
+
+@dataclass
+class TimingAccumulator:
+    seconds: dict[str, float] = field(default_factory=lambda: {key: 0.0 for key in TIMING_SECOND_FIELDS})
+    counts: dict[str, int] = field(default_factory=lambda: {key: 0 for key in TIMING_COUNT_FIELDS})
+    cuda_sync_requested: bool = True
+    cuda_synchronized_forward_timing: bool = False
+
+    def add(self, key: str, value: float) -> None:
+        if key not in self.seconds:
+            raise KeyError(f"unknown timing seconds field: {key}")
+        self.seconds[key] += float(value)
+
+    def incr(self, key: str, value: int = 1) -> None:
+        if key not in self.counts:
+            raise KeyError(f"unknown timing count field: {key}")
+        self.counts[key] += int(value)
+
+    def summary(self) -> dict[str, Any]:
+        policy_calls = max(int(self.counts["n_policy_calls"]), 1)
+        env_steps = max(int(self.counts["n_env_steps"]), 1)
+        env_batch_steps = max(int(self.counts["n_env_batch_steps"]), 1)
+        video_frames = max(int(self.counts["n_video_frames"]), 1)
+        return {
+            "schema_version": "phase58_timing_v1",
+            **{key: float(self.seconds.get(key, 0.0)) for key in TIMING_SECOND_FIELDS},
+            **{key: int(self.counts.get(key, 0)) for key in TIMING_COUNT_FIELDS},
+            "mean_policy_forward_ms_per_call": float(1000.0 * self.seconds["policy_forward_seconds"] / policy_calls),
+            "mean_metaworld_step_ms_per_env_step": float(
+                1000.0 * self.seconds["metaworld_step_seconds_including_obs_render"] / env_steps
+            ),
+            "mean_metaworld_step_batch_ms": float(
+                1000.0 * self.seconds["metaworld_step_batch_seconds_including_obs_render"] / env_batch_steps
+            ),
+            "mean_video_write_ms_per_frame": float(1000.0 * self.seconds["video_write_seconds"] / video_frames),
+            "cuda_sync_requested": bool(self.cuda_sync_requested),
+            "cuda_synchronized_forward_timing": bool(self.cuda_synchronized_forward_timing),
+        }
 
 
 def build_episode_waves(*, episodes: int, eval_seed_start: int, n_envs: int) -> list[list[tuple[int, int]]]:
@@ -131,6 +191,7 @@ def write_eval_artifacts(
         encoding="utf-8",
     )
     eval_info = {
+        "reset_randomization_mode": os.environ.get("SMOLVLA_METAWORLD_RESET_MODE", "random_seeded"),
         "per_task": [
             {
                 "task_group": task,
@@ -180,6 +241,25 @@ def coerce_exec_action_batch(action: Any, *, action_dim: int, n_envs: int) -> np
     return np.clip(action_np.reshape(int(n_envs), int(action_dim)), -1.0, 1.0).astype(np.float32, copy=False)
 
 
+def coerce_exec_action_chunk_batch(action: Any, *, action_dim: int, n_envs: int, chunk_len: int) -> np.ndarray:
+    if hasattr(action, "detach"):
+        action_np = action.detach().float().cpu().numpy()
+    else:
+        action_np = np.asarray(action, dtype=np.float32)
+    action_np = np.asarray(action_np, dtype=np.float32)
+    expected_size = int(n_envs) * int(chunk_len) * int(action_dim)
+    if action_np.size != expected_size:
+        raise RuntimeError(
+            f"Policy action chunk dim mismatch: expected batch ({n_envs}, {chunk_len}, {action_dim}) "
+            f"with {expected_size} values, got shape {tuple(action_np.shape)} and size {action_np.size}. "
+            "Refusing silent pad/truncate."
+        )
+    return np.clip(action_np.reshape(int(n_envs), int(chunk_len), int(action_dim)), -1.0, 1.0).astype(
+        np.float32,
+        copy=False,
+    )
+
+
 def concatenate_proc_rows(proc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not proc_rows:
         raise ValueError("proc_rows must be non-empty")
@@ -202,10 +282,132 @@ def concatenate_proc_rows(proc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def select_proc_rows(proc: dict[str, Any], rows: list[int], *, batch_size: int) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("rows must be non-empty")
+    out: dict[str, Any] = {}
+    for key, value in proc.items():
+        if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = value[rows]
+        elif isinstance(value, np.ndarray) and value.ndim > 0 and int(value.shape[0]) == int(batch_size):
+            out[key] = value[rows]
+        elif isinstance(value, (list, tuple)) and len(value) == int(batch_size):
+            out[key] = [value[int(row)] for row in rows]
+        else:
+            out[key] = value
+    return out
+
+
 def _reset_policy(policy: Any) -> None:
     reset = getattr(policy, "reset", None)
     if callable(reset):
         reset()
+
+
+def _sync_cuda_for_timing(policy: Any, timings: TimingAccumulator | None) -> None:
+    if timings is not None and not timings.cuda_sync_requested:
+        return
+    if not torch.cuda.is_available():
+        return
+    device = getattr(policy, "device", None)
+    try:
+        torch.cuda.synchronize(device=device)
+    except Exception:
+        torch.cuda.synchronize()
+    if timings is not None:
+        timings.cuda_synchronized_forward_timing = True
+
+
+def _timed_sample_actions(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    timings: TimingAccumulator | None,
+) -> tuple[torch.Tensor, int]:
+    prepare_t0 = perf_counter()
+    batch = policy._prepare_batch(proc)
+    images, img_masks = policy.prepare_images(batch)
+    state = policy.prepare_state(batch)
+    lang_tokens = batch["observation.language.tokens"]
+    lang_masks = batch["observation.language.attention_mask"]
+    if timings is not None:
+        timings.add("policy_prepare_seconds", perf_counter() - prepare_t0)
+
+    _sync_cuda_for_timing(policy, timings)
+    forward_t0 = perf_counter()
+    actions = policy.model.sample_actions(
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+    )
+    _sync_cuda_for_timing(policy, timings)
+    if timings is not None:
+        timings.add("policy_forward_seconds", perf_counter() - forward_t0)
+        timings.incr("n_policy_calls")
+
+    if not torch.is_tensor(actions):
+        raise RuntimeError("SmolVLA sample_actions must return a tensor during vector eval")
+    return actions, int(policy.config.action_feature.shape[0])
+
+
+def select_eval_action_queue_free_timed(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    timings: TimingAccumulator | None,
+) -> torch.Tensor:
+    """Return first eval action without using SmolVLA's cross-step action queue."""
+
+    if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
+        getattr(policy, "model", None), "sample_actions"
+    ):
+        actions, action_dim = _timed_sample_actions(policy, proc, timings=timings)
+        return actions[:, 0, :action_dim]
+
+    if timings is not None:
+        timings.incr("n_policy_calls")
+    return policy.select_action(proc)
+
+
+def select_eval_action_queue_free(policy: Any, proc: dict[str, Any]) -> torch.Tensor:
+    """Return first eval action without using SmolVLA's cross-step action queue."""
+
+    return select_eval_action_queue_free_timed(policy, proc, timings=None)
+
+
+def select_eval_action_chunk_queue_free_timed(
+    policy: Any,
+    proc: dict[str, Any],
+    *,
+    chunk_len: int,
+    timings: TimingAccumulator | None,
+) -> torch.Tensor:
+    """Return an eval action chunk without using SmolVLA's cross-step action queue."""
+
+    if int(chunk_len) < 1:
+        raise ValueError("chunk_len must be >= 1")
+    if all(hasattr(policy, name) for name in ("_prepare_batch", "prepare_images", "prepare_state")) and hasattr(
+        getattr(policy, "model", None), "sample_actions"
+    ):
+        actions, action_dim = _timed_sample_actions(policy, proc, timings=timings)
+        actions = actions[:, :, :action_dim] if actions.ndim == 3 else actions.reshape(actions.shape[0], -1, action_dim)
+        if int(actions.shape[1]) < int(chunk_len):
+            raise RuntimeError(f"SmolVLA returned {int(actions.shape[1])} actions, requested chunk_len={int(chunk_len)}")
+        return actions[:, : int(chunk_len), :]
+
+    first = select_eval_action_queue_free(policy, proc)
+    if int(chunk_len) != 1:
+        raise RuntimeError("Chunked baseline eval requires SmolVLA model.sample_actions when chunk_len > 1")
+    return first.unsqueeze(1)
+
+
+def select_eval_action_chunk_queue_free(policy: Any, proc: dict[str, Any], *, chunk_len: int) -> torch.Tensor:
+    """Return an eval action chunk without using SmolVLA's cross-step action queue."""
+
+    return select_eval_action_chunk_queue_free_timed(policy, proc, chunk_len=chunk_len, timings=None)
 
 
 def _resolve_action_dim(task: str) -> int:
@@ -230,9 +432,12 @@ def evaluate_loaded_policy_vectorized(
     n_envs: int,
     rollout_execution: str,
     max_steps: int,
+    chunk_len: int = 1,
 ) -> dict[str, Any]:
-    if rollout_execution != "vector_sync":
-        raise ValueError("manual-pool eval currently supports rollout_execution='vector_sync' only")
+    if rollout_execution not in ("vector_sync", "vector_async"):
+        raise ValueError("vector eval supports rollout_execution='vector_sync' or 'vector_async'")
+    if int(chunk_len) < 1:
+        raise ValueError("chunk_len must be >= 1")
 
     from smolvla_grpo.lerobot_metaworld_adapter import (
         OfficialLeRobotMetaWorldGRPORollout,
@@ -245,10 +450,14 @@ def evaluate_loaded_policy_vectorized(
 
     for wave in waves:
         wave_n = len(wave)
-        envs = [OfficialLeRobotMetaWorldGRPORollout(task=task, n_envs=1) for _ in range(wave_n)]
+        env = OfficialLeRobotMetaWorldGRPORollout(
+            task=task,
+            n_envs=wave_n,
+            use_async_envs=str(rollout_execution) == "vector_async",
+        )
         try:
-            resolved_steps = resolve_lerobot_horizon(envs[0], max_steps)
-            obs_by_row = [env.reset(seed) for env, (_ep, seed) in zip(envs, wave, strict=True)]
+            resolved_steps = resolve_lerobot_horizon(env, max_steps)
+            obs = env.reset_many([seed for _ep, seed in wave])
             _reset_policy(bundle.policy)
             active = np.ones((wave_n,), dtype=np.bool_)
             actions: list[list[list[float]]] = [[] for _ in range(wave_n)]
@@ -257,27 +466,60 @@ def evaluate_loaded_policy_vectorized(
             terminated = [False for _ in range(wave_n)]
             truncated = [False for _ in range(wave_n)]
 
-            for _step in range(int(resolved_steps)):
+            step_count = 0
+            while step_count < int(resolved_steps):
                 if not bool(np.any(active)):
                     break
                 active_rows = [idx for idx in range(wave_n) if bool(active[idx])]
-                proc_rows = [envs[idx].build_proc(obs_by_row[idx], bundle=bundle) for idx in active_rows]
-                proc = concatenate_proc_rows(proc_rows)
+                proc = select_proc_rows(env.build_proc(obs, bundle=bundle), active_rows, batch_size=wave_n)
+                effective_chunk = min(int(chunk_len), int(resolved_steps) - int(step_count))
                 with torch.inference_mode():
-                    action = bundle.policy.select_action(proc)
-                    post = bundle.postprocessor(action)
-                exec_action_np = coerce_exec_action_batch(post, action_dim=action_dim, n_envs=len(active_rows))
+                    if int(chunk_len) == 1:
+                        action = select_eval_action_queue_free(bundle.policy, proc)
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_batch(
+                            post,
+                            action_dim=action_dim,
+                            n_envs=len(active_rows),
+                        )[:, None, :]
+                    else:
+                        action = select_eval_action_chunk_queue_free(
+                            bundle.policy,
+                            proc,
+                            chunk_len=effective_chunk,
+                        )
+                        post = bundle.postprocessor(action)
+                        exec_action_np = coerce_exec_action_chunk_batch(
+                            post,
+                            action_dim=action_dim,
+                            n_envs=len(active_rows),
+                            chunk_len=effective_chunk,
+                        )
 
-                for batch_row, row in enumerate(active_rows):
-                    step = envs[row].step(exec_action_np[batch_row : batch_row + 1])
-                    obs_by_row[row] = step.observation
-                    actions[row].append(exec_action_np[batch_row].reshape(-1).tolist())
-                    rewards[row].append(float(step.reward))
-                    successes[row].append(bool(step.success))
-                    if step.success or step.terminated or step.truncated:
-                        active[row] = False
-                        terminated[row] = bool(step.terminated)
-                        truncated[row] = bool(step.truncated)
+                for chunk_step in range(effective_chunk):
+                    if not bool(np.any(active)):
+                        break
+                    active_before_step = active.copy()
+                    action_matrix = np.zeros((wave_n, int(env.action_dim)), dtype=np.float32)
+                    for batch_row, row in enumerate(active_rows):
+                        if not bool(active_before_step[row]):
+                            continue
+                        action_matrix[row] = exec_action_np[batch_row, chunk_step]
+                    step = env.step_batch(action_matrix)
+                    obs = step.observation
+                    for batch_row, row in enumerate(active_rows):
+                        if not bool(active_before_step[row]):
+                            continue
+                        actions[row].append(exec_action_np[batch_row, chunk_step].reshape(-1).tolist())
+                        rewards[row].append(float(step.reward[row]))
+                        successes[row].append(bool(step.success[row]))
+                        if step.success[row] or step.terminated[row] or step.truncated[row]:
+                            active[row] = False
+                            terminated[row] = bool(step.terminated[row])
+                            truncated[row] = bool(step.truncated[row])
+                    step_count += 1
+                    if step_count >= int(resolved_steps):
+                        break
 
             for row, (episode_index, reset_seed) in enumerate(wave):
                 all_results.append(
@@ -293,10 +535,9 @@ def evaluate_loaded_policy_vectorized(
                     )
                 )
         finally:
-            for env in envs:
-                env.close()
+            env.close()
 
-    return write_eval_artifacts(
+    summary = write_eval_artifacts(
         base_checkpoint=base_checkpoint,
         grpo_checkpoint=grpo_checkpoint,
         output_dir=output_dir,
@@ -305,4 +546,10 @@ def evaluate_loaded_policy_vectorized(
         eval_seed_start=eval_seed_start,
         results=all_results,
     )
+    summary["n_envs"] = int(n_envs)
+    summary["max_steps"] = int(max_steps)
+    summary["chunk_len"] = int(chunk_len)
+    summary["rollout_execution"] = str(rollout_execution)
+    (output_dir / "eval_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
 

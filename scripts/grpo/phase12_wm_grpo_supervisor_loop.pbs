@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#PBS -N p12wm-supervise
+#PBS -l select=1:ncpus=1:mem=4gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_wm_grpo_supervisor_loop.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+JOB_LOG="logs/pbs/grpo/phase12_wm_grpo_supervisor_loop.${PBS_JOBID:-local}.$(date -u +%Y%m%dT%H%M%SZ).log"
+exec >> "${JOB_LOG}" 2>&1
+
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+RUN_DIR="${PHASE12_RUN_DIR:-${PROJECT_ROOT}/artifacts/phase12_wm_g8_u20_strict_parity_20260602}"
+POLL_SECONDS="${PHASE12_SUPERVISOR_POLL_SECONDS:-300}"
+
+echo "[phase12-supervisor] run=${RUN_DIR} poll=${POLL_SECONDS} job=${PBS_JOBID:-local}"
+"${PYTHON_BIN}" scripts/grpo/supervise_phase12_wm_grpo_overnight.py \
+  --run-dir "${RUN_DIR}" \
+  --auto-resume \
+  --loop \
+  --poll-seconds "${POLL_SECONDS}"

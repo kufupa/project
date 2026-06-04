@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#PBS -N msm_probe
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_probe.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_DATA_PYTHON}"
+
+export MSM_PROBE_TRAJ="${MSM_PROBE_TRAJ:-4}"
+export MSM_PROBE_RECORD_DIR="${MSM_PROBE_RECORD_DIR:-${MSM_RAW_ROOT}/probe}"
+export MSM_PROBE_DATA_DIR="${MSM_PROBE_RECORD_DIR}/${MSM_ENV_ID}/${MSM_PROBE_TRAJ}/data"
+
+log="$(msm_stage_log data_probe)"
+(
+  echo "[msm-probe] env=${MSM_ENV_ID} traj=${MSM_PROBE_TRAJ} record_dir=${MSM_PROBE_RECORD_DIR}"
+  cd "${RL4VLA_ROOT}/ManiSkill"
+  "${MSM_DATA_PYTHON}" -m mani_skill.examples.motionplanning.widowx.collect_simpler \
+    -e "${MSM_ENV_ID}" \
+    --save_data \
+    --num_procs 1 \
+    --num_traj "${MSM_PROBE_TRAJ}" \
+    --record_dir "${MSM_PROBE_RECORD_DIR}" \
+    --seed 100 \
+    --sim_backend cpu \
+    --obs_mode rgb+segmentation \
+    --render_mode rgb_array \
+    --shader default
+  "${MSM_DATA_PYTHON}" "${MSM_SCRIPT_ROOT}/inspect_npz.py" \
+    --root "${MSM_PROBE_DATA_DIR}" \
+    --min-episodes "${MSM_PROBE_TRAJ}" \
+    --manifest "${MSM_RUN_ROOT}/manifests/data_probe.json"
+  echo "MSM_DATA_PROBE_DONE data_dir=${MSM_PROBE_DATA_DIR}"
+) 2>&1 | tee "${log}"

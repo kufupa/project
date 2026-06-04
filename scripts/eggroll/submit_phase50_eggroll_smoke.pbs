@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# PBS (CX3): EGGROLL seeded one-GPU smoke for SmolVLA push-v3.
+# Submit from repo root:
+#   cd /rds/general/user/aa6622/home/project && /opt/pbs/bin/qsub scripts/eggroll/submit_phase50_eggroll_smoke.pbs
+#PBS -N p50eggseedsmk
+#PBS -l select=1:ncpus=8:mem=48gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o phase50_eggroll_seeded_smoke_pbs.out
+
+set -euo pipefail
+
+if [[ -f /etc/profile.d/modules.sh ]]; then
+  # shellcheck source=/dev/null
+  . /etc/profile.d/modules.sh
+fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+_PROJECT_FALLBACK="/vol/bitbucket/aa6622/project"
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+elif [[ -n "${PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PROJECT_ROOT}" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+
+_COMMON="${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+if [[ ! -f "${_COMMON}" ]]; then
+  _COMMON="${_PROJECT_FALLBACK}/scripts/slurm/common_env.sh"
+fi
+if [[ ! -f "${_COMMON}" ]]; then
+  echo "error: cannot find scripts/slurm/common_env.sh" >&2
+  exit 2
+fi
+# shellcheck source=../slurm/common_env.sh
+source "${_COMMON}"
+
+slurm_resolve_project_root "scripts/eggroll/train_smolvla_eggroll.py"
+cd "${PROJECT_ROOT}"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase50-eggroll-seeded-smoke"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+if [[ -n "${EGGROLL_PYTHON:-}" && -x "${EGGROLL_PYTHON}" ]]; then
+  :
+else
+  EGGROLL_PYTHON=""
+  for _py in \
+    "${HOME}/.envs/lerobot_mw_py312/bin/python" \
+    "${HOME}/.envs/lerobot_mw_py310/bin/python" \
+    "/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python" \
+    "/rds/general/user/aa6622/home/.envs/lerobot_mw_py310/bin/python" \
+    "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python" \
+    "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python"
+  do
+    if [[ -n "${_py}" && -x "${_py}" ]]; then
+      EGGROLL_PYTHON="${_py}"
+      break
+    fi
+  done
+fi
+if [[ -z "${EGGROLL_PYTHON:-}" || ! -x "${EGGROLL_PYTHON}" ]]; then
+  echo "error: no usable EGGROLL_PYTHON" >&2
+  exit 2
+fi
+
+CHECKPOINT="${PHASE50_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+TASK="${PHASE50_TASK:-push-v3}"
+POPULATION_SIZE="${PHASE50_POPULATION_SIZE:-4}"
+POPULATION_BATCH_SIZE="${PHASE50_POPULATION_BATCH_SIZE:-4}"
+RANK="${PHASE50_RANK:-1}"
+SIGMA="${PHASE50_SIGMA:-0.005}"
+ALPHA="${PHASE50_ALPHA:-0.01}"
+NUM_ITERATIONS="${PHASE50_NUM_ITERATIONS:-1}"
+MAX_STEPS="${PHASE50_MAX_STEPS:-5}"
+ACTION_CHUNK_SIZE="${PHASE50_ACTION_CHUNK_SIZE:-5}"
+ROLLOUT_EXECUTION="${PHASE50_ROLLOUT_EXECUTION:-vector_async}"
+OUT="${PHASE50_OUT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_seeded_smoke/${TASK}/pop${POPULATION_SIZE}_b${POPULATION_BATCH_SIZE}_r${RANK}}"
+
+echo "[eggroll-seeded-smoke] reset_mode=${SMOLVLA_METAWORLD_RESET_MODE} python=${EGGROLL_PYTHON}"
+echo "[eggroll-seeded-smoke] action_chunk_size=${ACTION_CHUNK_SIZE} rollout_execution=${ROLLOUT_EXECUTION} out=${OUT}"
+
+"${EGGROLL_PYTHON}" scripts/eggroll/train_smolvla_eggroll.py \
+  --checkpoint "${CHECKPOINT}" \
+  --output-dir "${OUT}" \
+  --task "${TASK}" \
+  --population-size "${POPULATION_SIZE}" \
+  --population-batch-size "${POPULATION_BATCH_SIZE}" \
+  --rank "${RANK}" \
+  --sigma "${SIGMA}" \
+  --alpha "${ALPHA}" \
+  --num-iterations "${NUM_ITERATIONS}" \
+  --max-steps "${MAX_STEPS}" \
+  --action-chunk-size "${ACTION_CHUNK_SIZE}" \
+  --rollout-execution "${ROLLOUT_EXECUTION}" \
+  --save-every 1 \
+  --video-every 1 \
+  --write-oracle-video
+
+test -f "${OUT}/train_manifest.json"
+test -f "${OUT}/progress.jsonl"
+test -f "${OUT}/timings.jsonl"
+test -f "${OUT}/checkpoints/latest.pt"
+test -f "${OUT}/checkpoints/update_0001.pt"
+test -f "${OUT}/smoke_manifest.json"
+
+echo "PHASE50_EGGROLL_SEEDED_SMOKE_DONE out=${OUT}"

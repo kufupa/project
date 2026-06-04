@@ -55,6 +55,8 @@ echo "[flow-sde-smoke] checkpoint=${CHECKPOINT} out=${OUT}"
   --min-log-std -4.0 \
   --action-transform no_tanh \
   --logprob-mode flow_sde \
+  --rollout-unit chunk \
+  --rollout-chunk-len 5 \
   --flow-sde-noise-level 0.5 \
   --flow-sde-trace-step 0 \
   --run-label flow_sde_smoke \

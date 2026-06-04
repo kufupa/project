@@ -45,7 +45,7 @@ slurm_export_hf_torch_cache "phase11_eval_sweep_1k"
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python}"
+GRPO_PYTHON="${GRPO_PYTHON:-/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python}"
 if [[ ! -x "${GRPO_PYTHON}" ]]; then
   echo "error: GRPO_PYTHON not executable: ${GRPO_PYTHON}" >&2
   exit 2
@@ -55,8 +55,8 @@ fi
 import sys
 import lerobot.policies.smolvla.modeling_smolvla as m
 
-assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/")
-assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/" in m.__file__
+assert sys.executable.startswith("/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/")
+assert "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/" in m.__file__
 PY
 
 ARTIFACT_ROOT="${PHASE11_ARTIFACT_ROOT:-/vol/bitbucket/aa6622/project/artifacts/phase11_env_on_policy_grpo}"

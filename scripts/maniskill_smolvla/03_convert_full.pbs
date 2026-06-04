@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#PBS -N msm_convert
+#PBS -q v1_small24
+#PBS -l select=1:ncpus=16:mem=128gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_convert.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+# shellcheck source=common.sh
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_TRAIN_PYTHON}"
+
+export MSM_FULL_TRAJ="${MSM_FULL_TRAJ:-16400}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
+export MSM_FULL_DATA_DIR="${MSM_FULL_DATA_DIR:-${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_FULL_TRAJ}/data}"
+export MSM_LEROBOT_DATASET="${MSM_LEROBOT_DATASET:-${MSM_LEROBOT_ROOT}/25main}"
+
+log="$(msm_stage_log convert_full)"
+(
+  "${MSM_TRAIN_PYTHON}" "${MSM_SCRIPT_ROOT}/convert_npz_to_lerobot.py" \
+    --input "${MSM_FULL_DATA_DIR}" \
+    --output "${MSM_LEROBOT_DATASET}" \
+    --repo-id "${MSM_REPO_ID}" \
+    --fps "${MSM_FPS}" \
+    --min-episodes 16384 \
+    --state-gripper-mode previous-action \
+    --initial-gripper 1.0 \
+    --dedupe-decoded-signatures \
+    --append-completion-frames 0 \
+    --manifest "${MSM_RUN_ROOT}/manifests/convert_full.json" \
+    --no-filter-small-actions \
+    --overwrite
+  echo "MSM_CONVERT_FULL_DONE dataset=${MSM_LEROBOT_DATASET}"
+) 2>&1 | tee "${log}"

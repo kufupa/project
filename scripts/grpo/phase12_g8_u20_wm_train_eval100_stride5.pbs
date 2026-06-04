@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#PBS -N p12wm-g8u20
+#PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=10:00:00
+#PBS -q v1_gpu72
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_g8_u20_wm_train_eval100_stride5.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+JOB_LOG="logs/pbs/grpo/phase12_g8_u20_wm_train_eval100_stride5.${PBS_JOBID:-local}.${RUN_STAMP}.log"
+exec >> "${JOB_LOG}" 2>&1
+
+export PHASE12_RUN_DIR="${PHASE12_RUN_DIR:-${PROJECT_ROOT}/artifacts/phase12_wm_g8_u20_strict_parity_20260602}"
+export PHASE12_START_UPDATE="${PHASE12_START_UPDATE:-0}"
+export PHASE12_NUM_UPDATES="${PHASE12_NUM_UPDATES:-20}"
+export PHASE12_SAVE_EVERY="${PHASE12_SAVE_EVERY:-5}"
+export PHASE12_BATCH_SIZE="${PHASE12_BATCH_SIZE:-1}"
+export PHASE12_GROUP_SIZE="${PHASE12_GROUP_SIZE:-8}"
+export PHASE12_CHUNK_LEN="${PHASE12_CHUNK_LEN:-5}"
+export PHASE12_MAX_STEPS="${PHASE12_MAX_STEPS:-120}"
+export PHASE12_TRAIN_MODE="${PHASE12_TRAIN_MODE:-wm_only}"
+export PHASE12_ACTION_PROFILE="${PHASE12_ACTION_PROFILE:-bounded_executed}"
+export PHASE12_SEED_BASE="${PHASE12_SEED_BASE:-2000}"
+export PHASE12_LR="${PHASE12_LR:-1e-5}"
+export PHASE12_CLIP_EPS="${PHASE12_CLIP_EPS:-0.2}"
+export PHASE12_EULER_NOISE="${PHASE12_EULER_NOISE:-0.2}"
+export PHASE12_INIT_LOG_STD="${PHASE12_INIT_LOG_STD:--2.0}"
+export PHASE12_WM_SCORE_MODE="${PHASE12_WM_SCORE_MODE:-batched}"
+export PHASE12_WM_SCORE_BATCH_SIZE="${PHASE12_WM_SCORE_BATCH_SIZE:-8}"
+
+echo "[phase12-g8-u20] train start job=${PBS_JOBID:-local} run=${PHASE12_RUN_DIR}"
+bash scripts/grpo/phase12_train_chunk_10u.pbs
+
+export PHASE12_MIN_UPDATE="${PHASE12_EVAL_MIN_UPDATE:-5}"
+export PHASE12_MAX_UPDATE="${PHASE12_EVAL_MAX_UPDATE:-20}"
+export PHASE12_STRIDE="${PHASE12_EVAL_STRIDE:-5}"
+export PHASE12_EVAL_EPISODES="${PHASE12_EVAL_EPISODES:-100}"
+export PHASE12_EVAL_N_ENVS="${PHASE12_EVAL_N_ENVS:-25}"
+export PHASE12_EVAL_CHUNK_LEN="${PHASE12_EVAL_CHUNK_LEN:-5}"
+export PHASE12_EVAL_MAX_STEPS="${PHASE12_EVAL_MAX_STEPS:-120}"
+export PHASE12_SWEEP_NAME="${PHASE12_SWEEP_NAME:-eval100_u0005_0020_stride5_nenv25_async}"
+
+echo "[phase12-g8-u20] eval100 start run=${PHASE12_RUN_DIR} sweep=${PHASE12_SWEEP_NAME}"
+bash scripts/grpo/phase12_eval_last5_25ep.pbs
+echo "PHASE12_G8_U20_WM_TRAIN_EVAL100_DONE run_dir=${PHASE12_RUN_DIR} sweep=${PHASE12_SWEEP_NAME}"
