@@ -38,22 +38,88 @@ def main() -> int:
 
     p = argparse.ArgumentParser()
     p.add_argument("--base-checkpoint", type=str, required=True, help="HF checkpoint dir used during GRPO")
-    p.add_argument("--grpo-checkpoint", type=Path, required=True, help="Path to update_XXXX.pt")
+    p.add_argument(
+        "--grpo-checkpoint",
+        type=Path,
+        default=None,
+        help="Path to update_XXXX.pt (not required with --baseline-only)",
+    )
     p.add_argument("--task", type=str, default="push-v3")
     p.add_argument("--eval-seed-start", type=int, default=1000)
     p.add_argument("--episodes", type=int, default=20)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--n-envs", type=int, default=1, help=">1 uses phase12 vector pool (official_lerobot only)")
+    p.add_argument(
+        "--rollout-execution",
+        choices=("serial", "vector_sync"),
+        default="serial",
+    )
     p.add_argument("--env-backend", choices=("custom", "official_lerobot"), default="custom")
     p.add_argument("--save-official-eval-info", action="store_true")
+    p.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Evaluate base checkpoint only (ignore --grpo-checkpoint weights).",
+    )
     args = p.parse_args()
 
-    max_steps = _resolve_max_steps() if args.max_steps is None else int(args.max_steps)
+    if args.max_steps is None:
+        max_steps = 0 if args.env_backend == "official_lerobot" else _resolve_max_steps()
+    else:
+        max_steps = int(args.max_steps)
     out = args.output_dir.expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    ck = load_grpo_checkpoint(args.grpo_checkpoint.expanduser().resolve())
-    state = ck["policy_state_dict"]
+    if args.baseline_only and args.grpo_checkpoint is not None:
+        pass
+    elif not args.baseline_only and args.grpo_checkpoint is None:
+        raise SystemExit("--grpo-checkpoint is required unless --baseline-only is set")
+
+    if int(args.n_envs) > 1:
+        if args.env_backend != "official_lerobot":
+            raise SystemExit("--n-envs > 1 requires --env-backend official_lerobot")
+        if args.rollout_execution != "vector_sync":
+            raise SystemExit("--n-envs > 1 requires --rollout-execution vector_sync")
+        from smolvla_grpo.phase11_rollout import load_bundle_for_grpo
+        from smolvla_grpo.phase12_vector_eval import (
+            evaluate_loaded_policy_vectorized,
+            load_policy_checkpoint_into_bundle,
+        )
+
+        bundle, _action_dim = load_bundle_for_grpo(
+            args.base_checkpoint,
+            task=args.task,
+            env_backend="official_lerobot",
+            n_action_steps=1,
+        )
+        grpo_ckpt = None if args.baseline_only else args.grpo_checkpoint.expanduser().resolve()
+        if grpo_ckpt is not None:
+            load_policy_checkpoint_into_bundle(bundle, grpo_ckpt)
+        else:
+            reset = getattr(bundle.policy, "reset", None)
+            if callable(reset):
+                reset()
+            bundle.policy.eval()
+        summary = evaluate_loaded_policy_vectorized(
+            bundle=bundle,
+            base_checkpoint=args.base_checkpoint,
+            grpo_checkpoint=grpo_ckpt,
+            output_dir=out,
+            task=args.task,
+            episodes=int(args.episodes),
+            eval_seed_start=int(args.eval_seed_start),
+            n_envs=int(args.n_envs),
+            rollout_execution=args.rollout_execution,
+            max_steps=max_steps,
+        )
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    state = None
+    if not args.baseline_only:
+        ck = load_grpo_checkpoint(args.grpo_checkpoint.expanduser().resolve())
+        state = ck["policy_state_dict"]
 
     sum_rewards: list[float] = []
     max_rewards: list[float] = []
@@ -76,7 +142,8 @@ def main() -> int:
             task=args.task,
             env_backend="official_lerobot",
         )
-        bundle.policy.load_state_dict(state, strict=False)
+        if state is not None:
+            bundle.policy.load_state_dict(state, strict=False)
         bundle.policy.eval()
         env_h = OfficialLeRobotMetaWorldGRPORollout(task=args.task)
         resolved_steps = resolve_lerobot_horizon(env_h, max_steps)
@@ -155,7 +222,8 @@ def main() -> int:
             max_steps=max_steps,
             task_text=None,
         )
-        backend._bundle.policy.load_state_dict(state, strict=False)  # noqa: SLF001
+        if state is not None:
+            backend._bundle.policy.load_state_dict(state, strict=False)  # noqa: SLF001
         backend._bundle.policy.eval()  # noqa: SLF001
 
         for ep in range(args.episodes):
@@ -191,7 +259,7 @@ def main() -> int:
 
     pc = 100.0 * sum(1 for v in success_flags if v) / max(len(success_flags), 1)
     summary = {
-        "grpo_checkpoint": str(args.grpo_checkpoint),
+        "grpo_checkpoint": "baseline" if args.baseline_only else str(args.grpo_checkpoint),
         "base_checkpoint": args.base_checkpoint,
         "task": args.task,
         "env_backend": args.env_backend,
