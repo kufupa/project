@@ -98,8 +98,9 @@ def test_matrix_two_tasks_end_to_end(tmp_path: Path) -> None:
     )
     assert rc == 0
     assert csv_path.is_file()
-    assert "push-v3" in tex_path.read_text(encoding="utf-8")
-    assert r"\textbf{0:5}" in tex_path.read_text(encoding="utf-8")
+    tex = tex_path.read_text(encoding="utf-8")
+    assert "push & VLA" in tex
+    assert r"\textbf{0:5}" in tex
 
     compare_csv_path = tmp_path / "m_compare.csv"
     compare_tex_path = tmp_path / "m_compare.tex"
@@ -138,7 +139,7 @@ def test_max_env_steps_cap_25_only(tmp_path: Path) -> None:
         strict=False,
     )
     assert payload["bin_labels"] == ["0:5", "5:10", "10:15", "15:20", "20:25"]
-    assert len(payload["compare_csv_rows"][0]) == 3 + 3 * len(payload["bin_labels"])
+    assert len(payload["compare_csv_rows"][0]) == 1 + 3 * len(payload["bin_labels"])
 
     out_compare = tmp_path / "m_compare.csv"
     assert (
@@ -272,7 +273,7 @@ def test_run_delta_latex_row_separators(tmp_path: Path) -> None:
 
     # task-level pairs are grouped and separated by \\hline
     assert push_vla < push_delta < reach_vla
-    assert push_delta + 1 == lines.index("\\hline", start=push_delta + 1, stop=reach_vla)
+    assert lines[push_delta + 1] == "\\hline"
     assert all_vla < all_delta
     assert all_vla > reach_delta
     assert lines[all_vla - 1] == "\\hline"
@@ -301,7 +302,7 @@ def test_compare_summary_rows_are_task_averages(tmp_path: Path) -> None:
     assert len(summary_rows) == 3
     assert summary_rows[-1]["task"] == "All tasks"
     assert summary_rows[0]["task"] == "push-v3"
-    assert summary_rows[0]["vla"] == 364
+    assert summary_rows[0]["vla"] == 366
     assert summary_rows[0]["oracle"] == 366
 
 

@@ -49,6 +49,7 @@ def test_run_sweep_collects_rows_and_topk(tmp_path, monkeypatch) -> None:
         eval_seed_start=1000,
         top_k=1,
         top_k_episodes=50,
+        execution_mode="subprocess",
     )
     assert len(result["rows"]) == 2
     assert result["rows"][0]["update"] == 5
@@ -98,6 +99,7 @@ def test_run_sweep_min_max_filters_checkpoints(tmp_path, monkeypatch) -> None:
         sweep_name="eval_filtered",
         min_update=10,
         max_update=10,
+        execution_mode="subprocess",
     )
     assert len(result["rows"]) == 1
     assert result["rows"][0]["update"] == 10
