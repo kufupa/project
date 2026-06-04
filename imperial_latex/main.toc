@@ -1,0 +1,62 @@
+\contentsline {chapter}{\numberline {1}Introduction}{6}{}%
+\contentsline {section}{\numberline {1.1}Objectives}{6}{}%
+\contentsline {section}{\numberline {1.2}Challenges}{6}{}%
+\contentsline {section}{\numberline {1.3}Contributions}{6}{}%
+\contentsline {chapter}{\numberline {2}Background}{7}{}%
+\contentsline {chapter}{\numberline {3}Methodology and System Architecture}{8}{}%
+\contentsline {section}{\numberline {3.1}System Overview}{8}{}%
+\contentsline {section}{\numberline {3.2}Core Model Formulations}{8}{}%
+\contentsline {subsection}{\numberline {3.2.1}SmolVLA action interface}{8}{}%
+\contentsline {subsection}{\numberline {3.2.2}Environment-reward on-policy GRPO}{8}{}%
+\contentsline {subsection}{\numberline {3.2.3}Direct PPO with sparse success shaping}{9}{}%
+\contentsline {subsection}{\numberline {3.2.4}EGGROLL evolutionary fine-tuning}{9}{}%
+\contentsline {subsection}{\numberline {3.2.5}World-model latent scoring}{9}{}%
+\contentsline {section}{\numberline {3.3}Implementation and Training Details}{10}{}%
+\contentsline {subsection}{\numberline {3.3.1}Compute and job orchestration}{10}{}%
+\contentsline {subsection}{\numberline {3.3.2}Hyperparameter search spaces (completed)}{10}{}%
+\contentsline {subsection}{\numberline {3.3.3}Software modules}{10}{}%
+\contentsline {chapter}{\numberline {4}Experimental Setup and Evaluation}{11}{}%
+\contentsline {section}{\numberline {4.1}Evaluation Hypotheses}{11}{}%
+\contentsline {subsection}{\numberline {4.1.1}Results at a glance}{11}{}%
+\contentsline {section}{\numberline {4.2}Datasets and Baselines}{12}{}%
+\contentsline {section}{\numberline {4.3}Quantitative Metrics}{12}{}%
+\contentsline {section}{\numberline {4.4}Experimental Results and Analysis}{13}{}%
+\contentsline {subsection}{\numberline {4.4.1}MT50 Action-Bounding Audit}{13}{}%
+\contentsline {paragraph}{Source.}{13}{}%
+\contentsline {paragraph}{Experiment setup.}{13}{}%
+\contentsline {paragraph}{Raw split winners.}{15}{}%
+\contentsline {paragraph}{Bounded below 55\%.}{15}{}%
+\contentsline {subsection}{\numberline {4.4.2}Environment-Reward GRPO on \texttt {push-v3} (100-episode confirms)}{16}{}%
+\contentsline {paragraph}{Fixed protocol.}{18}{}%
+\contentsline {paragraph}{Main result.}{18}{}%
+\contentsline {paragraph}{Why the hyperparameters moved.}{18}{}%
+\contentsline {paragraph}{Short sweeps were too noisy.}{18}{}%
+\contentsline {paragraph}{Sources.}{19}{}%
+\contentsline {subsection}{\numberline {4.4.3}Extended GRPO and Direct PPO Sweeps}{19}{}%
+\contentsline {paragraph}{100-episode holdout on grid configs.}{20}{}%
+\contentsline {paragraph}{Direct versus GRPO.}{20}{}%
+\contentsline {subsection}{\numberline {4.4.4}EGGROLL Evolutionary Fine-Tuning}{20}{}%
+\contentsline {paragraph}{Interpretation.}{21}{}%
+\contentsline {subsection}{\numberline {4.4.5}World-Model-Reward GRPO}{21}{}%
+\contentsline {paragraph}{Source.}{21}{}%
+\contentsline {paragraph}{Experiment setup.}{21}{}%
+\contentsline {paragraph}{Interpretation.}{22}{}%
+\contentsline {section}{\numberline {4.5}Technical Error Analysis}{22}{}%
+\contentsline {subsection}{\numberline {4.5.1}Checkpoint collapse and metric variance}{22}{}%
+\contentsline {subsection}{\numberline {4.5.2}25-episode versus 100-episode mismatch}{23}{}%
+\contentsline {subsection}{\numberline {4.5.3}Action-bounding split versus mean-L2 disagreements}{23}{}%
+\contentsline {subsection}{\numberline {4.5.4}Infrastructure and evaluation bugs (fixed)}{23}{}%
+\contentsline {subsection}{\numberline {4.5.5}Out-of-distribution limits}{23}{}%
+\contentsline {chapter}{\numberline {5}Conclusion and Future Work}{24}{}%
+\contentsline {section}{\numberline {5.1}Summary of Contributions}{24}{}%
+\contentsline {section}{\numberline {5.2}Limitations and Practical Constraints}{24}{}%
+\contentsline {section}{\numberline {5.3}Future Research Directions}{24}{}%
+\contentsline {chapter}{\numberline {A}MT50 Action-Bounding Per-Task Details}{26}{}%
+\contentsline {chapter}{\numberline {B}Action-Bounding Decode Strips}{29}{}%
+\contentsline {chapter}{\numberline {C}Supplementary Run Summary}{31}{}%
+\contentsline {subsection}{\numberline {C.0.1}Methods at a glance}{31}{}%
+\contentsline {subsection}{\numberline {C.0.2}Confirmed environment-reward GRPO (100 episodes)}{31}{}%
+\contentsline {subsection}{\numberline {C.0.3}GRPO and Direct PPO tuning runs (25-episode held-out)}{31}{}%
+\contentsline {subsection}{\numberline {C.0.4}EGGROLL runs (held-out seeds 30000+)}{33}{}%
+\contentsline {subsection}{\numberline {C.0.5}World-model-reward GRPO and MT50 audit}{33}{}%
+\contentsline {paragraph}{How to read this appendix.}{33}{}%

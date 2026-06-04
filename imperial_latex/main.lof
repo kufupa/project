@@ -1,0 +1,19 @@
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces Headline held-out \texttt {push-v3} success rates. Asterisks: 25-episode evaluation only (not 100-episode confirmed). Baseline and GRPO group-8 @100ep use seeds 1000--1099.}}{12}{}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces MT50 action-bounding audit: share of latent comparison columns where raw or bounded world-model rollouts were closer to the real latent (combined visual--proprio L2).}}{15}{}%
+\contentsline {figure}{\numberline {4.3}{\ignorespaces Unfine-tuned SmolVLA episode success on MT50, grouped by manual difficulty (25 episodes per task, separate baseline run). This measures task success, not WM latent preference.}}{15}{}%
+\contentsline {figure}{\numberline {4.4}{\ignorespaces Same training lineage can look much stronger under 25-episode than 100-episode held-out evaluation (group-8 GRPO at update 10).}}{17}{}%
+\contentsline {figure}{\numberline {4.5}{\ignorespaces Group-8 GRPO: 25-episode held-out success vs update, showing late-training collapse after an early peak.}}{17}{}%
+\contentsline {figure}{\numberline {4.6}{\ignorespaces Group-16 environment-reward GRPO (25-episode held-out): full continuation through update 170, including the 52\% peak at $u{=}74$ and collapse to 20\% at $u{=}170$.}}{19}{}%
+\contentsline {figure}{\numberline {4.7}{\ignorespaces Direct sparse PPO: selected 25-episode checkpoints from the stage3b continuation (not every update was evaluated). Peak 40\% at $u{=}120$.}}{20}{}%
+\contentsline {figure}{\numberline {4.8}{\ignorespaces EGGROLL learning curve (to be filled from archived \texttt {eval\_sweep\_summary.json} when synced from cluster storage).}}{21}{}%
+\contentsline {figure}{\numberline {4.9}{\ignorespaces World-model-reward GRPO (official action profile, group 8): held-out success vs update. Peak 36\% at $u{=}6$, then collapse to 0\% from $u{=}22$ onward.}}{22}{}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {B.1}{\ignorespaces Action-bounding decode strip for \texttt {drawer-open-v3} (episode seed 1000, segment 1). SmolVLA sampled a 50-step action chunk; the real environment was stepped with the raw postprocessed actions. From the same root observation, the JEPA world model was unrolled with raw actions (middle row) and with clipped/bounded actions (bottom row). The top row shows aligned real camera frames. Per-column labels report combined visual-plus-proprio L2 distance to the real latent; lower L2 means the world model prediction is closer to what actually happened.}}{29}{}%
+\contentsline {figure}{\numberline {B.2}{\ignorespaces Action-bounding decode strip for \texttt {drawer-close-v3} (episode seed 1001, segment 1). Same protocol as Figure~\ref {fig:appendix-action-audit-drawer-open-seg1}: real rollout frames (top), JEPA decode from raw SmolVLA actions (middle), and JEPA decode from bounded actions (bottom), with per-column combined visual-plus-proprio L2 to the real latent.}}{30}{}%
+\addvspace {10\p@ }

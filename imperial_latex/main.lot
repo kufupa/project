@@ -1,0 +1,28 @@
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {3.1}{\ignorespaces Primary hyperparameter grids (completed segments).}}{10}{}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {4.1}{\ignorespaces Hypothesis verdicts (progress draft).}}{12}{}%
+\contentsline {table}{\numberline {4.2}{\ignorespaces MT50 action-bounding audit hyperparameters.}}{14}{}%
+\contentsline {table}{\numberline {4.3}{\ignorespaces Overall MT50 action-bounding audit summary.}}{14}{}%
+\contentsline {table}{\numberline {4.4}{\ignorespaces Success by task difficulty.}}{15}{}%
+\contentsline {table}{\numberline {4.5}{\ignorespaces Largest bounded-favoring split margins.}}{16}{}%
+\contentsline {table}{\numberline {4.6}{\ignorespaces Largest raw-favoring split margins.}}{16}{}%
+\contentsline {table}{\numberline {4.7}{\ignorespaces Split winner versus mean-L2 winner disagreements.}}{16}{}%
+\contentsline {table}{\numberline {4.8}{\ignorespaces Common environment-reward GRPO protocol for completed runs.}}{18}{}%
+\contentsline {table}{\numberline {4.9}{\ignorespaces Completed environment-reward GRPO checkpoints on the 100-episode held-out evaluation. Evaluation uses seeds 1000--1099 with \texttt {n\_envs=25}.}}{18}{}%
+\contentsline {table}{\numberline {4.10}{\ignorespaces Top completed 25-episode results.}}{20}{}%
+\contentsline {table}{\numberline {4.11}{\ignorespaces EGGROLL headline results (25-ep and 100-ep held-out).}}{21}{}%
+\contentsline {table}{\numberline {4.12}{\ignorespaces World-model-reward GRPO training-time breakdown. Wall = first \texttt {run\_start} to last \texttt {update\_complete}; Active = $\DOTSB \sum@ \slimits@ $ \texttt {update\_seconds}.}}{22}{}%
+\contentsline {table}{\numberline {4.13}{\ignorespaces World-model-reward GRPO Push-v3 success (\%) summary (25 episodes per checkpoint).}}{22}{}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {A.1}{Per-task MT50 action-bounding audit details.}}{27}{}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {C.1}{\ignorespaces Completed experiment families and headline outcomes.}}{31}{}%
+\contentsline {table}{\numberline {C.2}{\ignorespaces Held-out 100-episode confirms for environment-reward GRPO (\texttt {push-v3}, seeds 1000--1099).}}{31}{}%
+\contentsline {table}{\numberline {C.3}{GRPO and Direct PPO run ledger (25-episode held-out unless noted).}}{32}{}%
+\contentsline {table}{\numberline {C.4}{\ignorespaces EGGROLL completed training lines (25-episode and 100-episode held-out).}}{33}{}%
+\contentsline {table}{\numberline {C.5}{\ignorespaces World-model-reward training and MT50 audit summary.}}{33}{}%

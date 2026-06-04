@@ -1,0 +1,121 @@
+\chapter{Methodology and System Architecture}
+
+\section{System Overview}
+\label{sec:system-overview}
+
+The project implements a modular fine-tuning stack around the public SmolVLA Meta-World checkpoint \texttt{jadechoghari/smolvla\_metaworld}. All experiments target Meta-World \texttt{push-v3} unless noted otherwise. The stack has four coupled components:
+\begin{enumerate}
+  \item \textbf{Environment rollouts.} Official LeRobot Meta-World with \texttt{random\_seeded} resets, \texttt{no\_tanh} postprocessing, and fixed action chunking (\texttt{chunk\_len} 5 or 25 depending on phase).
+  \item \textbf{Policy fine-tuning.} Three optimizers on the same backbone: environment-reward GRPO, actor--critic Direct PPO with sparse success shaping, and gradient-free EGGROLL (low-rank evolution on selected linear layers).
+  \item \textbf{World-model audit.} The MT50 action-bounding audit compares raw versus bounded action branches under a frozen JEPA world model on all 50 MT50 tasks without updating the policy.
+  \item \textbf{Evaluation harness.} Vector-async held-out rollouts (\texttt{n\_envs=25}, seeds disjoint from training) with checkpoint strides of 2; 100-episode confirms use seeds 1000--1099 for GRPO and 30000--30099 for EGGROLL.
+\end{enumerate}
+
+Training jobs run on GPU clusters using scheduler-managed CPU and GPU resources. Ephemeral checkpoints live under per-job result trees; selected outputs are copied into the project artifact directory for reproducibility.
+
+\section{Core Model Formulations}
+\label{sec:core-formulations}
+
+\subsection{SmolVLA action interface}
+SmolVLA is a vision--language--action model that, at each active timestep, samples an open-loop chunk $\mathbf{a}_{i,c} \in \mathbb{R}^{5 \times d_a}$ from observation $o_{i,c}$. The environment executes the chunk sequentially until success, termination, or the step cap. Log-probabilities are stored at chunk granularity for policy-gradient methods.
+
+\subsection{Environment-reward on-policy GRPO}
+\label{sec:env-grpo-formulation}
+
+For update $u$, the trainer samples a group of $G$ on-policy trajectories. Trajectory $i$ receives dense return
+\[
+R_i = \sum_{t=0}^{T_i-1} r_{i,t},
+\]
+with group-normalized advantages
+\[
+\hat{A}_i = \frac{R_i - \mu_R}{\sigma_R + \epsilon},
+\qquad
+\mu_R = \frac{1}{G}\sum_{j=1}^{G}R_j.
+\]
+No critic is used. For each stored chunk $c$ in trajectory $i$, define the probability ratio
+\[
+\rho_{i,c}(\theta) =
+\exp\!\left(
+\log \pi_{\theta}(\mathbf{a}_{i,c}\mid o_{i,c})
+- \log \pi_{\theta_{\mathrm{old}}}(\mathbf{a}_{i,c}\mid o_{i,c})
+\right).
+\]
+The implemented loss averages per-trajectory chunk terms with denominator $N_i G$ (not a global chunk pool):
+\[
+\mathcal{L}_{\mathrm{GRPO}}(\theta)
+=
+-\frac{1}{G}\sum_{i=1}^{G}
+\frac{1}{N_i}\sum_{c=1}^{N_i}
+\min\!\left(
+\rho_{i,c}(\theta)\hat{A}_i,\,
+\mathrm{clip}(\rho_{i,c}(\theta), 1-\epsilon_{\mathrm{clip}}, 1+\epsilon_{\mathrm{clip}})\hat{A}_i
+\right).
+\]
+Exploration is controlled by flow-matching noise hyperparameters (\texttt{init\_log\_std}, \texttt{euler\_step\_noise\_std}).
+
+\subsection{Direct PPO with sparse success shaping}
+\label{sec:direct-ppo-formulation}
+
+Direct PPO keeps a value head and optimizes clipped surrogate objectives on the same chunk interface. The dominant recipe uses \texttt{sparse\_success\_delta} plus relative dense reward (\texttt{rel\_reward}), 4--8 parallel training environments, actor learning rate $3\times10^{-7}$ (expanded 8-env setting: $5\times10^{-7}$), value learning rate $10^{-4}$, PPO clip 0.2, and two PPO epochs per environment batch. This path does not use GRPO group baselines; advantages come from GAE on step or chunk rewards depending on the RLinf adapter configuration.
+
+\subsection{EGGROLL evolutionary fine-tuning}
+\label{sec:eggroll-formulation}
+
+EGGROLL is gradient-free fine-tuning of selected \texttt{nn.Linear} layers (default target: \texttt{layers.1.self\_attn.v\_proj}). Each update builds a population of size $P$ with low-rank perturbations. Member $k$ applies
+\[
+W' = W + \sigma \,(A_k B_k^\top),
+\quad \mathrm{rank}(A_k B_k^\top) = r,
+\]
+inside a batched forward so one GPU pass scores multiple members. Fitness $f_k$ is mean dense return (with \texttt{sparse\_success\_delta} + \texttt{rel\_reward}) averaged over repeated reset seeds per member. Shaped scores $\tilde{f}_k$ use rank normalization (zero mean, unit variance across the population). The weight update accumulates
+\[
+\Delta W = \frac{\alpha}{P\sqrt{r}} \sum_{k=1}^{P} \tilde{f}_k \, s_k \, (A_k B_k^\top),
+\]
+with antithetic pairing handled via sign $s_k \in \{\pm 1\}$. Checkpoints store dense per-update deltas \texttt{dense\_update\_*.npy}; evaluation replays cumulative sums through update $u$.
+
+Fair comparison mode (\textbf{CRN}): all population members on a given seed batch share the same MetaWorld reset seed. \textbf{Fixed} mode retrains on seeds 2000--2003 every update; \textbf{per\_update} rotates disjoint seed bands to probe generalization.
+
+\subsection{World-model latent scoring}
+\label{sec:wm-scoring}
+
+World-model-reward GRPO (\texttt{wm\_only}) replaces environment dense reward with world-model progress. From a shared oracle root state, the policy samples $G$ candidate chunks; a frozen JEPA model scores each candidate by combined visual--proprio latent L2 progress (\texttt{goal\_latent\_mode=visual\_proprio}, $\alpha_{\mathrm{proprio}}=0.1$). GRPO then updates the live policy on WM rewards instead of Meta-World dense returns.
+
+The MT50 action-bounding audit is diagnostic only: for each real rollout chunk, the same root latent is rolled forward under raw postprocessed actions and under actions clipped to the environment bounds. Lower combined L2 to the encoded real latent at steps $5,10,\ldots,50$ wins that comparison column.
+
+\section{Implementation and Training Details}
+\label{sec:implementation}
+
+\subsection{Compute and job orchestration}
+GRPO and Direct training use scheduler-managed jobs with 1 GPU, 4--16 CPUs, and walltimes up to several hours per segment. Typical vector training uses \texttt{rollout\_execution=vector\_async}, \texttt{max\_steps=120}, and checkpoint saves every 2 updates. Log-probability recomputation uses micro-batches of 16 where enabled to cap optimizer walltime.
+
+EGGROLL defaults to population $24 \times 4$ env rows ($96$ rollout rows per update), 120 steps, rank-1 perturbations with $\sigma=10^{-4}$, $\alpha=10^{-3}$, and $\sim$90--115 minutes walltime per 50 updates depending on population width.
+
+\subsection{Hyperparameter search spaces (completed)}
+Table~\ref{tab:method-hparam-grid} summarizes the main knobs explored in completed training segments. Held-out evaluation always uses seeds disjoint from training.
+
+\begin{table}[H]
+\centering
+\caption{Primary hyperparameter grids (completed segments).}
+\label{tab:method-hparam-grid}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}l X X@{}}
+\toprule
+Track & Key knobs & Typical best region \\
+\midrule
+Environment-reward GRPO & $G\in\{8,16,32\}$, lr $\in\{2.5,5,10\}\times10^{-6}$, $\epsilon_{\mathrm{clip}}\in\{0.05,0.1,0.2\}$, low-noise variant & $G{=}32$, lr $5{\times}10^{-6}$, clip 0.1, reduced rollout noise \\
+Group-16 GRPO continuation & $G{=}16$, lr $5{\times}10^{-6}$, clip 0.2, chunk 5 & 25-ep peak 52\% @ $u{=}74$; 100-ep confirm pending on long chain \\
+Direct sparse & 4--8 envs, lr $3{\times}10^{-7}$, sparse+rel reward, 2 PPO epochs & 25-ep peak 40\% @ $u{=}120$ (stage3b resume chain) \\
+EGGROLL & $P{=}24$, 4 env/member, rank 1, target \texttt{v\_proj}; expanded settings vary lr/$\sigma$/horizon & 25-ep peaks 44--56\% on small-$N$ sweeps; 100-ep held-out 23--26\% \\
+World-model-reward GRPO & $G\in\{8,16\}$, lr $10^{-5}$ or $5{\times}10^{-6}$, chunk 25, WM reward & Early peaks 28--36\% @25ep then collapse to 0\% \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Software modules}
+Training entry points:
+\begin{itemize}
+  \item environment-reward GRPO training script
+  \item \path{scripts/run_smolvla_metaworld_direct_ppo.py}
+  \item \path{scripts/run_smolvla_metaworld_eggroll.py}
+\end{itemize}
+Evaluation uses GRPO checkpoint sweeps, Direct RLinf eval adapters, and an EGGROLL cumulative-$\Delta$ replay evaluator. Core library code is organized around rollout collection, EGGROLL patching, checkpointing, policy evaluation, and world-model hooks.

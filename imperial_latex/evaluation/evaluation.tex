@@ -1,0 +1,483 @@
+\chapter{Experimental Setup and Evaluation}
+
+\section{Evaluation Hypotheses}
+\label{sec:eval-hypotheses}
+
+The experiments test five hypotheses on the SmolVLA Meta-World stack (Chapter~\ref{sec:system-overview}):
+\begin{enumerate}
+  \item \textbf{H1 (GRPO fine-tuning):} On-policy GRPO with dense Meta-World reward can raise \texttt{push-v3} success above the 21\% SmolVLA baseline on 100 held-out episodes.
+  \item \textbf{H2 (optimizer comparison):} Direct sparse PPO and EGGROLL reach comparable or better 25-episode peaks than GRPO, but may differ on 100-episode generalization.
+  \item \textbf{H3 (action bounding):} Clipping actions to the environment range yields lower JEPA latent error than raw postprocessed actions on most MT50 tasks.
+  \item \textbf{H4 (WM-only training):} World-model latent progress alone can fine-tune \texttt{push-v3} without environment dense reward.
+  \item \textbf{H5 (checkpoint stability):} Mid-training checkpoints outperform final checkpoints on long training runs.
+\end{enumerate}
+
+\subsection{Results at a glance}
+\label{sec:results-glance}
+
+Figure~\ref{fig:headline-bars} summarises the main \texttt{push-v3} numbers discussed below. Stars mark peaks from 25-episode sweeps only; the only 100-episode confirm above baseline is environment-reward GRPO at 33\% (group 8, update 10). The supplementary run ledger in Appendix~\ref{app:supplementary-run-summary} lists all completed training lines.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_headline_bars.pdf}
+\caption{Headline held-out \texttt{push-v3} success rates. Asterisks: 25-episode evaluation only (not 100-episode confirmed). Baseline and GRPO group-8 @100ep use seeds 1000--1099.}
+\label{fig:headline-bars}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Hypothesis verdicts (progress draft).}
+\label{tab:hypothesis-verdicts}
+\small
+\begin{tabular}{@{}p{0.06\linewidth}p{0.34\linewidth}p{0.14\linewidth}p{0.38\linewidth}@{}}
+\toprule
+ID & Claim & Status & Evidence \\
+\midrule
+H1 & GRPO raises success above 21\% baseline & Supported & 33\% @100ep (group 8, $u{=}10$); 30--33\% on other confirmed configs \\
+H2 & Direct / EGGROLL match or beat GRPO peaks & Partial & Higher 25ep peaks (Direct 40\%, EGGROLL 56\%); weaker or unconfirmed @100ep \\
+H3 & Bounded actions lower WM latent error & Supported & Bounded wins 40/50 tasks; 64\% of comparison columns (Figure~\ref{fig:mt57-column-wins}) \\
+H4 & WM-only reward fine-tunes push-v3 & Rejected & Early peaks then collapse to 0\% by $u{\geq}22$ (Figure~\ref{fig:wm-reward-curve}) \\
+H5 & Mid checkpoints beat final on long runs & Supported & Group-16: 52\% @ $u{=}74$ vs 20\% @ $u{=}170$ (Figure~\ref{fig:grpo-g16-curve}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Datasets and Baselines}
+\label{sec:datasets-baselines}
+
+\textbf{Primary RL task.} Meta-World \texttt{push-v3} via the official LeRobot adapter, dense rewards, \texttt{random\_seeded} resets, \texttt{no\_tanh} actions.
+
+\textbf{WM audit suite.} Full MT50 task list, 25 episodes per task, seeds 1000--1024, \texttt{max\_steps=150}, split across three scheduler-managed shards.
+
+\textbf{Baselines.} Unfine-tuned \texttt{jadechoghari/smolvla\_metaworld} evaluated on the same seed protocol (21\% success on 100 episodes for GRPO comparisons). EGGROLL baselines include cumulative $\Delta{=}0$ (no ES updates).
+
+\textbf{Seed discipline.} Training uses bands starting at 2000 (GRPO), 50000+ (Direct), or rotated 2000--10000+ bands (EGGROLL). Held-out evaluation never overlaps training seeds (GRPO/Direct: 1000--1099 @100ep; EGGROLL: 30000--30099 @100ep).
+
+\section{Quantitative Metrics}
+\label{sec:quantitative-metrics}
+
+\textbf{Success rate.} Fraction of episodes with terminal Meta-World success. Reported as \texttt{pc\_success} (GRPO) or \texttt{success\_rate} (Direct/EGGROLL).
+
+\textbf{Dense return.} Sum of per-step dense rewards per episode; used for GRPO advantages and EGGROLL fitness (with optional \texttt{sparse\_success\_delta}).
+
+\textbf{Action-bounding audit columns.} At each 5-step grid inside a 50-action chunk, combined visual--proprio latent L2 between predicted and real encodings; \emph{split winner} counts column-wise wins; \emph{mean-L2 winner} uses episode-mean L2.
+
+\textbf{Training diagnostics.} Per-update walltime, rollout seconds, WM-score seconds, and population seconds/member-episode (EGGROLL).
+
+\section{Experimental Results and Analysis}
+\label{sec:experimental-results}
+
+\subsection{MT50 Action-Bounding Audit}
+\label{sec:action-bounding-audit}
+
+\paragraph{Source.}
+Results are from the MT50 raw-versus-bounded decode audit: three shards, 25 episodes per task, seed range 1000--1024, \texttt{n\_envs=25}, \texttt{max\_steps=150}, and \texttt{random\_seeded} MetaWorld resets.
+
+\paragraph{Experiment setup.}
+The audit tests whether SmolVLA actions look more realistic to a JEPA world model before or after action bounding. For each MetaWorld task, SmolVLA samples open-loop action chunks; the real environment is stepped with the raw postprocessed actions, while the world model is unrolled twice from the same real root state: once with the raw actions and once with the clipped/bounded actions.
+
+Each episode uses \texttt{chunk\_len=50}: at every active observation, SmolVLA inference is batched across up to 25 parallel environments, samples a 50-step action chunk per environment, executes those actions until success, termination, or the 150-step cap, then samples the next chunk. Thus full-horizon failures usually have three chunks, while early successes have fewer.
+
+The world model packs five environment actions per latent transition, so comparison columns align to real environment frames at steps 5, 10, \ldots, 50 within each chunk. Real frames and proprioception at those aligned indices are encoded into JEPA latents; raw and bounded world-model predicted latents are compared to the real latent with combined visual-plus-proprio L2. Lower L2 wins that column; ties are counted separately.
+
+
+\begin{table}[H]
+\centering
+\caption{MT50 action-bounding audit hyperparameters.}
+\label{tab:action-audit-hyperparameters}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Setting & Value & Meaning \\
+\midrule
+Tasks & 50 MT50 tasks & One task summary per MetaWorld task. \\
+Episodes & 25 per task, seeds 1000--1024 & Deterministic reset layouts through \texttt{random\_seeded}. \\
+Execution & 3 scheduler shards, true async vector envs & Tasks split 17/17/16; environment stepping uses batched \texttt{AsyncVectorEnv}. \\
+\texttt{n\_envs} & 25 & One wave can run all 25 episodes for a task in parallel. \\
+Max steps & 150 & Episode cap for this rerun; previous comparison used 180. \\
+Chunk length & 50 actions & SmolVLA samples 50 actions per active environment per inference call. \\
+Action transform & \texttt{no\_tanh} & Raw policy samples are postprocessed but not tanh-normalized. \\
+Environment action source & \texttt{raw\_postprocessed} & The real MetaWorld rollout executes raw postprocessed actions. \\
+Bounded branch & Clipped to action space & Used only for the world-model comparison branch. \\
+Comparison cadence & Every 5 environment steps & JEPA WM latent step packs five real actions, yielding up to 10 comparison columns per full chunk. \\
+Goal latent mode & \texttt{visual\_proprio} & Combined L2 includes visual latent plus proprio latent with \texttt{proprio\_alpha=0.1}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\begin{table}[H]
+\centering
+\caption{Overall MT50 action-bounding audit summary.}
+\label{tab:action-audit-overall}
+\begin{tabular}{@{}l r@{}}
+\toprule
+Metric & Value \\
+\midrule
+Tasks where bounded won split & 40/50 \\
+Tasks where raw won split & 10/50 \\
+Overall bounded closer columns & 64.20\% \\
+Overall raw closer columns & 33.08\% \\
+Tied columns & 2.72\% \\
+MT50 success & 45.28\% \\
+Mean L2 delta, bounded minus raw & -84.0 \\
+Latent comparison columns & 28,064 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Winner uses per-column latent L2 wins. Negative delta means bounded had lower mean L2. Mean winner can disagree with split winner when a few columns have large errors.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.55\linewidth]{fig_mt57_latent_column_wins.pdf}
+\caption{MT50 action-bounding audit: share of latent comparison columns where raw or bounded world-model rollouts were closer to the real latent (combined visual--proprio L2).}
+\label{fig:mt57-column-wins}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.55\linewidth]{fig_mt50_baseline_by_difficulty.pdf}
+\caption{Unfine-tuned SmolVLA episode success on MT50, grouped by manual difficulty (25 episodes per task, separate baseline run). This measures task success, not WM latent preference.}
+\label{fig:mt50-difficulty}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Success by task difficulty.}
+\label{tab:action-audit-difficulty}
+\begin{tabular}{@{}l r r r@{}}
+\toprule
+Difficulty & Success & Percent & Tasks \\
+\midrule
+easy & 454/700 & 64.86\% & 28 \\
+medium & 64/275 & 23.27\% & 11 \\
+hard & 28/150 & 18.67\% & 6 \\
+very\_hard & 20/125 & 16.00\% & 5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\paragraph{Raw split winners.} door-unlock-v3, drawer-open-v3, hammer-v3, hand-insert-v3, pick-place-wall-v3, plate-slide-back-side-v3, push-back-v3, push-v3, stick-pull-v3, stick-push-v3.
+
+
+\paragraph{Bounded below 55\%.} coffee-pull-v3, coffee-push-v3, door-unlock-v3, drawer-open-v3, hammer-v3, hand-insert-v3, pick-place-v3, pick-place-wall-v3, plate-slide-back-side-v3, push-back-v3, push-v3, reach-wall-v3, stick-pull-v3, stick-push-v3.
+
+
+\begin{table}[H]
+\centering
+\caption{Largest bounded-favoring split margins.}
+\label{tab:action-audit-bounded-margins}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Task & Raw & Bounded & Margin & Success \\
+\midrule
+handle-press-v3 & 0.00\% & 100.00\% & 100.00\% & 24/25 \\
+door-close-v3 & 0.32\% & 99.68\% & 99.37\% & 25/25 \\
+handle-press-side-v3 & 0.40\% & 99.60\% & 99.21\% & 23/25 \\
+plate-slide-side-v3 & 0.94\% & 99.06\% & 98.12\% & 22/25 \\
+button-press-v3 & 1.86\% & 98.14\% & 96.28\% & 24/25 \\
+faucet-open-v3 & 2.31\% & 97.69\% & 95.38\% & 24/25 \\
+button-press-topdown-wall-v3 & 5.08\% & 94.92\% & 89.84\% & 24/25 \\
+faucet-close-v3 & 5.26\% & 94.74\% & 89.47\% & 22/25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[H]
+\centering
+\caption{Largest raw-favoring split margins.}
+\label{tab:action-audit-raw-margins}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Task & Raw & Bounded & Margin & Success \\
+\midrule
+drawer-open-v3 & 66.21\% & 33.45\% & 32.76\% & 16/25 \\
+hand-insert-v3 & 62.95\% & 30.33\% & 32.62\% & 3/25 \\
+stick-pull-v3 & 64.41\% & 35.18\% & 29.23\% & 1/25 \\
+door-unlock-v3 & 57.85\% & 42.15\% & 15.69\% & 15/25 \\
+plate-slide-back-side-v3 & 54.72\% & 45.28\% & 9.43\% & 16/25 \\
+hammer-v3 & 51.33\% & 43.87\% & 7.47\% & 0/25 \\
+push-back-v3 & 51.74\% & 45.89\% & 5.85\% & 9/25 \\
+push-v3 & 48.19\% & 44.41\% & 3.78\% & 5/25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[H]
+\centering
+\caption{Split winner versus mean-L2 winner disagreements.}
+\label{tab:action-audit-disagreements}
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{@{}l l c c r r r r r@{}}
+\toprule
+Task & Diff. & Split & Mean & Raw\% & Bnd\% & Raw L2 & Bnd L2 & $\Delta$ \\
+\midrule
+hammer-v3 & med. & raw & bnd. & 51.3 & 43.9 & 306.5 & 300.5 & $-$6.0 \\
+pick-place-v3 & hard & bnd. & raw & 47.9 & 49.0 & 249.0 & 250.1 & $+$1.1 \\
+pick-place-wall-v3 & v.hard & raw & bnd. & 48.9 & 48.7 & 364.5 & 275.5 & $-$89.0 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+Full per-task audit metrics are in Appendix Table~\ref{tab:action-audit-per-task}.
+
+
+Completed run: 1,250/1,250 episodes and 50/50 tasks. Shard walltimes were approximately 1h25--1h28. Raw, bounded, and tie percentages are over latent comparison columns, not episodes.
+
+
+\FloatBarrier
+\subsection{Environment-Reward GRPO on \texttt{push-v3} (100-episode confirms)}
+\label{sec:env-reward-grpo-pushv3}
+
+Environment-reward GRPO applies the objective in Section~\ref{sec:env-grpo-formulation} with 5-step chunks and dense Meta-World reward. The best \textbf{confirmed} 100-episode checkpoints reach 30--33\% success versus 21\% for the unfine-tuned SmolVLA baseline (seeds 1000--1099, \texttt{n\_envs=25}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_eval_horizon_compare.pdf}
+\caption{Same training lineage can look much stronger under 25-episode than 100-episode held-out evaluation (group-8 GRPO at update 10).}
+\label{fig:eval-horizon-compare}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_grpo_g8_25ep_collapse.pdf}
+\caption{Group-8 GRPO: 25-episode held-out success vs update, showing late-training collapse after an early peak.}
+\label{fig:grpo-g8-collapse}
+\end{figure}
+
+\paragraph{Fixed protocol.}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.22\linewidth}p{0.30\linewidth}p{0.38\linewidth}}
+\toprule
+Setting & Value & Why it matters \\
+\midrule
+Environment & \texttt{official\_lerobot} \texttt{push-v3} & Same task family as the SmolVLA Meta-World checkpoint. \\
+Reward & Dense sum over steps & Optimizes shaped progress, not sparse success only. \\
+Action execution & \texttt{no\_tanh}, chunk length 5 & True action chunking; each policy sample provides a 5-step action chunk. \\
+Evaluation & 100 episodes, \texttt{n\_envs=25}, seeds 1000--1099 & Main decision metric; runs in about four minutes. \\
+Training reset & \texttt{random\_seeded}, seed $2000+\mathrm{update}$ & Reproducible but separate from held-out eval seeds. \\
+Log-prob recompute & Batched, batch size 16 where available & Preserves the objective while reducing optimizer walltime. \\
+\bottomrule
+\end{tabular}
+\caption{Common environment-reward GRPO protocol for completed runs.}
+\label{tab:env-grpo-protocol}
+\end{table}
+
+\paragraph{Main result.}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrl}
+\toprule
+Checkpoint & Group & LR & Clip & Succ.\% & Note \\
+\midrule
+Baseline SmolVLA & -- & -- & -- & 21\% & No GRPO update. \\
+Group-8 checkpoint 10 & 8 & $1{\times}10^{-5}$ & 0.20 & 33\% & Best confirmed result, but 25-ep sweep overstated it at 48\%. \\
+Group-32 checkpoint 6 & 32 & $5{\times}10^{-6}$ & 0.10 & 30\% & Highest average return among tied 30\% checkpoints. \\
+Group-32 checkpoint 14 & 32 & $5{\times}10^{-6}$ & 0.10 & 26\% & Later checkpoint was weaker than early checkpoint. \\
+Conservative checkpoint 8 & 32 & $2{\times}10^{-6}$ & 0.05 & 22\% & Conservative lr/clip was stable but did not improve much. \\
+Conservative checkpoint 15 & 32 & $2{\times}10^{-6}$ & 0.05 & 21\% & Essentially baseline. \\
+Low-noise checkpoint 11 & 32 & $5{\times}10^{-6}$ & 0.10 & 29\% & Low-noise setting nearly matched best. \\
+Low-noise checkpoint 18 & 32 & $5{\times}10^{-6}$ & 0.10 & 30\% & Tied best group-32 success; lower reward than checkpoint 6. \\
+\bottomrule
+\end{tabular}
+\caption{Completed environment-reward GRPO checkpoints on the 100-episode held-out evaluation. Evaluation uses seeds 1000--1099 with \texttt{n\_envs=25}.}
+\label{tab:env-grpo-100ep-results}
+\end{table}
+
+\paragraph{Why the hyperparameters moved.}
+The first group-8 run used a small group ($G=8$), a relatively high learning rate ($10^{-5}$), and a PPO clip of 0.2 to test whether dense-reward GRPO could move \texttt{push-v3} at all. It produced a real early signal: checkpoint 10 reached 33\% on the 100-episode confirm, above the 21\% baseline. However, later checkpoints degraded strongly, so the next runs reduced update size and increased group size.
+
+The group-16 continuation kept the PPO clip at 0.2 but reduced the learning rate to $5{\times}10^{-6}$ and doubled the group to 16. It reached 44\% on 25-episode sweeps, with a high dense return at checkpoint 20, but it still needs a 100-episode confirmation before being treated as a stable result.
+
+The group-32 setting used $G=32$, learning rate $5{\times}10^{-6}$, and clip 0.1. The rationale was to reduce gradient noise through a larger GRPO candidate set while making each PPO-style step less destructive. It reached 30\% on 100 episodes at checkpoint 6, and the later checkpoint 14 fell to 26\%, suggesting early checkpoint selection matters.
+
+The conservative setting tested whether instability was mainly due to update size by lowering the learning rate to $2{\times}10^{-6}$ and clip to 0.05. This was operationally stable, but the 100-episode confirms were only 21--22\%, so simply making the update conservative was not enough.
+
+The low-noise setting kept the group-32 learning rate and clip but reduced exploration noise (\texttt{init\_log\_std=-2.5}, \texttt{euler\_step\_noise\_std=0.1}). It tied the group-32 baseline at 30\% on the 100-episode confirm and produced a second near-best checkpoint at 29\%. This makes $G=32$, learning rate $5{\times}10^{-6}$, clip 0.1, and lower rollout noise the current best recipe.
+
+\paragraph{Short sweeps were too noisy.}
+The 20--25 episode sweeps were useful for triage but not reliable enough for final claims. Group-8 checkpoint 10 dropped from 48\% on 25 episodes to 33\% on 100 episodes, group-32 checkpoint 6 dropped from 45\% to 30\%, and low-noise checkpoint 18 dropped from 40\% to 30\%. Training rollout success was noisier still: the low-noise setting reached 96.9\% on one training group at checkpoint 49, but that was one seed group ($2000+49$), not a held-out success probability. I therefore use 100-episode evaluation on seeds 1000--1099 as the decision metric.
+
+\paragraph{Sources.}
+Artifact paths and scheduler manifests are indexed in the project artifact ledger and GPU-run handoff notes.
+
+\FloatBarrier
+\subsection{Extended GRPO and Direct PPO Sweeps}
+\label{sec:extended-gpu-runs}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_grpo_g16_25ep_curve.pdf}
+\caption{Group-16 environment-reward GRPO (25-episode held-out): full continuation through update 170, including the 52\% peak at $u{=}74$ and collapse to 20\% at $u{=}170$.}
+\label{fig:grpo-g16-curve}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\linewidth]{fig_direct_ppo_25ep_sparse.pdf}
+\caption{Direct sparse PPO: selected 25-episode checkpoints from the stage3b continuation (not every update was evaluated). Peak 40\% at $u{=}120$.}
+\label{fig:direct-ppo-sparse}
+\end{figure}
+
+Table~\ref{tab:extended-gpu-top} summarizes completed 25-episode held-out sweeps (chunk 5, \texttt{max\_steps=120}). The collapse rule marks runs whose final checkpoint trails the best by $\geq 8$ percentage points; those runs require mid-run checkpoint selection (supports H5).
+
+\begin{table}[H]
+\centering
+\caption{Top completed 25-episode results.}
+\label{tab:extended-gpu-top}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Track & Config & Best (\%) & Last (\%) & Note \\
+\midrule
+Group-16 GRPO & $G{=}16$, lr $5{\times}10^{-6}$, clip 0.2 & 52 @ $u{=}74$ & 20 @ $u{=}170$ & Long continuation; severe late collapse \\
+Group-16 continuation & resumed $u{=}20{\rightarrow}70$ & 44 @ $u{=}50,70$ & 44 @ $u{=}70$ & Stable within segment \\
+GRPO grid & \texttt{b4g4\_lr25e6\_clip08} & 44 @ $u{=}40$ & 32 @ $u{=}70$ & Fresh config sweep \\
+Direct stage3b & sparse+rel, lr $3{\times}10^{-7}$, 4 env & 40 @ $u{=}120$ & 28 @ $u{=}240$ & Best Direct line; late decay \\
+Direct expanded-8env & 8 env, lr $5{\times}10^{-7}$ & 36 @ $u{=}40$ & 28 @ $u{=}50$ & OOM-safe 8-env cap \\
+GRPO low-lr seed batch & lr $1.25{\times}10^{-6}$ & 32 @ $u{=}10,50$ & 32 @ $u{=}50$ & Lower learning-rate seed batch \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{100-episode holdout on grid configs.}
+Earlier GRPO grid checkpoints at their 25-episode peaks typically \textbf{drop} on 100 episodes: e.g.\ \texttt{b4g4\_lr25e6\_clip08} 44\% @25ep $\rightarrow$ 22--23\% @100ep; \texttt{b4g8\_dense\_lr3e6} 40\% $\rightarrow$ 22--24\%. This matches the 100-episode confirms above and reinforces H1 only for early-selected checkpoints.
+
+\paragraph{Direct versus GRPO.}
+Direct sparse PPO reached a higher 25-episode peak (40\%) than any single-segment GRPO grid row in the same held-out sweep, but shares the same last-checkpoint failure mode. Neither track yet has a 100-episode confirm at the 40\% Direct peak.
+
+\FloatBarrier
+\subsection{EGGROLL Evolutionary Fine-Tuning}
+\label{sec:eggroll-results}
+
+EGGROLL (Section~\ref{sec:eggroll-formulation}) ran on \texttt{push-v3} with default target \texttt{layers.1.self\_attn.v\_proj}, population $24\times4$ env rows, rank-1 perturbations ($\sigma{=}10^{-4}$, $\alpha{=}10^{-3}$), and held-out eval seeds 30000+.
+
+\begin{figure}[H]
+\centering
+\fbox{\begin{minipage}{0.88\linewidth}
+\centering
+\vspace{1.8em}
+{\small\textit{Placeholder: EGGROLL held-out success vs update (expanded rank-4 line, peak 52\% at $u{=}6$ on 25 episodes).}}\\[0.4em]
+{\small\textit{Stride-2 eval logs for cluster run 245013 are not on RDS; numbers are in Table~\ref{tab:eggroll-headline} and Appendix Table~\ref{tab:supp-eggroll}.}}
+\vspace{1.8em}
+\end{minipage}}
+\caption{EGGROLL learning curve (to be filled from archived \texttt{eval\_sweep\_summary.json} when synced from cluster storage).}
+\label{fig:eggroll-curve-placeholder}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{EGGROLL headline results (25-ep and 100-ep held-out).}
+\label{tab:eggroll-headline}
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Run line & 25ep best & 25ep final & 100ep best & 100ep final \\
+\midrule
+Fixed-seed setting & 48\% @ $u{=}6$ & 48\% @ $u{=}100$ & 23\% & 23\% @ $u{=}100$ \\
+Rotating-seed setting & 56\% @ $u{=}2$ & 48\% @ $u{=}50$ & 24\% @ $u{=}50$ & 24\% \\
+Expanded rank-4 setting & 52\% @ $u{=}6$ & 44\% @ $u{=}50$ & 26\% @ $u{=}11$ & 20\% @ $u{=}50$ \\
+Long-horizon setting & 56\% @ $u{=}37$ & 44\% @ $u{=}50$ & 25\% @ $u{=}50$ & 25\% @ $u{=}50$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+EGGROLL reaches competitive \textbf{25-episode} peaks (44--56\% on $N{=}25$) faster than some GRPO sweeps, but \textbf{100-episode} held-out success stays near 20--26\% for all completed lines except the fixed-seed setting ($\sim$23\% end-to-end). Fixed training seeds overfit the narrow train band: strong 25-ep train-curve shape, flat 100-ep generalization. The long-horizon setting is the only line with 25/100 successes at $u{=}50$ on the 3-checkpoint 100-ep protocol, at $\sim$152\,min train cost per 50 updates (2$\times$ horizon). Rotating per-update seeds improved early 25-ep diversity but did not lift 100-ep confirms.
+
+\FloatBarrier
+\subsection{World-Model-Reward GRPO}
+\label{sec:wm-reward-grpo}
+
+\paragraph{Source.}
+Results are from three world-model-reward chains: an official action-profile chain, a bounded-action chain, and a batched group-16 chain with lower exploration noise.
+Each eval row uses 25 episodes, \texttt{n\_envs=25}, \texttt{rollout\_execution=vector\_async}, \texttt{chunk\_len=25}, and \texttt{execution\_mode=inprocess\_vector}.
+
+\paragraph{Experiment setup.}
+\begin{itemize}
+  \item \textbf{Train mode.} World-model-reward GRPO uses \texttt{wm\_only}: per update, each reset seed builds one oracle-rooted episode, the old SmolVLA policy samples a candidate group from the same root state, and the JEPA world model scores each candidate chunk before GRPO updates the live policy.
+  \item \textbf{Shared knobs.} \texttt{task=push-v3}, \texttt{chunk\_len=25}, \texttt{max\_steps=120}, \texttt{batch\_size=4}, \texttt{train\_seed\_base=10000}, \texttt{save\_every=2}, \texttt{reward\_key=wm\_latent\_progress}, \texttt{goal\_latent\_mode=visual\_proprio}, \texttt{logprob\_backward\_mode=microbatch}.
+  \item \textbf{Chain differences.} Official and bounded-action chains use \texttt{group\_size=8} with serial WM scoring. The batched group-16 chain uses \texttt{group\_size=16}, lower learning rate and noise, and \texttt{wm\_score\_batch\_size=8}.
+  \item \textbf{Eval meaning.} Success (\%) is MetaWorld \texttt{push-v3} success over 25 held-out episodes per checkpoint.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{fig_wm_reward_25ep_curve.pdf}
+\caption{World-model-reward GRPO (official action profile, group 8): held-out success vs update. Peak 36\% at $u{=}6$, then collapse to 0\% from $u{=}22$ onward.}
+\label{fig:wm-reward-curve}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{World-model-reward GRPO training-time breakdown. Wall = first \texttt{run\_start} to last \texttt{update\_complete}; Active = $\sum$ \texttt{update\_seconds}.}
+\label{tab:wm-reward-train-cost}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Run & Updates & Wall & Active & Rollout & WM-score & Optimize & s/upd \\
+\midrule
+Official action-profile chain & 70 & 4h17m & 3h38m & 4282s & 649s & 8673s & 187.2 \\
+Bounded-action chain & 70 & 4h21m & 3h42m & 4327s & 660s & 8851s & 190.3 \\
+Batched group-16 chain & 60 & 7h52m & 5h53m & 5965s & 171s & 15072s & 346.9 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\paragraph{Interpretation.}
+H4 is \textbf{rejected} for stable deployment: all three chains collapse to $\leq 8$\% success by $u{\geq}22$ (official action-profile and bounded-action chains) or show only transient recovery (batched group-16 chain peaks 32\% @ $u{=}2$ and 20\% @ $u{=}39$--40, then 8\% @ $u{=}60$). WM-only reward optimizes latent progress but not held-out task success.
+
+\begin{table}[H]
+\centering
+\caption{World-model-reward GRPO Push-v3 success (\%) summary (25 episodes per checkpoint).}
+\label{tab:wm-reward-summary}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Chain & Peak @ $u$ & @ $u{=}22$ & @ $u{=}50$ & @ $u{=}70$ \\
+\midrule
+Official action-profile & 36 @ 6 & 0 & 0 & 0 \\
+Bounded-action & 32 @ 4 & 0 & 0 & 0 \\
+Batched group-16 & 32 @ 2; 20 @ 39--40 & 0 & 8 & n/e \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\FloatBarrier
+\section{Technical Error Analysis}
+\label{sec:error-analysis}
+
+\subsection{Checkpoint collapse and metric variance}
+Long training chains systematically violate H5 if the final checkpoint is used: group-16 GRPO drops from 52\% to 20\% over the long continuation; Direct stage3b drops from 40\% to 28\% between $u{=}120$ and $u{=}240$. Early dense-reward GRPO runs show the same pattern (36\% best @ $u{=}12$, 16\% @ $u{=}70$). Operational rule: report best@25ep with last-three checkpoint tail and confirm on 100 episodes before claims.
+
+\subsection{25-episode versus 100-episode mismatch}
+Small-$N$ sweeps inflate rankings: group-8 GRPO (48\%$\rightarrow$33\%), group-32 GRPO (45\%$\rightarrow$30\%), low-noise GRPO (40\%$\rightarrow$30\%); expanded rank-4 EGGROLL (52\%@25ep vs 26\% peak@100ep). Training-rollout success on a single seed group (e.g.\ 96.9\% @ $u{=}49$ on seed $2049$) is not comparable to held-out multi-seed eval.
+
+\subsection{Action-bounding split versus mean-L2 disagreements}
+Three tasks disagree between column-split and mean-L2 winners (Table~\ref{tab:action-audit-disagreements}). \texttt{pick-place-wall-v3} is the largest gap ($\Delta \approx -89$ L2): a few high-error columns flip the mean while splits stay nearly even. \texttt{push-v3} itself is a raw split winner (48.2\% vs 44.4\%) with only 5/25 episode success, so WM column preference does not predict RL success on the primary fine-tuning task.
+
+\subsection{Infrastructure and evaluation bugs (fixed)}
+Implementation fixes: Direct eval paths now resolve training-job result roots; GRPO sweeps accept \texttt{--checkpoint-stride}; eval jobs load the required Python and \texttt{smolvla\_pipeline} paths. Earlier mis-pointed eval job IDs produced false zero-success sweeps (e.g.\ a diagnostic run trending to 0\% by $u{=}250$).
+
+\subsection{Out-of-distribution limits}
+\begin{itemize}
+  \item \textbf{Task scope:} All RL improvements are on \texttt{push-v3}; MT50 action-bounding results do not imply multi-task policy gains.
+  \item \textbf{EGGROLL seed overfitting:} Fixed train seeds yield strong 25-ep curves but flat 100-ep held-out ($\sim$23\%).
+  \item \textbf{WM-only training:} World-model-reward collapse indicates latent progress alone is an insufficient training signal without environment anchoring.
+  \item \textbf{Compute envelopes:} 16-env Direct configs OOM; long-horizon EGGROLL doubles rollout cost per update with modest 100-ep gains.
+\end{itemize}

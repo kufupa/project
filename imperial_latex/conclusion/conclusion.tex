@@ -1,0 +1,38 @@
+\chapter{Conclusion and Future Work}
+
+\section{Summary of Contributions}
+\label{sec:summary-contributions}
+
+This project built an end-to-end experimental stack for improving SmolVLA on Meta-World \texttt{push-v3} while auditing action postprocessing with a frozen JEPA world model. The engineering contributions are:
+\begin{itemize}
+  \item A reproducible GRPO trainer with true action chunking, per-trajectory advantage normalization, and batched log-probability recomputation; confirmed 100-episode gain from 21\% baseline to 30--33\% on held-out seeds.
+  \item A Direct PPO sparse-reward line that reached 40\% on 25-episode held-out evaluation at update 120 in the stage3b continuation, with systematic checkpoint sweeps.
+  \item An EGGROLL integration with batched low-rank perturbations, fair reset seeding, and cumulative checkpoint replay; 25-episode peaks up to 52\% on expanded configurations but weaker 100-episode generalization ($\sim$23--26\%).
+  \item MT50 action-bounding diagnostics showing bounded actions win 64\% of latent comparison columns overall (40/50 tasks by split winner), with explicit disagreement cases between split and mean-L2 winners.
+  \item World-model-reward GRPO evidence showing early Push-v3 signal (up to 36\% @25ep) but collapse to near-zero success after roughly 20 updates under tested reward profiles.
+\end{itemize}
+
+\section{Limitations and Practical Constraints}
+\label{sec:limitations}
+
+\textbf{Metric mismatch.} Short 25-episode sweeps routinely overstate performance versus 100-episode confirms (e.g., group-8 GRPO 48\% $\rightarrow$ 33\%, group-32 GRPO 45\% $\rightarrow$ 30\%). Claims must pair checkpoint selection with the intended evaluation horizon.
+
+\textbf{Checkpoint collapse.} Long GRPO and Direct trains often peak mid-run then decay on held-out eval (group-16 GRPO: 52\% @ $u{=}74$ vs 20\% @ $u{=}170$; Direct stage3b: 40\% @ $u{=}120$ vs 28\% @ $u{=}240$). Final checkpoints are unsafe defaults.
+
+\textbf{Task scope.} Fine-tuning and RL results focus on \texttt{push-v3}. The MT50 action-bounding audit covers world-model diagnostics only; no MT50 policy improvement claim is made.
+
+\textbf{Compute split.} EGGROLL ran on a separate GPU cluster with different seed bands (30000+) than GRPO/Direct (1000+ / 50000+). Cross-track comparisons require matched eval protocols.
+
+\textbf{World-model training gap.} World-model-reward GRPO did not recover stable policies; WM latent progress as a sole reward appears insufficient without environment anchoring or bounded-action execution alignment.
+
+\section{Future Research Directions}
+\label{sec:future-work}
+
+\begin{enumerate}
+  \item \textbf{Checkpoint selection policy.} Automate early-stop on held-out 25-ep sweeps with mandatory 100-ep confirmation; never deploy last-checkpoint defaults on long chains.
+  \item \textbf{Unify eval protocol.} Run GRPO, Direct, and EGGROLL winners on identical 100-seed bands with confidence intervals before ranking optimizers.
+  \item \textbf{EGGROLL generalization.} Rotating per-update seeding improved 25-ep peaks but 100-ep held-out remains flat; combine CRN training with broader seed bands and layer targets beyond \texttt{v\_proj} (layer-0 results as ablation).
+  \item \textbf{Bounded execution for RL.} The MT50 action-bounding audit shows systematic WM preference for bounded actions on many tasks; test \texttt{bounded\_executed} rollouts in Direct/GRPO training (bounded-action WM-reward training hinted at different early dynamics before collapse).
+  \item \textbf{Hybrid WM + env reward.} World-model-reward collapse suggests pure WM GRPO is brittle; mix dense environment return with WM progress or use WM only for candidate ranking within each GRPO group.
+  \item \textbf{Scale to additional tasks.} Transfer the $G{=}32$, lr $5{\times}10^{-6}$, clip 0.1 GRPO recipe and Direct sparse chain to second Meta-World tasks with shared eval harness.
+\end{enumerate}

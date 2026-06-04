@@ -1,0 +1,71 @@
+\begin{titlepage}
+
+\newcommand{\HRule}{\rule{\linewidth}{0.5mm}} % Defines a new command for the horizontal lines, change thickness here
+
+%----------------------------------------------------------------------------------------
+%	LOGO SECTION
+%----------------------------------------------------------------------------------------
+
+% Use PDF logo when present. EPS fallback needs Ghostscript, which is not
+% available in this environment, so keep title page buildable without it.
+\IfFileExists{title/logo.pdf}{%
+  \includegraphics[width=8cm]{title/logo.pdf}\\[1cm]%
+}{%
+  \vspace*{1cm}%
+  {\Large Imperial College London}\\[1cm]%
+}
+ 
+%----------------------------------------------------------------------------------------
+
+\center % Center everything on the page
+
+%----------------------------------------------------------------------------------------
+%	HEADING SECTIONS
+%----------------------------------------------------------------------------------------
+
+\textsc{\LARGE MEng Individual Project}\\[1.5cm] % Name of your university/college
+\textsc{\Large Imperial College London}\\[0.5cm] % Major heading such as course name
+\textsc{\large Department of Computing}\\[0.5cm] % Minor heading such as course title
+
+%----------------------------------------------------------------------------------------
+%	TITLE SECTION
+%----------------------------------------------------------------------------------------
+\makeatletter
+\HRule \\[0.4cm]
+{ \huge \bfseries \@title}\\[0.4cm] % Title of your document
+\HRule \\[1.5cm]
+ 
+%----------------------------------------------------------------------------------------
+%	AUTHOR SECTION
+%----------------------------------------------------------------------------------------
+
+\begin{minipage}{0.4\textwidth}
+\begin{flushleft} \large
+\emph{Author:}\\
+\@author % Your name
+\end{flushleft}
+\end{minipage}
+~
+\begin{minipage}{0.4\textwidth}
+\begin{flushright} \large
+\emph{Supervisor:} \\
+Christos Ziakas \\[1.2em]
+\emph{Second Marker:} \\
+Rolandos Potamias
+\end{flushright}
+\end{minipage}\\[2cm]
+
+%----------------------------------------------------------------------------------------
+%	DATE SECTION
+%----------------------------------------------------------------------------------------
+
+{\large \@date}\\[2cm]
+\makeatother
+
+% If you don't want a supervisor, uncomment the two lines below and remove the section above
+%\Large \emph{Author:}\\
+%John \textsc{Smith}\\[3cm] % Your name
+
+\vfill % Fill the rest of the page with whitespace
+
+\end{titlepage}

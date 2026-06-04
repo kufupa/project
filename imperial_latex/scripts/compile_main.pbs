@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#PBS -N thesis_pdf
+#PBS -q v1_large24a
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -o logs/pbs/thesis/compile_main.out
+
+set -euo pipefail
+
+if [[ -f /etc/profile.d/modules.sh ]]; then
+  # shellcheck source=/dev/null
+  . /etc/profile.d/modules.sh
+fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load texlive/20230313-GCC-13.2.0
+# The cluster module sets TEXMFHOME to texmf-dist, which makes kpathsea treat the
+# full distribution tree like a mutable user tree. That turns each package lookup
+# into slow filesystem probing. Let TeX use its compiled distribution paths.
+unset TEXMFHOME
+
+ROOT="${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project/Imperial_College_Individual_Project_Template}"
+mkdir -p "${ROOT}/build" "${ROOT}/logs/pbs/thesis"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/thesis_pdf.XXXXXX")"
+cleanup() { rm -rf "${WORK}"; }
+trap cleanup EXIT
+
+echo "[thesis-pdf] start job=${PBS_JOBID:-local} root=${ROOT} work=${WORK}"
+date
+
+# Copy sources to node-local disk (avoid NFS thrash during latexmk).
+rsync -a \
+  --exclude 'build/' \
+  --exclude 'logs/' \
+  --exclude '.git/' \
+  "${ROOT}/" "${WORK}/"
+
+cd "${WORK}"
+latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error main.tex
+
+install -D -m 0644 main.pdf "${ROOT}/build/main.pdf"
+# Keep aux on RDS for faster future diffs (small files only).
+for f in main.aux main.fdb_latexmk main.fls main.toc main.lof main.lot main.bbl main.blg; do
+  if [[ -f "${f}" ]]; then
+    cp -f "${f}" "${ROOT}/${f}"
+  fi
+done
+
+echo "[thesis-pdf] done $(date)"
+ls -la "${ROOT}/build/main.pdf"
+echo "THESIS_COMPILE_DONE pdf=${ROOT}/build/main.pdf"
