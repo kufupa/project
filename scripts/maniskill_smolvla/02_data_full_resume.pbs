@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Finish data gen if 32-proc job hits 12h walltime (afterany on primary data job).
+#PBS -N msm_data_resume
+#PBS -q v1_large24a
+#PBS -l select=1:ncpus=64:mem=256gb
+#PBS -l walltime=16:00:00
+#PBS -j oe
+#PBS -o artifacts/smolvla_maniskill/msm_data_resume.out
+
+set -euo pipefail
+
+export PROJECT_ROOT="${PROJECT_ROOT:-/rds/general/user/aa6622/home/project}"
+source "${PROJECT_ROOT}/scripts/maniskill_smolvla/common.sh"
+msm_setup_modules
+msm_prepare_runtime
+msm_require_python "${MSM_DATA_PYTHON}"
+
+export MSM_TARGET_SUCCESSES="${MSM_TARGET_SUCCESSES:-16400}"
+export MSM_MIN_EPISODES="${MSM_MIN_EPISODES:-16384}"
+export MSM_RECORD_SPLIT="${MSM_RECORD_SPLIT:-16400}"
+export MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"
+export MSM_FULL_DATA_DIR="${MSM_FULL_RECORD_DIR}/${MSM_ENV_ID}/${MSM_RECORD_SPLIT}/data"
+export MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-32}"
+export MSM_PROC_ID_OFFSET="${MSM_PROC_ID_OFFSET:-32}"
+export MSM_FULL_SEED="${MSM_FULL_SEED:-200}"
+
+log="$(msm_stage_log data_full_resume)"
+(
+  echo "[msm-data-resume] data_dir=${MSM_FULL_DATA_DIR}"
+  mkdir -p "${MSM_FULL_DATA_DIR}"
+  count="$(find "${MSM_FULL_DATA_DIR}" -maxdepth 1 -name '*.npz' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "[msm-data-resume] existing_npz=${count} target=${MSM_TARGET_SUCCESSES} min=${MSM_MIN_EPISODES}"
+  if [[ "${count}" -ge "${MSM_MIN_EPISODES}" ]]; then
+    echo "[msm-data-resume] skip collect; run inspect only"
+  else
+    deficit=$((MSM_TARGET_SUCCESSES - count))
+    slack=$((deficit / 10 + MSM_FULL_NUM_PROCS))
+    export MSM_RESUME_NUM_TRAJ=$((deficit + slack))
+    echo "[msm-data-resume] collect num_traj=${MSM_RESUME_NUM_TRAJ} record_split=${MSM_RECORD_SPLIT} procs=${MSM_FULL_NUM_PROCS} offset=${MSM_PROC_ID_OFFSET} seed=${MSM_FULL_SEED}"
+    cd "${RL4VLA_ROOT}/ManiSkill"
+    "${MSM_DATA_PYTHON}" -m mani_skill.examples.motionplanning.widowx.collect_simpler \
+      -e "${MSM_ENV_ID}" \
+      --save_data \
+      --num_procs "${MSM_FULL_NUM_PROCS}" \
+      --num_traj "${MSM_RESUME_NUM_TRAJ}" \
+      --record-split "${MSM_RECORD_SPLIT}" \
+      --proc-id-offset "${MSM_PROC_ID_OFFSET}" \
+      --record_dir "${MSM_FULL_RECORD_DIR}" \
+      --seed "${MSM_FULL_SEED}" \
+      --sim_backend cpu \
+      --render_backend cpu \
+      --obs_mode rgb+segmentation \
+      --render_mode rgb_array \
+      --shader default
+  fi
+  count_after="$(find "${MSM_FULL_DATA_DIR}" -maxdepth 1 -name '*.npz' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "[msm-data-resume] npz_after=${count_after}"
+  "${MSM_DATA_PYTHON}" "${MSM_SCRIPT_ROOT}/inspect_npz.py" \
+    --root "${MSM_FULL_DATA_DIR}" \
+    --min-episodes "${MSM_MIN_EPISODES}" \
+    --manifest "${MSM_RUN_ROOT}/manifests/data_full_resume.json"
+  msm_write_manifest \
+    "${MSM_RUN_ROOT}/manifests/data_full_resume.env" \
+    "stage=data_full_resume" \
+    "data_dir=${MSM_FULL_DATA_DIR}" \
+    "npz_count=${count_after}" \
+    "record_split=${MSM_RECORD_SPLIT}" \
+    "proc_id_offset=${MSM_PROC_ID_OFFSET}" \
+    "seed=${MSM_FULL_SEED}"
+  echo "MSM_DATA_FULL_DONE data_dir=${MSM_FULL_DATA_DIR}"
+) 2>&1 | tee "${log}"

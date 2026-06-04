@@ -103,6 +103,7 @@ def collect_phase12_episode(
     env: Any,
     policy_sampler: Callable[..., Iterable[Any]],
     score_fn: Callable[..., Any],
+    score_candidates_fn: Callable[..., Sequence[Any]] | None = None,
     goals: Sequence[Any],
     num_candidates: int,
     update_index: int = 0,
@@ -163,16 +164,27 @@ def collect_phase12_episode(
         if len(candidates) != int(num_candidates):
             raise ValueError(f"policy_sampler returned {len(candidates)} candidates, expected {num_candidates}")
 
-        scores = [
-            score_fn(
-                root_observation,
-                candidate,
-                goal,
-                root_id=root_id,
-                segment_index=segment_index,
+        if score_candidates_fn is not None:
+            scores = list(
+                score_candidates_fn(
+                    root_observation,
+                    candidates,
+                    goal,
+                    root_id=root_id,
+                    segment_index=segment_index,
+                )
             )
-            for candidate in candidates
-        ]
+        else:
+            scores = [
+                score_fn(
+                    root_observation,
+                    candidate,
+                    goal,
+                    root_id=root_id,
+                    segment_index=segment_index,
+                )
+                for candidate in candidates
+            ]
         selected_index = select_best_candidate(scores, reward_key=reward_key)
         selected = _candidate_by_index(candidates, selected_index)
         segment_reward, observation, segment_success_any, success_last = _execute_chunk(env, selected.exec_actions_for_env)
@@ -184,7 +196,7 @@ def collect_phase12_episode(
                 update_index=int(update_index),
                 episode_index=int(episode_index),
                 segment_index=int(segment_index),
-                goal_frame_index_1based=int(segment_index + 1),
+                goal_frame_index_1based=int(getattr(goal, "frame_index_1based", segment_index + 1)),
                 selected_candidate_index=int(selected_index),
                 scores=list(scores),
                 candidates=candidates,
@@ -245,6 +257,8 @@ def _candidate_from_sample(
     candidate_index = int(_optional_field(sample, "candidate_index", default_index))
     old_logprob_steps = _optional_field(sample, "old_logprob_steps", None)
     raw = _optional_field(sample, "exec_actions_raw_postprocessed", None)
+    if raw is None:
+        raw = _optional_field(sample, "raw_postprocessed_action_np", None)
     if raw is None:
         raw = _optional_field(sample, "exec_action_np", None)
     if raw is None:

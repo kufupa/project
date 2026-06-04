@@ -26,6 +26,7 @@ from smolvla_grpo.phase12_logging import (
     write_jsonl_row,
     write_manifest,
 )
+from smolvla_grpo.phase12_decode_compare import decode_phase12_prediction_frames
 from smolvla_grpo.phase12_diagnostics import build_decode_artifacts, write_phase12_episode_video
 from smolvla_grpo.phase12_pixels import policy_rgb_from_obs, wm_rgb_from_policy_rgb_corner2
 
@@ -33,6 +34,13 @@ from smolvla_grpo.phase12_pixels import policy_rgb_from_obs, wm_rgb_from_policy_
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mode", choices=("rollout_validation", "wm_grpo_train"), default="wm_grpo_train")
+    p.add_argument(
+        "--phase12-train-mode",
+        choices=("selected_env", "wm_only"),
+        default="selected_env",
+        help="selected_env keeps current Phase12 winner env.step path; wm_only scores candidates with JEPA-WM and skips selected env stepping.",
+    )
+    p.add_argument("--wm-only-root-mode", choices=("single_root", "oracle_teacher_forced"), default="single_root")
     p.add_argument("--checkpoint", type=str, default="jadechoghari/smolvla_metaworld")
     p.add_argument("--jepa-ckpt", type=str, default="jepa_wm_metaworld.pth.tar")
     p.add_argument("--jepa-repo", type=str, default="")
@@ -50,11 +58,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reward-key", choices=("wm_latent_progress", "latent_return"), default="wm_latent_progress")
     p.add_argument("--ratio-mode", choices=("chunk", "per_step_ablation"), default="chunk")
     p.add_argument("--logprob-backward-mode", choices=("stack", "microbatch"), default="stack")
+    p.add_argument(
+        "--loss-normalizer-mode",
+        choices=("group", "group_sqrt_segments", "group_times_segments"),
+        default="group",
+    )
+    p.add_argument("--wm-action-l2-penalty", type=float, default=0.003)
     p.add_argument("--old-policy-inference-mode", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--action-transform", choices=("no_tanh", "tanh_norm_ablation"), default="no_tanh")
     p.add_argument("--reset-mismatch", choices=("fail", "skip", "warn"), default="fail")
     p.add_argument("--decode-candidates", choices=("selected", "all", "none"), default="selected")
     p.add_argument("--save-wm-decodes", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--wm-score-mode", choices=("serial", "batched"), default="serial")
+    p.add_argument("--wm-score-batch-size", type=int, default=8)
     p.add_argument("--strict-wm-scoring", action="store_true")
     p.add_argument("--strict-decode", action="store_true")
     p.add_argument("--lr", type=float, default=1e-5)
@@ -64,8 +80,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--init-log-std", type=float, default=-2.0)
     p.add_argument("--euler-step-noise-std", type=float, default=0.2)
     p.add_argument("--save-every", type=int, default=5)
+    p.add_argument("--save-every-list", type=str, default=None)
     p.add_argument("--resume", type=Path, default=None)
+    p.add_argument("--start-update", type=int, default=None)
     p.add_argument("--train-seed-base", type=int, default=2000)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--disable-videos", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--allow-wm-fallback", action="store_true", default=False)
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
@@ -89,10 +109,29 @@ def build_manifest(args: argparse.Namespace) -> dict:
         "task": str(args.task),
         "env_backend": str(args.env_backend),
         "action_profile": str(args.action_profile),
+        "phase12_train_mode": str(args.phase12_train_mode),
+        "wm_only_root_mode": str(args.wm_only_root_mode),
+        "loss_normalizer_mode": str(args.loss_normalizer_mode),
+        "wm_action_l2_penalty": float(args.wm_action_l2_penalty),
+        "env_vector_mode": "serial",
+        "rollout_execution": (
+            "serial_selected_rollout"
+            if str(args.phase12_train_mode) == "selected_env"
+            else f"wm_only_{args.wm_only_root_mode}"
+        ),
+        "real_env_selected_rollout": str(args.phase12_train_mode) == "selected_env",
+        "true_parallel_metaworld": False,
+        "true_parallel_metaworld_note": (
+            "Phase12 WM-GRPO selected rollout remains serial because oracle/reset parity/WM scoring are per-episode coupled."
+            if str(args.phase12_train_mode) == "selected_env"
+            else "Phase12 wm_only uses oracle goal/root plumbing but skips selected env.step during GRPO update."
+        ),
         "chunk_len": int(args.chunk_len),
         "group_size": int(args.group_size),
+        "batch_size": int(args.batch_size),
         "num_episodes": int(args.num_episodes),
         "num_updates": int(args.num_updates),
+        "start_update": 0 if args.start_update is None else int(args.start_update),
         "max_steps": int(args.max_steps),
         "objective_type": "L2",
         "goal_latent_mode": str(args.goal_latent_mode),
@@ -105,10 +144,16 @@ def build_manifest(args: argparse.Namespace) -> dict:
         "reset_mismatch": str(args.reset_mismatch),
         "decode_candidates": str(args.decode_candidates),
         "save_wm_decodes": bool(args.save_wm_decodes),
+        "wm_score_mode": str(args.wm_score_mode),
+        "wm_score_batch_size": int(args.wm_score_batch_size),
+        "disable_videos": bool(args.disable_videos),
+        "episodes_per_update_semantics": "one_update_may_include_batch_size_reset_seeds",
+        "advantage_mode": "per_segment_group",
         "train_seed_base": int(args.train_seed_base),
         "lr": float(args.lr),
         "clip_eps": float(args.clip_eps),
         "save_every": int(args.save_every),
+        "save_every_list": _parse_positive_int_list(args.save_every_list) or [int(args.save_every)],
         "phase12_policy_frame_contract": "lerobot_corner2_vhflip",
         "phase12_wm_frame_contract": "jepa_corner2_vflip",
         "phase12_goal_frame_contract": "jepa_corner2_vflip",
@@ -123,8 +168,12 @@ def _validate_real_mode(args: argparse.Namespace) -> str | None:
         return "Missing --jepa-ckpt for real Phase12 WM scoring."
     if int(args.num_episodes) < 1:
         return "--num-episodes must be >= 1."
-    if int(args.group_size) < 1:
-        return "--group-size must be >= 1."
+    if int(args.group_size) < 2:
+        return "--group-size must be >= 2 for GRPO advantage normalization."
+    if int(args.batch_size) < 1:
+        return "--batch-size must be >= 1."
+    if int(args.wm_score_batch_size) < 1:
+        return "--wm-score-batch-size must be >= 1."
     if int(args.chunk_len) < 1:
         return "--chunk-len must be >= 1."
     if args.mode == "wm_grpo_train" and int(args.num_episodes) != int(args.num_updates):
@@ -140,6 +189,8 @@ def _episode_smoke_manifest(episode: Any) -> dict[str, Any]:
         "rollout_validation_video": str(meta.get("rollout_validation_video", meta.get("selected_action_rollout_video", ""))),
         "selected_action_rollout_video": str(meta.get("selected_action_rollout_video", "")),
         "oracle_baseline_video": str(meta.get("oracle_baseline_video", "")),
+            "rollout_validation_video_status": str(meta.get("rollout_validation_video_status", "")),
+            "selected_action_rollout_video_status": str(meta.get("selected_action_rollout_video_status", "")),
         "oracle_baseline_video_status": str(meta.get("oracle_baseline_video_status", "")),
         "wm_decode_status": str(meta.get("wm_decode_status", "")),
         "wm_decode_selected_strip_path": str(meta.get("wm_decode_selected_strip_path", "")),
@@ -296,6 +347,18 @@ def phase12_episode_training_metadata(episode: Any, reward_key: str) -> dict[str
         "wm_status_counts": _count_values(_field(score, "wm_status", "unknown") for score in scores),
         "action_clip_fraction": float(np.mean([candidate.action_metadata.get("clip_fraction", 0.0) for candidate in candidates])) if candidates else 0.0,
         "action_clip_any_fraction": float(np.mean([candidate.action_metadata.get("clip_any", False) for candidate in candidates])) if candidates else 0.0,
+        "raw_action_max_abs": max(
+            (float(candidate.action_metadata.get("raw_action_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
+        "clipped_action_max_abs": max(
+            (float(candidate.action_metadata.get("clipped_action_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
+        "clip_delta_max_abs": max(
+            (float(candidate.action_metadata.get("clip_delta_max_abs", 0.0)) for candidate in candidates),
+            default=0.0,
+        ),
     }
 
 
@@ -305,21 +368,79 @@ def _field(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
-def _structured_field(value: Any, key: str) -> Any:
-    try:
-        if key in value:
-            return value[key]
-    except Exception:
-        pass
-    if hasattr(value, "get"):
-        try:
-            return value.get(key)
-        except Exception:
-            pass
-    try:
-        return value[key]
-    except Exception:
-        return None
+def _phase12_loss_normalizer(*, group_size: int, segment_count: int, mode: str) -> int:
+    import math
+
+    if int(group_size) < 1:
+        raise ValueError("group_size must be >= 1")
+    if int(segment_count) < 1:
+        raise ValueError("segment_count must be >= 1")
+    if mode == "group":
+        return int(group_size)
+    if mode == "group_sqrt_segments":
+        return max(int(group_size), int(round(int(group_size) * math.sqrt(int(segment_count)))))
+    if mode == "group_times_segments":
+        return int(group_size) * int(segment_count)
+    raise ValueError("loss_normalizer_mode must be 'group', 'group_sqrt_segments', or 'group_times_segments'")
+
+
+def _parse_positive_int_list(value: str | None) -> list[int]:
+    if value is None or not str(value).strip():
+        return []
+    out: list[int] = []
+    for part in str(value).replace(":", ",").replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        parsed = int(item)
+        if parsed < 1:
+            raise ValueError("values must be >= 1")
+        if parsed not in out:
+            out.append(parsed)
+    return out
+
+
+def _phase12_action_l2(candidate: Any) -> float:
+    actions = np.asarray(getattr(candidate, "exec_actions_for_env", getattr(candidate, "exec_actions_clipped", [])), dtype=np.float32)
+    return float(np.mean(np.square(actions))) if actions.size else 0.0
+
+
+def _apply_phase12_action_l2_penalty(score: Any, candidate: Any, *, reward_key: str, penalty: float) -> Any:
+    penalty_value = float(penalty)
+    if penalty_value <= 0.0:
+        return score
+    l2 = _phase12_action_l2(candidate)
+    adjusted = float(_field(score, reward_key, 0.0)) - penalty_value * l2
+    if isinstance(score, dict):
+        out = dict(score)
+        out[reward_key] = adjusted
+        out["action_l2"] = l2
+        out["action_l2_penalty"] = penalty_value
+        return out
+    return replace(score, **{reward_key: adjusted})
+
+
+def _phase12_sample_to_candidate_dict(sample: Any, *, candidate_index: int) -> dict[str, Any]:
+    import numpy as np
+
+    raw_actions = getattr(sample, "raw_postprocessed_action_np", None)
+    if raw_actions is None:
+        raw_actions = getattr(sample, "exec_action_np")
+    clipped_actions = getattr(sample, "exec_action_np", raw_actions)
+    return {
+        "candidate_index": int(candidate_index),
+        "proc_root_snapshot": None,
+        "unsquashed_chunk": sample.unsquashed_chunk.detach().cpu(),
+        "old_logprob_steps": sample.log_prob_steps.detach().cpu().numpy(),
+        "old_logprob_sum": float(sample.log_prob_sum.detach().cpu().item()),
+        "exec_actions_raw_postprocessed": np.asarray(raw_actions, dtype=np.float32),
+        "exec_actions_clipped": np.asarray(clipped_actions, dtype=np.float32),
+        "action_metadata": {
+            "sample_clip_fraction_mean": float(np.mean(sample.action_clip_fraction)),
+            "sample_clip_any_fraction": float(np.mean(sample.action_clip_any)),
+            "unique_action_rows": int(sample.unique_action_rows),
+        },
+    }
 
 
 def _with_episode_metadata(episode: Any, metadata: dict[str, Any]) -> Any:
@@ -360,7 +481,7 @@ def _build_phase12_selected_decode_artifacts(
         return
     real_frames = list(getattr(rollout_env, "wm_frames", rollout_env.frames))
     decode_result = build_decode_artifacts(
-        decode_fn=lambda: _decode_phase12_prediction_frames(
+        decode_fn=lambda: decode_phase12_prediction_frames(
             wm_bundle,
             image=decode_input["image"],
             proprio=decode_input["proprio"],
@@ -514,6 +635,12 @@ def _phase12_reset_gate_decision(
     }
 
 
+def _proc_mem_fields(stage: str) -> dict[str, int]:
+    from smolvla_grpo.process_memory import prefixed_process_tree_memory_fields
+
+    return prefixed_process_tree_memory_fields(f"proc_mem_{stage}")
+
+
 def collect_phase12_training_episode(**kwargs: Any) -> Any:
     """Collect one real LeRobot-backed Phase12 WM-GRPO episode."""
 
@@ -533,7 +660,7 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
         should_fail_reset_parity,
     )
     from smolvla_grpo.phase12_rollout import collect_phase12_episode
-    from smolvla_grpo.phase12_wm_reward import _encode_structured, score_phase12_chunk_with_wm
+    from smolvla_grpo.phase12_wm_reward import _encode_structured, score_phase12_chunk_with_wm, score_phase12_chunks_with_wm
 
     args = kwargs["args"]
     bundle = kwargs["bundle"]
@@ -555,6 +682,7 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             max_steps=max_steps,
             output_dir=oracle_dir,
             fps=6,
+            write_video=not bool(args.disable_videos),
         )
         schedule = build_subgoal_schedule(
             max_frame_1based=len(oracle["frames"]),
@@ -660,6 +788,7 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             initial_proprio=reset_proprio,
         )
         score_inputs: dict[tuple[int, int], dict[str, Any]] = {}
+        wm_score_telemetry: dict[str, Any] = {}
 
         def sampler(root_observation, *, root_id, num_candidates, segment_index, goal):
             del root_id, goal
@@ -674,19 +803,9 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                     rng=gen,
                     use_inference_mode=bool(args.old_policy_inference_mode),
                 )
-                yield {
-                    "candidate_index": int(candidate_index),
-                    "proc_root_snapshot": detach_proc_snapshot(proc),
-                    "unsquashed_chunk": sample.unsquashed_chunk.detach().cpu(),
-                    "old_logprob_steps": sample.log_prob_steps.detach().cpu().numpy(),
-                    "old_logprob_sum": float(sample.log_prob_sum.detach().cpu().item()),
-                    "exec_actions_raw_postprocessed": sample.exec_action_np,
-                    "action_metadata": {
-                        "sample_clip_fraction_mean": float(np.mean(sample.action_clip_fraction)),
-                        "sample_clip_any_fraction": float(np.mean(sample.action_clip_any)),
-                        "unique_action_rows": int(sample.unique_action_rows),
-                    },
-                }
+                candidate = _phase12_sample_to_candidate_dict(sample, candidate_index=int(candidate_index))
+                candidate["proc_root_snapshot"] = detach_proc_snapshot(proc)
+                yield candidate
 
         def score_fn(root_observation, candidate, goal, *, root_id, segment_index):
             del root_id
@@ -716,7 +835,8 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                 "proprio": root_observation["proprio"],
                 "actions": candidate.exec_actions_for_wm,
             }
-            return score_phase12_chunk_with_wm(
+            score_t0 = time.perf_counter()
+            score = score_phase12_chunk_with_wm(
                 wm_bundle=wm_bundle,
                 image=root_observation["image"],
                 proprio=root_observation["proprio"],
@@ -726,11 +846,49 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                 proprio_alpha=float(args.proprio_alpha),
                 mode=args.goal_latent_mode,
             )
+            wm_score_telemetry["wm_score_seconds"] = float(wm_score_telemetry.get("wm_score_seconds", 0.0)) + float(
+                time.perf_counter() - score_t0
+            )
+            wm_score_telemetry["wm_score_candidate_count"] = int(wm_score_telemetry.get("wm_score_candidate_count", 0)) + 1
+            wm_score_telemetry["wm_score_batch_count"] = int(wm_score_telemetry.get("wm_score_batch_count", 0)) + 1
+            wm_score_telemetry["wm_score_batch_size"] = 1
+            return score
+
+        def score_candidates_fn(root_observation, candidates, goal, *, root_id, segment_index):
+            if args.wm_score_mode != "batched":
+                wm_score_telemetry["wm_score_mode"] = "serial"
+                return [
+                    score_fn(root_observation, candidate, goal, root_id=root_id, segment_index=segment_index)
+                    for candidate in candidates
+                ]
+            goal_latent = {"visual": goal.goal_visual}
+            if args.goal_latent_mode == "visual_proprio":
+                goal_latent["proprio"] = goal.goal_proprio
+            scores = score_phase12_chunks_with_wm(
+                wm_bundle=wm_bundle,
+                image=root_observation["image"],
+                proprio=root_observation["proprio"],
+                chunk_actions=[candidate.exec_actions_for_wm for candidate in candidates],
+                candidate_indices=[int(candidate.candidate_index) for candidate in candidates],
+                goal=goal_latent,
+                proprio_alpha=float(args.proprio_alpha),
+                mode=args.goal_latent_mode,
+                batch_size=int(args.wm_score_batch_size),
+                telemetry=wm_score_telemetry,
+            )
+            for candidate in candidates:
+                score_inputs[(int(segment_index), int(candidate.candidate_index))] = {
+                    "image": root_observation["image"],
+                    "proprio": root_observation["proprio"],
+                    "actions": candidate.exec_actions_for_wm,
+                }
+            return scores
 
         episode = collect_phase12_episode(
             env=rollout_env,
             policy_sampler=sampler,
             score_fn=score_fn,
+            score_candidates_fn=score_candidates_fn,
             goals=goals,
             num_candidates=int(args.group_size),
             update_index=update_index,
@@ -744,16 +902,21 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
             wm_action_dim=int(wm_bundle.planner_action_dim),
             metadata={"reset_metrics": reset_metrics},
         )
-        selected_video = write_phase12_episode_video(
-            video_path=episode_dir / "selected_action_rollout.mp4",
-            frames=rollout_env.frames,
-            rewards=rollout_env.rewards,
-            successes=rollout_env.successes,
-            fps=6,
-            overlay_mode="cumulative_reward",
+        selected_video = (
+            write_phase12_episode_video(
+                video_path=episode_dir / "selected_action_rollout.mp4",
+                frames=rollout_env.frames,
+                rewards=rollout_env.rewards,
+                successes=rollout_env.successes,
+                fps=6,
+                overlay_mode="cumulative_reward",
+            )
+            if not bool(args.disable_videos)
+            else Path("")
         )
         meta = dict(episode.metadata)
         meta.update(phase12_episode_training_metadata(episode, args.reward_key))
+        meta.update(wm_score_telemetry)
         meta.update(
             {
                 "frames": rollout_env.frames,
@@ -761,22 +924,288 @@ def collect_phase12_training_episode(**kwargs: Any) -> Any:
                 "successes": rollout_env.successes,
                 "rollout_validation_video": str(selected_video),
                 "selected_action_rollout_video": str(selected_video),
+                "rollout_validation_video_status": "ok" if not bool(args.disable_videos) else "disabled",
+                "selected_action_rollout_video_status": "ok" if not bool(args.disable_videos) else "disabled",
                 "oracle_baseline_video": str(oracle["video_path"]),
-                "oracle_baseline_video_status": "ok",
+                "oracle_baseline_video_status": str(oracle.get("video_status", "ok")),
                 "oracle_manifest_path": str(oracle["manifest_path"]),
             }
         )
-        _build_phase12_selected_decode_artifacts(
-            args=args,
-            episode=episode,
-            episode_dir=episode_dir,
-            rollout_env=rollout_env,
-            score_inputs=score_inputs,
-            wm_bundle=wm_bundle,
-            action_dim=action_dim,
-            meta=meta,
-        )
+        if not bool(args.disable_videos):
+            _build_phase12_selected_decode_artifacts(
+                args=args,
+                episode=episode,
+                episode_dir=episode_dir,
+                rollout_env=rollout_env,
+                score_inputs=score_inputs,
+                wm_bundle=wm_bundle,
+                action_dim=action_dim,
+                meta=meta,
+            )
         meta.setdefault("wm_decode_status", "disabled")
+        return _with_episode_metadata(episode, meta)
+    finally:
+        env_h.close()
+
+
+def collect_phase12_wm_only_training_episode(**kwargs: Any) -> Any:
+    """Collect one oracle-rooted Phase12 WM-only episode without selected env stepping."""
+
+    import numpy as np
+    import torch
+    from smolvla_grpo.phase11_rollout import detach_proc_snapshot
+    from smolvla_grpo.lerobot_metaworld_adapter import (
+        OfficialLeRobotMetaWorldGRPORollout,
+        resolve_lerobot_horizon,
+    )
+    from smolvla_grpo.phase12_goals import (
+        Phase12Goal,
+        build_local_transition_schedule,
+        build_subgoal_schedule,
+        compute_reset_parity,
+        frame_index_to_filename,
+        select_required_oracle_frame_indices,
+    )
+    from smolvla_grpo.phase12_root_cache import build_oracle_root_entry
+    from smolvla_grpo.phase12_wm_only_rollout import collect_phase12_wm_only_episode
+    from smolvla_grpo.phase12_wm_reward import _encode_structured, score_phase12_chunk_with_wm, score_phase12_chunks_with_wm
+
+    args = kwargs["args"]
+    bundle = kwargs["bundle"]
+    wm_bundle = kwargs["wm_bundle"]
+    old_wrapper = kwargs["old_wrapper"]
+    action_dim = int(kwargs["action_dim"])
+    update_index = int(kwargs["update_index"])
+    reset_seed = int(kwargs["reset_seed"])
+    output_dir = Path(kwargs["output_dir"])
+    oracle_dir = output_dir / "oracle" / f"seed_{reset_seed}"
+
+    env_h = OfficialLeRobotMetaWorldGRPORollout(task=args.task, n_envs=1, enable_expert_oracle=True)
+    try:
+        max_steps = resolve_lerobot_horizon(env_h, int(args.max_steps))
+        oracle = _rollout_phase12_oracle(
+            env_h=env_h,
+            seed=reset_seed,
+            max_steps=max_steps,
+            output_dir=oracle_dir,
+            fps=6,
+            write_video=not bool(args.disable_videos),
+        )
+        schedule = build_subgoal_schedule(
+            max_frame_1based=len(oracle["frames"]),
+            chunk_len=int(args.chunk_len),
+            success_frame_1based=oracle["success_frame_1based"],
+        )
+        transitions = build_local_transition_schedule(
+            max_frame_1based=len(oracle["frames"]),
+            chunk_len=int(args.chunk_len),
+            success_frame_1based=oracle["success_frame_1based"],
+        )
+        _write_selected_frames_png(
+            oracle_dir / "frames",
+            oracle["frames"],
+            select_required_oracle_frame_indices(max_frame_1based=len(oracle["frames"]), schedule=schedule),
+        )
+        goals: list[Phase12Goal] = []
+        for transition in transitions:
+            subgoal_index = int(transition.subgoal_index)
+            frame_idx = min(int(transition.goal_frame_1based), len(oracle["frames"]))
+            companion = frame_idx + 1 if frame_idx + 1 <= len(oracle["frames"]) else None
+            encoded = _encode_structured(
+                wm_bundle,
+                oracle["wm_frames"][frame_idx - 1],
+                oracle["proprios"][frame_idx - 1],
+                mode=args.goal_latent_mode,
+            )
+            goals.append(
+                Phase12Goal(
+                    subgoal_index=subgoal_index,
+                    frame_index_1based=frame_idx,
+                    frame_path=oracle_dir / "frames" / frame_index_to_filename(frame_idx),
+                    companion_frame_index_1based=companion,
+                    companion_frame_path=(oracle_dir / "frames" / frame_index_to_filename(companion)) if companion is not None else None,
+                    proprio=oracle["proprios"][frame_idx - 1],
+                    goal_visual=encoded["visual"],
+                    goal_proprio=encoded.get("proprio"),
+                    source="lerobot_expert_oracle",
+                )
+            )
+
+        reset_obs = env_h.reset(reset_seed)
+        reset_frame = policy_rgb_from_obs(reset_obs)
+        reset_wm_frame = wm_rgb_from_policy_rgb_corner2(reset_frame)
+        reset_proprio = np.asarray(env_h.last_agent_pos(), dtype=np.float32)
+        reset_raw_obs = np.asarray(env_h.last_raw_obs(), dtype=np.float64)
+        reset_metrics = compute_reset_parity(oracle["frames"][0], reset_frame, oracle["proprios"][0], reset_proprio)
+        reset_debug_report = _save_phase12_reset_debug_artifacts(
+            output_dir=output_dir,
+            oracle_frame=oracle["frames"][0],
+            reset_frame=reset_frame,
+            oracle_raw_obs=oracle["raw_obs"][0],
+            reset_raw_obs=reset_raw_obs,
+            reset_metrics=reset_metrics,
+            reset_seed=reset_seed,
+        )
+        reset_gate = _phase12_reset_gate_decision(reset_metrics=reset_metrics, reset_debug_report=reset_debug_report)
+        if args.reset_mismatch == "fail" and reset_gate["fail"]:
+            raise RuntimeError(
+                f"Phase12 reset mismatch for seed {reset_seed}: "
+                f"{reset_metrics} gate={reset_gate} artifacts={reset_debug_report['paths']}"
+            )
+        proc = env_h.build_proc(reset_obs, bundle=bundle)
+        wm_score_telemetry: dict[str, Any] = {}
+        segment_roots = None
+        if str(args.wm_only_root_mode) == "oracle_teacher_forced":
+            segment_roots = []
+            for transition in transitions:
+                root_idx = min(int(transition.root_frame_1based), len(oracle["frames"]))
+                entry = build_oracle_root_entry(
+                    env_h=env_h,
+                    bundle=bundle,
+                    policy_frame=oracle["frames"][root_idx - 1],
+                    wm_frame=oracle["wm_frames"][root_idx - 1],
+                    raw_obs=oracle["raw_obs"][root_idx - 1],
+                    proprio=oracle["proprios"][root_idx - 1],
+                    frame_index_1based=root_idx,
+                )
+                segment_roots.append(
+                    {
+                        "id": f"oracle_seed{reset_seed}_frame{root_idx}",
+                        "image": entry.wm_image,
+                        "policy_image": entry.policy_image,
+                        "proprio": entry.proprio,
+                        "proc": entry.proc,
+                        "frame_index_1based": int(root_idx),
+                    }
+                )
+
+        class RootSource:
+            def reset(self, seed: int) -> dict[str, Any]:
+                if int(seed) != int(reset_seed):
+                    raise ValueError(f"unexpected seed {seed}; expected {reset_seed}")
+                return {
+                    "id": f"wm_only_seed{reset_seed}",
+                    "obs": reset_obs,
+                    "image": reset_wm_frame,
+                    "policy_image": reset_frame,
+                    "proprio": reset_proprio,
+                    "proc": proc,
+                }
+
+        def sampler(root, *, num_candidates: int, segment_index: int, goal):
+            del goal
+            proc_root = root["proc"]
+            for candidate_index in range(int(num_candidates)):
+                gen = torch.Generator(device=old_wrapper.bundle.device)
+                gen.manual_seed(reset_seed * 1000003 + int(segment_index) * 7919 + int(candidate_index))
+                sample = _sample_old_action_chunk(
+                    old_wrapper,
+                    proc_root,
+                    chunk_len=int(args.chunk_len),
+                    rng=gen,
+                    use_inference_mode=bool(args.old_policy_inference_mode),
+                )
+                candidate = _phase12_sample_to_candidate_dict(sample, candidate_index=int(candidate_index))
+                candidate["proc_root_snapshot"] = detach_proc_snapshot(proc_root)
+                yield candidate
+
+        def score_fn(root, candidate, goal, *, segment_index: int):
+            del segment_index
+            goal_latent = {"visual": goal.goal_visual}
+            if args.goal_latent_mode == "visual_proprio":
+                goal_latent["proprio"] = goal.goal_proprio
+            score_t0 = time.perf_counter()
+            score = score_phase12_chunk_with_wm(
+                wm_bundle=wm_bundle,
+                image=root["image"],
+                proprio=root["proprio"],
+                chunk_actions=candidate.exec_actions_for_wm,
+                goal=goal_latent,
+                candidate_index=int(candidate.candidate_index),
+                proprio_alpha=float(args.proprio_alpha),
+                mode=args.goal_latent_mode,
+            )
+            score = _apply_phase12_action_l2_penalty(
+                score,
+                candidate,
+                reward_key=str(args.reward_key),
+                penalty=float(args.wm_action_l2_penalty),
+            )
+            wm_score_telemetry["wm_score_seconds"] = float(wm_score_telemetry.get("wm_score_seconds", 0.0)) + float(
+                time.perf_counter() - score_t0
+            )
+            wm_score_telemetry["wm_score_candidate_count"] = int(wm_score_telemetry.get("wm_score_candidate_count", 0)) + 1
+            wm_score_telemetry["wm_score_batch_count"] = int(wm_score_telemetry.get("wm_score_batch_count", 0)) + 1
+            wm_score_telemetry["wm_score_batch_size"] = 1
+            return score
+
+        def score_candidates_fn(root, candidates, goal, *, segment_index: int):
+            if args.wm_score_mode != "batched":
+                wm_score_telemetry["wm_score_mode"] = "serial"
+                return [
+                    score_fn(root, candidate, goal, segment_index=segment_index)
+                    for candidate in candidates
+                ]
+            goal_latent = {"visual": goal.goal_visual}
+            if args.goal_latent_mode == "visual_proprio":
+                goal_latent["proprio"] = goal.goal_proprio
+            scores = score_phase12_chunks_with_wm(
+                wm_bundle=wm_bundle,
+                image=root["image"],
+                proprio=root["proprio"],
+                chunk_actions=[candidate.exec_actions_for_wm for candidate in candidates],
+                candidate_indices=[int(candidate.candidate_index) for candidate in candidates],
+                goal=goal_latent,
+                proprio_alpha=float(args.proprio_alpha),
+                mode=args.goal_latent_mode,
+                batch_size=int(args.wm_score_batch_size),
+                telemetry=wm_score_telemetry,
+            )
+            return [
+                _apply_phase12_action_l2_penalty(
+                    score,
+                    candidate,
+                    reward_key=str(args.reward_key),
+                    penalty=float(args.wm_action_l2_penalty),
+                )
+                for score, candidate in zip(scores, candidates, strict=True)
+            ]
+
+        episode = collect_phase12_wm_only_episode(
+            root_source=RootSource(),
+            reset_seed=reset_seed,
+            policy_sampler=sampler,
+            score_fn=score_fn,
+            score_candidates_fn=score_candidates_fn,
+            goals=goals,
+            segment_roots=segment_roots,
+            group_size=int(args.group_size),
+            reward_key=args.reward_key,
+            action_profile=args.action_profile,
+            action_low=np.full((action_dim,), -1.0, dtype=np.float32),
+            action_high=np.full((action_dim,), 1.0, dtype=np.float32),
+            preprocessor=wm_bundle.preprocessor,
+            env_action_dim=action_dim,
+            wm_action_dim=int(wm_bundle.planner_action_dim),
+            metadata={
+                "reset_metrics": reset_metrics,
+                "phase12_train_mode": "wm_only",
+                "wm_only_root_mode": str(args.wm_only_root_mode),
+                "wm_only_root_frame_indices": [int(t.root_frame_1based) for t in transitions],
+                "wm_only_goal_frame_indices": [int(t.goal_frame_1based) for t in transitions],
+                "wm_action_l2_penalty": float(args.wm_action_l2_penalty),
+                "rollout_validation_video": "",
+                "selected_action_rollout_video": "",
+                "rollout_validation_video_status": "disabled",
+                "selected_action_rollout_video_status": "disabled",
+                "oracle_baseline_video": str(oracle["video_path"]),
+                "oracle_baseline_video_status": str(oracle.get("video_status", "ok")),
+                "oracle_manifest_path": str(oracle["manifest_path"]),
+                "wm_decode_status": "disabled",
+            },
+        )
+        meta = dict(episode.metadata)
+        meta.update(wm_score_telemetry)
         return _with_episode_metadata(episode, meta)
     finally:
         env_h.close()
@@ -802,6 +1231,7 @@ def _rollout_phase12_oracle(
     max_steps: int,
     output_dir: Path,
     fps: int,
+    write_video: bool = True,
 ) -> dict[str, Any]:
     import json
     import numpy as np
@@ -833,14 +1263,19 @@ def _rollout_phase12_oracle(
             success_frame_1based = int(step_idx + 2)
         if bool(step.success or step.terminated or step.truncated):
             break
-    video_path = write_phase12_episode_video(
-        video_path=output_dir / "oracle_baseline.mp4",
-        frames=frames,
-        rewards=rewards,
-        successes=successes,
-        fps=int(fps),
-        overlay_mode="cumulative_reward",
+    video_path = (
+        write_phase12_episode_video(
+            video_path=output_dir / "oracle_baseline.mp4",
+            frames=frames,
+            rewards=rewards,
+            successes=successes,
+            fps=int(fps),
+            overlay_mode="cumulative_reward",
+        )
+        if bool(write_video)
+        else ""
     )
+    video_status = "ok" if bool(write_video) else "disabled"
     manifest = {
         "seed": int(seed),
         "max_steps": int(max_steps),
@@ -849,7 +1284,8 @@ def _rollout_phase12_oracle(
         "action_count": len(actions),
         "success_any": any(successes),
         "success_frame_1based": success_frame_1based,
-        "video_path": str(video_path),
+        "video_path": str(video_path) if bool(write_video) else "",
+        "video_status": video_status,
         "policy_frame_contract": "lerobot_corner2_vhflip",
         "wm_frame_contract": "jepa_corner2_vflip",
     }
@@ -865,6 +1301,7 @@ def _rollout_phase12_oracle(
         "successes": successes,
         "success_frame_1based": success_frame_1based,
         "video_path": video_path,
+        "video_status": video_status,
         "manifest_path": manifest_path,
     }
 
@@ -925,137 +1362,6 @@ class _Phase12SelectedRolloutEnv:
         return self._root(), float(step.reward), bool(step.terminated), bool(step.truncated), info
 
 
-def _decode_phase12_prediction_frames(
-    wm_bundle: Any,
-    *,
-    image: Any,
-    proprio: Any,
-    actions: Any,
-    mode: str,
-) -> list[Any]:
-    import numpy as np
-    import torch
-    from segment_grpo_loop import (
-        DecodeTrace,
-        _decode_latent_trace_to_frames,
-        _infer_env_action_dim,
-        _infer_model_action_dim,
-        _next_latent_state_after_unroll,
-        _normalize_env_actions_for_wm,
-        _pack_env_actions_for_wm,
-        _to_wm_proprio,
-        _to_wm_visual,
-        _wm_action_block_factor,
-    )
-
-    obs = {
-        "visual": _to_wm_visual(image, wm_bundle.device),
-        "proprio": _to_wm_proprio(proprio, int(wm_bundle.proprio_dim), wm_bundle.device),
-    }
-    actions_np = np.asarray(actions, dtype=np.float32)
-    env_dim = _infer_env_action_dim(wm_bundle, actions_np)
-    model_action_dim = _infer_model_action_dim(wm_bundle.model)
-    wm_dim = int(model_action_dim) if model_action_dim else int(wm_bundle.planner_action_dim)
-    factor = _wm_action_block_factor(env_dim, wm_dim)
-    normalized = _normalize_env_actions_for_wm(
-        wm_bundle.preprocessor,
-        actions_np[:, :env_dim],
-        env_dim,
-        wm_bundle.device,
-    )
-    packed = _pack_env_actions_for_wm(normalized, factor, env_dim, wm_dim)
-    action_t = torch.from_numpy(packed).to(wm_bundle.device).float().unsqueeze(1)
-    with torch.no_grad():
-        latent = wm_bundle.model.encode(obs)
-        if isinstance(latent, dict) and mode == "visual_proprio":
-            try:
-                from tensordict import TensorDict
-
-                latent = TensorDict(
-                    {"visual": latent["visual"], "proprio": latent["proprio"]},
-                    batch_size=[],
-                )
-            except Exception:
-                pass
-        elif isinstance(latent, dict) and mode == "visual_only_ablation":
-            latent = latent["visual"]
-        visual_latents: list[Any] = []
-        proprio_latents: list[Any] = []
-        decode_step_shapes: list[dict[str, Any]] = []
-        for t in range(int(action_t.shape[0])):
-            unroll_out = wm_bundle.model.unroll(latent, act_suffix=action_t[t : t + 1], debug=False)
-            latent = _next_latent_state_after_unroll(unroll_out)
-            visual = _structured_field(latent, "visual")
-            proprio_latent = _structured_field(latent, "proprio")
-            if visual is not None:
-                visual_latents.append(visual)
-                if mode == "visual_proprio":
-                    proprio_latents.append(proprio_latent)
-            else:
-                visual_latents.append(latent)
-            if isinstance(latent, dict) and mode == "visual_proprio":
-                try:
-                    from tensordict import TensorDict
-
-                    latent = TensorDict(
-                        {"visual": latent["visual"], "proprio": latent["proprio"]},
-                        batch_size=[],
-                    )
-                except Exception:
-                    pass
-            elif isinstance(latent, dict) and mode == "visual_only_ablation":
-                latent = latent["visual"]
-            if len(decode_step_shapes) < 8:
-                decode_step_shapes.append(
-                    {
-                        "step": int(t),
-                        "act_suffix_shape": [int(x) for x in action_t[t : t + 1].shape],
-                        "visual_shape": [int(x) for x in visual.shape] if hasattr(visual, "shape") else None,
-                        "proprio_shape": [int(x) for x in proprio_latent.shape] if hasattr(proprio_latent, "shape") else None,
-                    }
-                )
-        # region agent log
-        try:
-            import json as _json
-            import os as _os
-            import time as _time
-
-            if _os.environ.get("AGENT_DEBUG_PHASE12_WM_ACTIONS", "").strip().lower() in {"1", "true", "yes"}:
-                payload = {
-                    "sessionId": "588128",
-                    "id": f"phase12_decode_{_os.getpid()}_{int(_time.time() * 1000)}",
-                    "timestamp": int(_time.time() * 1000),
-                    "runId": _os.environ.get("AGENT_DEBUG_RUN_ID", "phase12-decode-post-fix"),
-                    "hypothesisId": "H2",
-                    "location": "scripts/grpo/train_phase12_wm_chunk_grpo.py:_decode_phase12_prediction_frames",
-                    "message": "phase12 decode final latent trace built",
-                    "data": {
-                        "actions_shape": list(actions_np.shape),
-                        "normalized_shape": list(normalized.shape),
-                        "packed_shape": list(packed.shape),
-                        "action_t_shape": [int(x) for x in action_t.shape],
-                        "env_dim": int(env_dim),
-                        "wm_dim": int(wm_dim),
-                        "factor": int(factor),
-                        "visual_latent_count": int(len(visual_latents)),
-                        "proprio_latent_count": int(len(proprio_latents)),
-                        "decode_step_shapes": decode_step_shapes,
-                    },
-                }
-                with open("/vol/bitbucket/aa6622/.cursor/debug-588128.log", "a", encoding="utf-8") as _f:
-                    _f.write(_json.dumps(payload, sort_keys=True) + "\n")
-        except Exception:
-            pass
-        # endregion
-    frames, failure = _decode_latent_trace_to_frames(
-        wm_bundle,
-        DecodeTrace(visual_latents=visual_latents, proprio_latents=proprio_latents),
-    )
-    if failure is not None:
-        raise RuntimeError(failure)
-    return frames
-
-
 def _ensure_checkpointable_policy_state(policy: Any) -> dict:
     state = policy.state_dict()
     return dict(state) if state else {"_empty_policy_state": True}
@@ -1079,9 +1385,12 @@ def _save_latest_and_numbered(
         args=vars(args),
         extra=extra,
     )
-    if (int(update_index) + 1) % int(args.save_every) == 0 or int(args.num_updates) == 1:
+    save_intervals = _parse_positive_int_list(getattr(args, "save_every_list", None)) or [int(args.save_every)]
+    numbered_update = int(update_index) + 1
+    should_save_numbered = any(numbered_update % int(interval) == 0 for interval in save_intervals)
+    if should_save_numbered or int(args.num_updates) == 1:
         save_grpo_checkpoint(
-            ckpt_dir / f"update_{int(update_index) + 1:04d}.pt",
+            ckpt_dir / f"update_{numbered_update:04d}.pt",
             policy_state=policy_state,
             optimizer_state=optimizer_state,
             update_index=update_index,
@@ -1133,12 +1442,22 @@ def _backward_chunk_grpo_loss_microbatched(
     old_lp: Any,
     advantages: Any,
     clip_eps: float,
+    grpo_group_size: int | None = None,
+    loss_normalizer: int | None = None,
 ) -> tuple[float, dict[str, float], Any]:
     import torch
 
     row_count = len(unsquashed_chunks)
     if row_count == 0:
         raise RuntimeError("microbatch GRPO loss needs at least one chunk")
+    G = int(grpo_group_size if grpo_group_size is not None else row_count)
+    if G < 1:
+        raise ValueError("grpo_group_size must be >= 1")
+    if row_count % G != 0:
+        raise ValueError(f"row count {row_count} must be a multiple of grpo_group_size={G}")
+    normalizer = int(loss_normalizer if loss_normalizer is not None else G)
+    if normalizer < 1:
+        raise ValueError("loss_normalizer must be >= 1")
     old_lp = torch.as_tensor(old_lp).float()
     advantages = torch.as_tensor(advantages).float()
     new_lp_values: list[torch.Tensor] = []
@@ -1150,7 +1469,7 @@ def _backward_chunk_grpo_loss_microbatched(
             old_lp[row_idx].to(new_lp_row.device),
             advantages[row_idx].to(new_lp_row.device),
             clip_eps=float(clip_eps),
-            normalizer=row_count,
+            normalizer=normalizer,
         )
         loss_values.append(loss_row.detach().cpu())
         new_lp_values.append(new_lp_row.detach().cpu())
@@ -1161,24 +1480,123 @@ def _backward_chunk_grpo_loss_microbatched(
     return loss, stats, new_lp
 
 
+def _chunk_grpo_loss_with_group_normalizer(
+    *,
+    old_lp: Any,
+    new_lp: Any,
+    advantages: Any,
+    clip_eps: float,
+    grpo_group_size: int,
+    loss_normalizer: int | None = None,
+) -> tuple[Any, dict[str, float]]:
+    import torch
+
+    old = torch.as_tensor(old_lp).float()
+    new = torch.as_tensor(new_lp).float()
+    adv = torch.as_tensor(advantages).float()
+    G = int(grpo_group_size)
+    if G < 1:
+        raise ValueError("grpo_group_size must be >= 1")
+    if int(old.numel()) % G != 0:
+        raise ValueError(f"row count {old.numel()} must be a multiple of grpo_group_size={G}")
+    normalizer = int(loss_normalizer if loss_normalizer is not None else G)
+    if normalizer < 1:
+        raise ValueError("loss_normalizer must be >= 1")
+    ratio = torch.exp(new - old)
+    clipped_ratio = torch.clamp(ratio, 1.0 - float(clip_eps), 1.0 + float(clip_eps))
+    row_loss = -torch.minimum(ratio * adv, clipped_ratio * adv) / float(normalizer)
+    return row_loss.sum(), _ratio_stats_from_tensors(old.detach(), new.detach(), clip_eps=float(clip_eps))
+
+
+def _combine_phase12_seed_batch_metadata(episodes: list[Any]) -> dict[str, Any]:
+    action_clip_fractions: list[float] = []
+    action_clip_any_fractions: list[float] = []
+    combined: dict[str, Any] = {
+        "candidate_rewards": [],
+        "segment_candidate_rewards": [],
+        "old_logprob_sums": [],
+        "proc_root_snapshots": [],
+        "unsquashed_chunks": [],
+        "successes": [],
+        "per_seed_success_rate": [],
+        "wm_score_seconds": 0.0,
+        "wm_score_batch_count": 0,
+        "wm_score_candidate_count": 0,
+        "wm_score_cuda_peak_allocated_bytes": 0,
+        "wm_score_mode": "",
+        "action_clip_fraction": 0.0,
+        "action_clip_any_fraction": 0.0,
+        "raw_action_max_abs": 0.0,
+        "clipped_action_max_abs": 0.0,
+        "clip_delta_max_abs": 0.0,
+    }
+    for episode in episodes:
+        meta = dict(getattr(episode, "metadata", {}) or {})
+        combined["candidate_rewards"].extend(list(meta.get("candidate_rewards", [])))
+        combined["segment_candidate_rewards"].extend(list(meta.get("segment_candidate_rewards", [])))
+        combined["old_logprob_sums"].extend(list(meta.get("old_logprob_sums", [])))
+        combined["proc_root_snapshots"].extend(list(meta.get("proc_root_snapshots", [])))
+        combined["unsquashed_chunks"].extend(list(meta.get("unsquashed_chunks", [])))
+        success = bool(getattr(episode, "success_any", meta.get("success_any", False)))
+        combined["successes"].append(success)
+        combined["per_seed_success_rate"].append(1.0 if success else 0.0)
+        combined["wm_score_seconds"] += float(meta.get("wm_score_seconds", 0.0))
+        combined["wm_score_batch_count"] += int(meta.get("wm_score_batch_count", 0))
+        combined["wm_score_candidate_count"] += int(meta.get("wm_score_candidate_count", 0))
+        combined["wm_score_batch_size"] = int(meta.get("wm_score_batch_size", combined.get("wm_score_batch_size", 0) or 0))
+        if meta.get("wm_score_mode"):
+            combined["wm_score_mode"] = str(meta.get("wm_score_mode"))
+        combined["wm_score_cuda_peak_allocated_bytes"] = max(
+            int(combined["wm_score_cuda_peak_allocated_bytes"]),
+            int(meta.get("wm_score_cuda_peak_allocated_bytes", 0)),
+        )
+        if "action_clip_fraction" in meta:
+            action_clip_fractions.append(float(meta.get("action_clip_fraction", 0.0)))
+        if "action_clip_any_fraction" in meta:
+            action_clip_any_fractions.append(float(meta.get("action_clip_any_fraction", 0.0)))
+        combined["raw_action_max_abs"] = max(
+            float(combined["raw_action_max_abs"]),
+            float(meta.get("raw_action_max_abs", 0.0)),
+        )
+        combined["clipped_action_max_abs"] = max(
+            float(combined["clipped_action_max_abs"]),
+            float(meta.get("clipped_action_max_abs", 0.0)),
+        )
+        combined["clip_delta_max_abs"] = max(
+            float(combined["clip_delta_max_abs"]),
+            float(meta.get("clip_delta_max_abs", 0.0)),
+        )
+    if action_clip_fractions:
+        combined["action_clip_fraction"] = float(sum(action_clip_fractions) / len(action_clip_fractions))
+    if action_clip_any_fractions:
+        combined["action_clip_any_fraction"] = float(
+            sum(action_clip_any_fractions) / len(action_clip_any_fractions)
+        )
+    return combined
+
+
 def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
     import torch
     from torch import nn
 
     from smolvla_grpo.checkpointing import load_grpo_checkpoint
     from smolvla_grpo.grpo_math import compute_group_advantages
-    from smolvla_grpo.phase12_rollout import chunk_grpo_loss
 
     bundle, wm_bundle, action_dim = load_phase12_train_resources(args)
     train_wrapper, trainable = build_train_wrapper(args, bundle, action_dim)
     optimizer = torch.optim.AdamW(trainable, lr=float(args.lr), betas=(0.9, 0.95))
-    start_update = 0
+    start_update = 0 if args.start_update is None else int(args.start_update)
     if args.resume is not None:
         ckpt = load_grpo_checkpoint(args.resume, map_location=bundle.device)
         bundle.policy.load_state_dict(ckpt["policy_state_dict"], strict=False)
         if ckpt.get("optimizer_state_dict"):
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_update = int(ckpt.get("update_index", -1)) + 1
+        inferred_start = int(ckpt.get("update_index", -1)) + 1
+        if args.start_update is not None and inferred_start != int(args.start_update):
+            raise RuntimeError(
+                f"--start-update {int(args.start_update)} does not match resume checkpoint next update {inferred_start}"
+            )
+        start_update = inferred_start
 
     old_policy = copy.deepcopy(bundle.policy).eval().to(bundle.device)
     for param in old_policy.parameters():
@@ -1189,25 +1607,49 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
     end_update = start_update + int(args.num_updates)
     for update_index in range(start_update, end_update):
         update_t0 = time.perf_counter()
-        reset_seed = int(args.train_seed_base) + int(update_index)
-        episode = collect_phase12_training_episode(
-            args=args,
-            bundle=bundle,
-            wm_bundle=wm_bundle,
-            old_policy=old_policy,
-            old_wrapper=old_wrapper,
-            action_dim=action_dim,
-            update_index=update_index,
-            reset_seed=reset_seed,
-            output_dir=out,
-        )
+        proc_mem_update_start = _proc_mem_fields("update_start")
+        rollout_t0 = time.perf_counter()
+        batch_size_i = int(args.batch_size)
+        seed_batch_base = int(args.train_seed_base) + int(update_index) * batch_size_i
+        reset_seeds = [seed_batch_base + b for b in range(batch_size_i)]
+        episodes: list[Any] = []
+        for reset_seed in reset_seeds:
+            if args.phase12_train_mode == "wm_only":
+                episode_i = collect_phase12_wm_only_training_episode(
+                    args=args,
+                    bundle=bundle,
+                    wm_bundle=wm_bundle,
+                    old_wrapper=old_wrapper,
+                    action_dim=action_dim,
+                    update_index=update_index,
+                    reset_seed=int(reset_seed),
+                    output_dir=out,
+                )
+            else:
+                episode_i = collect_phase12_training_episode(
+                    args=args,
+                    bundle=bundle,
+                    wm_bundle=wm_bundle,
+                    old_policy=old_policy,
+                    old_wrapper=old_wrapper,
+                    action_dim=action_dim,
+                    update_index=update_index,
+                    reset_seed=int(reset_seed),
+                    output_dir=out,
+                )
+            episodes.append(episode_i)
+        rollout_seconds = float(time.perf_counter() - rollout_t0)
+        proc_mem_after_rollout = _proc_mem_fields("after_rollout")
+        episode = episodes[0]
         if hasattr(episode, "segments"):
-            meta = dict(getattr(episode, "metadata", {}) or {})
-            meta.update(phase12_episode_training_metadata(episode, args.reward_key))
-            episode = _with_episode_metadata(episode, meta)
+            for idx, episode_i in enumerate(episodes):
+                meta_i = dict(getattr(episode_i, "metadata", {}) or {})
+                meta_i.update(phase12_episode_training_metadata(episode_i, args.reward_key))
+                episodes[idx] = _with_episode_metadata(episode_i, meta_i)
+            episode = episodes[0]
         if first_episode is None:
             first_episode = episode
-        meta = dict(getattr(episode, "metadata", {}) or {})
+        meta = _combine_phase12_seed_batch_metadata(episodes)
         segment_rows = meta.get("segment_candidate_rewards") or [meta.get("candidate_rewards", [])]
         segment_rewards = [
             torch.tensor(row, dtype=torch.float32, device=bundle.device)
@@ -1222,7 +1664,49 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
         rewards = torch.cat(segment_rewards, dim=0)
         advantages = torch.cat(segment_advantages, dim=0)
         old_lp = torch.tensor(meta["old_logprob_sums"], dtype=torch.float32, device=bundle.device)
+        loss_normalizer = _phase12_loss_normalizer(
+            group_size=int(args.group_size),
+            segment_count=len(segment_advantages),
+            mode=str(args.loss_normalizer_mode),
+        )
+        progress_common = {
+            "phase12_train_mode": str(args.phase12_train_mode),
+            "wm_only_root_mode": str(getattr(args, "wm_only_root_mode", "")),
+            "loss_normalizer_mode": str(args.loss_normalizer_mode),
+            "loss_normalizer": int(loss_normalizer),
+            "wm_action_l2_penalty": float(args.wm_action_l2_penalty),
+            "action_profile": str(args.action_profile),
+            "reward_key": str(args.reward_key),
+            "chunk_len": int(args.chunk_len),
+            "group_size": int(args.group_size),
+            "batch_size": batch_size_i,
+            "reset_seed": int(reset_seeds[0]),
+            "reset_seeds": reset_seeds,
+            "episode_count": len(episodes),
+            "per_seed_success_rate": list(meta.get("per_seed_success_rate", [])),
+            "start_update": int(start_update),
+            "end_update": int(end_update),
+            "job_update_count": int(args.num_updates),
+            "resume_checkpoint": "" if args.resume is None else str(args.resume),
+            "rollout_seconds": float(rollout_seconds),
+            "wm_score_seconds": float(meta.get("wm_score_seconds", 0.0)),
+            "wm_score_batch_size": int(meta.get("wm_score_batch_size", 0)),
+            "wm_score_mode": str(meta.get("wm_score_mode", "")),
+            "wm_score_batch_count": int(meta.get("wm_score_batch_count", 0)),
+            "wm_score_candidate_count": int(meta.get("wm_score_candidate_count", 0)),
+            "wm_score_cuda_peak_allocated_bytes": int(meta.get("wm_score_cuda_peak_allocated_bytes", 0)),
+            "action_clip_fraction": float(meta.get("action_clip_fraction", 0.0)),
+            "action_clip_any_fraction": float(meta.get("action_clip_any_fraction", 0.0)),
+            "raw_action_max_abs": float(meta.get("raw_action_max_abs", 0.0)),
+            "clipped_action_max_abs": float(meta.get("clipped_action_max_abs", 0.0)),
+            "clip_delta_max_abs": float(meta.get("clip_delta_max_abs", 0.0)),
+            **proc_mem_update_start,
+            **proc_mem_after_rollout,
+        }
         if torch.allclose(advantages, torch.zeros_like(advantages)):
+            optimize_seconds = 0.0
+            update_seconds = float(time.perf_counter() - update_t0)
+            proc_mem_after_optimize = _proc_mem_fields("after_optimize")
             ckpt_path = _save_latest_and_numbered(
                 ckpt_dir=ckpt_dir,
                 policy_state=_ensure_checkpointable_policy_state(bundle.policy),
@@ -1236,15 +1720,19 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "event": "update_complete",
                 "mode": "wm_grpo_train",
                 "update_index": int(update_index),
-                "reset_seed": int(reset_seed),
+                **progress_common,
                 "skipped": True,
                 "reason": "zero_advantages",
                 "optimizer_step": False,
                 "checkpoint_path": str(ckpt_path),
+                "optimize_seconds": float(optimize_seconds),
+                "update_seconds": float(update_seconds),
+                **proc_mem_after_optimize,
             }
             write_jsonl_row(out / "progress.jsonl", row)
             continue
         optimizer.zero_grad(set_to_none=True)
+        optimize_t0 = time.perf_counter()
         if args.logprob_backward_mode == "microbatch":
             loss_value, ratio_stats, new_lp_for_log = _backward_chunk_grpo_loss_microbatched(
                 train_wrapper=train_wrapper,
@@ -1253,6 +1741,8 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 old_lp=old_lp,
                 advantages=advantages,
                 clip_eps=float(args.clip_eps),
+                grpo_group_size=int(args.group_size),
+                loss_normalizer=int(loss_normalizer),
             )
         else:
             new_lp_rows = [
@@ -1260,12 +1750,21 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 for proc, chunk in zip(meta["proc_root_snapshots"], meta["unsquashed_chunks"], strict=True)
             ]
             new_lp = torch.stack(new_lp_rows)
-            loss, ratio_stats = chunk_grpo_loss(old_lp, new_lp, advantages, clip_eps=float(args.clip_eps))
+            loss, ratio_stats = _chunk_grpo_loss_with_group_normalizer(
+                old_lp=old_lp,
+                new_lp=new_lp,
+                advantages=advantages,
+                clip_eps=float(args.clip_eps),
+                grpo_group_size=int(args.group_size),
+                loss_normalizer=int(loss_normalizer),
+            )
             loss_value = float(loss.detach().cpu())
             new_lp_for_log = new_lp.detach().cpu()
             loss.backward()
         nn.utils.clip_grad_norm_(trainable, float(args.grad_clip))
         optimizer.step()
+        optimize_seconds = float(time.perf_counter() - optimize_t0)
+        proc_mem_after_optimize = _proc_mem_fields("after_optimize")
         old_policy.load_state_dict(bundle.policy.state_dict())
         old_policy.eval()
         old_wrapper._policy = old_policy
@@ -1285,7 +1784,7 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "event": "update_complete",
                 "mode": "wm_grpo_train",
                 "update_index": int(update_index),
-                "reset_seed": int(reset_seed),
+                **progress_common,
                 "optimizer_step": True,
                 "loss": float(loss_value),
                 "advantages": advantages.detach().cpu().tolist(),
@@ -1294,7 +1793,9 @@ def run_wm_grpo_train(args: argparse.Namespace, out: Path) -> int:
                 "segment_candidate_rewards": [row.detach().cpu().tolist() for row in segment_rewards],
                 "segment_advantages": [row.detach().cpu().tolist() for row in segment_advantages],
                 "checkpoint_path": str(ckpt_path),
+                "optimize_seconds": float(optimize_seconds),
                 "update_seconds": float(time.perf_counter() - update_t0),
+                **proc_mem_after_optimize,
                 **ratio_stats,
             },
         )

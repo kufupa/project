@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#PBS -N p12ev5x25
+#PBS -l select=1:ncpus=32:mem=32gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=00:30:00
+#PBS -q v1_gpu72
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_eval_last5_25ep.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+PHASE12_JOB_LOG="logs/pbs/grpo/phase12_eval_last5_25ep.${PBS_JOBID:-local}.$(date -u +%Y%m%dT%H%M%SZ).log"
+exec >> "${PHASE12_JOB_LOG}" 2>&1
+
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+BASE_CKPT="${PHASE12_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
+MIN_UPDATE="${PHASE12_MIN_UPDATE:?set PHASE12_MIN_UPDATE}"
+MAX_UPDATE="${PHASE12_MAX_UPDATE:?set PHASE12_MAX_UPDATE}"
+STRIDE="${PHASE12_STRIDE:-2}"
+UPDATES="${PHASE12_EVAL_UPDATES:-}"
+EPISODES="${PHASE12_EVAL_EPISODES:-25}"
+N_ENVS="${PHASE12_EVAL_N_ENVS:-25}"
+CHUNK_LEN="${PHASE12_EVAL_CHUNK_LEN:-25}"
+MAX_STEPS="${PHASE12_EVAL_MAX_STEPS:-120}"
+SWEEP_NAME="${PHASE12_SWEEP_NAME:-eval_last5_${MIN_UPDATE}_${MAX_UPDATE}_25ep_nenv25}"
+
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export SMOLVLA_GRPO_ASYNC_MP_CONTEXT=forkserver
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+test -x "${PYTHON_BIN}"
+test -d "${PROJECT_ROOT}/src"
+if [[ ! -d "${BASE_CKPT}" && ! -f "${BASE_CKPT}" ]]; then echo "missing BASE_CKPT=${BASE_CKPT}" >&2; exit 2; fi
+if [[ -n "${UPDATES}" ]]; then
+  max_requested="$("${PYTHON_BIN}" - "${UPDATES}" <<'PY'
+import sys
+updates = [int(x) for x in sys.argv[1].replace(":", ",").replace(";", ",").split(",") if x.strip()]
+print(max(updates))
+PY
+)"
+  test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${max_requested}").pt"
+else
+  test -f "${RUN_DIR}/checkpoints/update_$(printf '%04d' "${MAX_UPDATE}").pt"
+fi
+
+update_args=()
+if [[ -n "${UPDATES}" ]]; then
+  update_args=(--updates "${UPDATES}")
+fi
+
+echo "[phase12-eval-last5] run=${RUN_DIR} updates=${UPDATES:-${MIN_UPDATE}-${MAX_UPDATE}} stride=${STRIDE} episodes=${EPISODES} nenv=${N_ENVS} chunk=${CHUNK_LEN} max_steps=${MAX_STEPS} job=${PBS_JOBID:-local}"
+"${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
+  --base-checkpoint "${BASE_CKPT}" \
+  --run-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --episodes "${EPISODES}" \
+  --eval-seed-start 1000 \
+  --sweep-name "${SWEEP_NAME}" \
+  --execution-mode inprocess_vector \
+  --n-envs "${N_ENVS}" \
+  --rollout-execution vector_async \
+  --chunk-len "${CHUNK_LEN}" \
+  --max-steps "${MAX_STEPS}" \
+  --min-update "${MIN_UPDATE}" \
+  --max-update "${MAX_UPDATE}" \
+  --stride "${STRIDE}" \
+  "${update_args[@]}"
+
+SUMMARY="${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
+test -f "${SUMMARY}"
+"${PYTHON_BIN}" - "${SUMMARY}" "${MIN_UPDATE}" "${MAX_UPDATE}" "${EPISODES}" "${N_ENVS}" "${UPDATES}" "${CHUNK_LEN}" <<'PY'
+import json, sys
+from pathlib import Path
+summary = json.loads(Path(sys.argv[1]).read_text())
+min_u, max_u, episodes, n_envs = map(int, sys.argv[2:6])
+updates_arg = sys.argv[6]
+chunk_len = int(sys.argv[7])
+rows = summary["rows"]
+stride = int(summary["stride"])
+if updates_arg.strip():
+    expected = [int(x) for x in updates_arg.replace(":", ",").replace(";", ",").split(",") if x.strip()]
+else:
+    expected = list(range(min_u, max_u + 1, stride))
+assert [int(r["update"]) for r in rows] == expected, rows
+assert int(summary["episodes"]) == episodes
+assert int(summary["n_envs"]) == n_envs
+assert str(summary["execution_mode"]) == "inprocess_vector"
+assert str(summary["rollout_execution"]) == "vector_async"
+assert int(summary["chunk_len"]) == chunk_len
+PY
+echo "PHASE12_EVAL_LAST5_DONE summary=${SUMMARY}"

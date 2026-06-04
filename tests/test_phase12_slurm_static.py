@@ -60,9 +60,9 @@ def test_eval_sweep_slurm_supports_one_gpu_vector_mode() -> None:
     assert "#SBATCH --export=NIL" in text
     assert 'slurm_resolve_project_root "scripts/grpo/eval_phase12_checkpoint_sweep.py"' in text
     assert 'slurm_export_hf_torch_cache "phase12-eval-sweep"' in text
-    assert 'EXECUTION_MODE="${PHASE12_EVAL_EXECUTION_MODE:-subprocess}"' in text
-    assert 'N_ENVS="${PHASE12_EVAL_N_ENVS:-1}"' in text
-    assert 'ROLLOUT_EXECUTION="${PHASE12_EVAL_ROLLOUT_EXECUTION:-serial}"' in text
+    assert 'EXECUTION_MODE="${PHASE12_EVAL_EXECUTION_MODE:-inprocess_vector}"' in text
+    assert 'N_ENVS="${PHASE12_EVAL_N_ENVS:-4}"' in text
+    assert 'ROLLOUT_EXECUTION="${PHASE12_EVAL_ROLLOUT_EXECUTION:-vector_async}"' in text
     assert 'if [[ $# -ge 8 && -n "${8:-}" ]]; then EXECUTION_MODE="${8}"; fi' in text
     assert 'if [[ $# -ge 9 && -n "${9:-}" ]]; then N_ENVS="${9}"; fi' in text
     assert 'if [[ $# -ge 10 && -n "${10:-}" ]]; then ROLLOUT_EXECUTION="${10}"; fi' in text

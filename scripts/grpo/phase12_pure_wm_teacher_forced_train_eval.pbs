@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#PBS -N p12wmte
+#PBS -l select=1:ncpus=48:mem=96gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=12:00:00
+#PBS -q v1_gpu72
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase12_pure_wm_teacher_forced_train_eval.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+cd "${PROJECT_ROOT}"
+mkdir -p logs/pbs/grpo
+PHASE12_JOB_LOG="logs/pbs/grpo/phase12_pure_wm_teacher_forced_train_eval.${PBS_JOBID:-local}.$(date -u +%Y%m%dT%H%M%SZ).log"
+exec >> "${PHASE12_JOB_LOG}" 2>&1
+
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+CHECKPOINT="${PHASE12_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+JEPA_CKPT="${PHASE12_JEPA_CKPT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--facebook--jepa-wms/snapshots/9b9c41ef249466630dbf1a20e78391865d07b3b9/jepa_wm_metaworld.pth.tar}"
+JEPA_REPO="${PHASE12_JEPA_REPO:-/rds/general/user/aa6622/home/research/RESEARCH_PAPER_CLONES/jepa-wms}"
+RUN_DIR="${PHASE12_RUN_DIR:?set PHASE12_RUN_DIR}"
+LIGHTWEIGHT_COPY_DIR="${LIGHTWEIGHT_COPY_DIR:-}"
+
+TOTAL_UPDATES="${PHASE12_TOTAL_UPDATES:-20}"
+START_UPDATE="${PHASE12_START_UPDATE:-0}"
+NUM_UPDATES="${PHASE12_NUM_UPDATES:-$((TOTAL_UPDATES - START_UPDATE))}"
+RESUME="${PHASE12_RESUME:-}"
+SAVE_EVERY="${PHASE12_SAVE_EVERY:-5}"
+SAVE_EVERY_LIST="${PHASE12_SAVE_EVERY_LIST:-2,5}"
+BATCH_SIZE="${PHASE12_BATCH_SIZE:-4}"
+GROUP_SIZE="${PHASE12_GROUP_SIZE:-8}"
+CHUNK_LEN="${PHASE12_CHUNK_LEN:-5}"
+MAX_STEPS="${PHASE12_MAX_STEPS:-120}"
+TRAIN_SEED_BASE="${PHASE12_SEED_BASE:-2000}"
+WM_ONLY_ROOT_MODE="${PHASE12_WM_ONLY_ROOT_MODE:-oracle_teacher_forced}"
+LOSS_NORMALIZER_MODE="${PHASE12_LOSS_NORMALIZER_MODE:-group}"
+WM_ACTION_L2_PENALTY="${PHASE12_WM_ACTION_L2_PENALTY:-0.003}"
+ACTION_PROFILE="${PHASE12_ACTION_PROFILE:-official_jepa_mirror}"
+LR="${PHASE12_LR:-1e-5}"
+CLIP_EPS="${PHASE12_CLIP_EPS:-0.2}"
+INIT_LOG_STD="${PHASE12_INIT_LOG_STD:--2.0}"
+EULER_NOISE="${PHASE12_EULER_NOISE:-0.2}"
+WM_SCORE_MODE="${PHASE12_WM_SCORE_MODE:-serial}"
+WM_SCORE_BATCH_SIZE="${PHASE12_WM_SCORE_BATCH_SIZE:-8}"
+
+EVAL25_UPDATES="${PHASE12_EVAL25_UPDATES:-2:4:5:6:8:10:12:14:15:16:18:20}"
+EVAL100_UPDATES="${PHASE12_EVAL100_UPDATES:-5:10:15:20}"
+EVAL_N_ENVS="${PHASE12_EVAL_N_ENVS:-25}"
+EVAL_CHUNK_LEN="${PHASE12_EVAL_CHUNK_LEN:-5}"
+EVAL_MAX_STEPS="${PHASE12_EVAL_MAX_STEPS:-120}"
+
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export JEPA_WM_DISABLE_IMAGE_HEAD="${JEPA_WM_DISABLE_IMAGE_HEAD:-1}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export SMOLVLA_GRPO_ASYNC_MP_CONTEXT=forkserver
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+test -x "${PYTHON_BIN}"
+test -d "${PROJECT_ROOT}/src"
+if [[ ! -d "${CHECKPOINT}" && ! -f "${CHECKPOINT}" ]]; then echo "missing CHECKPOINT=${CHECKPOINT}" >&2; exit 2; fi
+test -f "${JEPA_CKPT}"
+test -d "${JEPA_REPO}"
+mkdir -p "${RUN_DIR}"
+
+CPU_MEM_TELEMETRY_INTERVAL="${CPU_MEM_TELEMETRY_INTERVAL:-5}"
+CPU_MEM_TELEMETRY_DIR="${RUN_DIR}/cpu_mem_telemetry/train_eval_${PBS_JOBID:-local}"
+source scripts/grpo/phase11_cpu_mem_telemetry.sh
+trap 'status=$?; stop_cpu_mem_telemetry; exit "${status}"' EXIT
+
+train_args=(
+  scripts/grpo/train_phase12_wm_chunk_grpo.py
+  --mode wm_grpo_train
+  --phase12-train-mode wm_only
+  --wm-only-root-mode "${WM_ONLY_ROOT_MODE}"
+  --checkpoint "${CHECKPOINT}"
+  --jepa-ckpt "${JEPA_CKPT}"
+  --jepa-repo "${JEPA_REPO}"
+  --output-dir "${RUN_DIR}"
+  --task push-v3
+  --env-backend official_lerobot_guarded
+  --action-profile "${ACTION_PROFILE}"
+  --chunk-len "${CHUNK_LEN}"
+  --batch-size "${BATCH_SIZE}"
+  --group-size "${GROUP_SIZE}"
+  --num-episodes "${NUM_UPDATES}"
+  --num-updates "${NUM_UPDATES}"
+  --start-update "${START_UPDATE}"
+  --max-steps "${MAX_STEPS}"
+  --train-seed-base "${TRAIN_SEED_BASE}"
+  --save-every "${SAVE_EVERY}"
+  --save-every-list "${SAVE_EVERY_LIST}"
+  --loss-normalizer-mode "${LOSS_NORMALIZER_MODE}"
+  --wm-action-l2-penalty "${WM_ACTION_L2_PENALTY}"
+  --lr "${LR}"
+  --clip-eps "${CLIP_EPS}"
+  --init-log-std "${INIT_LOG_STD}"
+  --euler-step-noise-std "${EULER_NOISE}"
+  --goal-latent-mode visual_proprio
+  --proprio-alpha 0.1
+  --reward-key wm_latent_progress
+  --ratio-mode chunk
+  --logprob-backward-mode microbatch
+  --wm-score-mode "${WM_SCORE_MODE}"
+  --wm-score-batch-size "${WM_SCORE_BATCH_SIZE}"
+  --action-transform no_tanh
+  --reset-mismatch fail
+  --decode-candidates none
+  --no-save-wm-decodes
+  --disable-videos
+)
+if [[ -n "${RESUME}" ]]; then
+  test -f "${RESUME}"
+  train_args+=(--resume "${RESUME}")
+fi
+
+FINAL_CKPT="${RUN_DIR}/checkpoints/update_$(printf '%04d' "${TOTAL_UPDATES}").pt"
+if [[ -f "${FINAL_CKPT}" ]]; then
+  echo "[phase12-pure-wm] skip train final checkpoint exists ${FINAL_CKPT}"
+else
+  echo "[phase12-pure-wm] train run=${RUN_DIR} start=${START_UPDATE} updates=${NUM_UPDATES} target=${TOTAL_UPDATES} root=${WM_ONLY_ROOT_MODE} loss=${LOSS_NORMALIZER_MODE} l2=${WM_ACTION_L2_PENALTY} lr=${LR} clip=${CLIP_EPS} logstd=${INIT_LOG_STD} noise=${EULER_NOISE}"
+  run_phase11_with_cpu_mem_telemetry "${PYTHON_BIN}" "${train_args[@]}"
+fi
+test -f "${FINAL_CKPT}"
+
+echo "[phase12-pure-wm] eval25 updates=${EVAL25_UPDATES}"
+"${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
+  --base-checkpoint "${CHECKPOINT}" \
+  --run-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --episodes 25 \
+  --eval-seed-start 1000 \
+  --sweep-name eval25_explicit_u2_20_nenv25_async \
+  --execution-mode inprocess_vector \
+  --n-envs "${EVAL_N_ENVS}" \
+  --rollout-execution vector_async \
+  --chunk-len "${EVAL_CHUNK_LEN}" \
+  --max-steps "${EVAL_MAX_STEPS}" \
+  --min-update 2 \
+  --max-update "${TOTAL_UPDATES}" \
+  --stride 2 \
+  --updates "${EVAL25_UPDATES}" \
+  --skip-existing
+
+echo "[phase12-pure-wm] eval100 updates=${EVAL100_UPDATES}"
+"${PYTHON_BIN}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
+  --base-checkpoint "${CHECKPOINT}" \
+  --run-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --episodes 100 \
+  --eval-seed-start 1000 \
+  --sweep-name eval100_explicit_u5_20_nenv25_async \
+  --execution-mode inprocess_vector \
+  --n-envs "${EVAL_N_ENVS}" \
+  --rollout-execution vector_async \
+  --chunk-len "${EVAL_CHUNK_LEN}" \
+  --max-steps "${EVAL_MAX_STEPS}" \
+  --min-update 5 \
+  --max-update "${TOTAL_UPDATES}" \
+  --stride 5 \
+  --updates "${EVAL100_UPDATES}" \
+  --skip-existing
+
+"${PYTHON_BIN}" scripts/grpo/analyze_phase12_wm_collapse.py "${RUN_DIR}" --out "${RUN_DIR}/phase12_wm_collapse_analysis.json"
+
+if [[ -n "${LIGHTWEIGHT_COPY_DIR}" ]]; then
+  mkdir -p "${LIGHTWEIGHT_COPY_DIR}"
+  cp -f "${RUN_DIR}/progress.jsonl" "${LIGHTWEIGHT_COPY_DIR}/progress.jsonl"
+  cp -f "${RUN_DIR}/manifest.json" "${LIGHTWEIGHT_COPY_DIR}/manifest.json"
+  cp -f "${RUN_DIR}/phase12_wm_collapse_analysis.json" "${LIGHTWEIGHT_COPY_DIR}/phase12_wm_collapse_analysis.json"
+  mkdir -p "${LIGHTWEIGHT_COPY_DIR}/eval25_explicit_u2_20_nenv25_async" "${LIGHTWEIGHT_COPY_DIR}/eval100_explicit_u5_20_nenv25_async"
+  cp -f "${RUN_DIR}/eval25_explicit_u2_20_nenv25_async/eval_sweep_summary.json" "${LIGHTWEIGHT_COPY_DIR}/eval25_explicit_u2_20_nenv25_async/eval_sweep_summary.json"
+  cp -f "${RUN_DIR}/eval100_explicit_u5_20_nenv25_async/eval_sweep_summary.json" "${LIGHTWEIGHT_COPY_DIR}/eval100_explicit_u5_20_nenv25_async/eval_sweep_summary.json"
+fi
+
+echo "PHASE12_PURE_WM_TRAIN_EVAL_DONE run=${RUN_DIR}"

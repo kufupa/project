@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# PBS (CX3): EGGROLL population_batch_size calibration.
+#PBS -N p50eggcal
+#PBS -l select=1:ncpus=16:mem=48gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -o phase50_eggroll_calibrate_pbs.out
+
+set -euo pipefail
+
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+PROJECT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+source "${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+slurm_resolve_project_root "scripts/eggroll/train_smolvla_eggroll.py"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase50-eggroll-calibrate"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+EGGROLL_PYTHON="${EGGROLL_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+if [[ ! -x "${EGGROLL_PYTHON}" ]]; then
+  echo "error: no usable EGGROLL_PYTHON=${EGGROLL_PYTHON}" >&2
+  exit 2
+fi
+CHECKPOINT="${PHASE50_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+TASK="${PHASE50_TASK:-push-v3}"
+ROOT="${PHASE50_CALIBRATION_ROOT:-${PROJECT_ROOT}/artifacts/phase50_eggroll_calibration/${TASK}}"
+CANDIDATES=(${PHASE50_CALIBRATION_BATCHES:-1 2 4 8 16})
+
+for b in "${CANDIDATES[@]}"; do
+  pop=32
+  rank=2
+  iters=2
+  steps=40
+  if [[ "${b}" == "1" ]]; then pop=8; rank=1; iters=1; steps=5; fi
+  if [[ "${b}" == "2" ]]; then pop=16; rank=2; iters=1; steps=20; fi
+  out="${ROOT}/pop32_b${b}_r2_seed2000"
+  echo "[eggroll-calibrate] batch=${b} out=${out}"
+  rm -rf "${out}"
+  mkdir -p "${out}"
+  set +e
+  "${EGGROLL_PYTHON}" scripts/eggroll/train_smolvla_eggroll.py \
+    --checkpoint "${CHECKPOINT}" \
+    --output-dir "${out}" \
+    --task "${TASK}" \
+    --population-size "${pop}" \
+    --population-batch-size "${b}" \
+    --rank "${rank}" \
+    --sigma "${PHASE50_SIGMA:-0.01}" \
+    --alpha "${PHASE50_ALPHA:-0.03}" \
+    --num-iterations "${iters}" \
+    --max-steps "${steps}" \
+    --rollout-execution vector_sync \
+    --save-every 1 \
+    --video-every 0
+  code=$?
+  set -e
+  printf '{"population_batch_size":%s,"exit_code":%s,"pbs_jobid":"%s"}\n' "${b}" "${code}" "${PBS_JOBID:-}" > "${out}/calibration_probe.json" || true
+  qstat -fx "${PBS_JOBID:-}" > "${out}/pbs_resource_snapshot.txt" 2>&1 || true
+  if [[ "${code}" -ne 0 ]]; then
+    echo "[eggroll-calibrate] candidate batch=${b} failed code=${code}; continuing"
+  fi
+done
+
+"${EGGROLL_PYTHON}" scripts/eggroll/summarize_calibration.py "${ROOT}" "${CANDIDATES[@]}"
+test -f "${ROOT}/calibration_summary.json"
+echo "PHASE50_EGGROLL_CALIBRATION_DONE root=${ROOT}"

@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# PBS (CX3): Phase12 WM chunk GRPO smoke — mirrors scripts/grpo/submit_phase12_wm_chunk_grpo_smoke.slurm
+# Official 1-episode / 1-update smoke, default action profile official_jepa_mirror.
+# Submit from repo root:
+#   cd /rds/general/user/aa6622/home/project && /opt/pbs/bin/qsub scripts/grpo/submit_phase12_wm_chunk_grpo_1ep_smoke.pbs
+#PBS -N p12wmgsmoke
+#PBS -l select=1:ncpus=8:mem=48gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o phase12_wm_chunk_grpo_smoke_pbs.out
+
+set -euo pipefail
+
+# Venv python needs matching libpython on compute nodes (see other scripts/mt50/*.pbs).
+if [[ -f /etc/profile.d/modules.sh ]]; then
+  # shellcheck source=/dev/null
+  . /etc/profile.d/modules.sh
+fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+_PROJECT_FALLBACK="/vol/bitbucket/aa6622/project"
+if [[ -n "${PBS_O_WORKDIR:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}" && pwd)"
+elif [[ -n "${PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="$(cd "${PROJECT_ROOT}" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+
+_COMMON="${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+if [[ ! -f "${_COMMON}" ]]; then
+  _COMMON="${_PROJECT_FALLBACK}/scripts/slurm/common_env.sh"
+fi
+if [[ ! -f "${_COMMON}" ]]; then
+  echo "error: cannot find scripts/slurm/common_env.sh" >&2
+  exit 2
+fi
+# shellcheck source=../slurm/common_env.sh
+source "${_COMMON}"
+
+slurm_resolve_project_root "scripts/grpo/train_phase12_wm_chunk_grpo.py"
+cd "${PROJECT_ROOT}"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase12-wm-chunk-grpo-smoke"
+
+# CX3 batch EGL can miss libEGL/libOpenGL; GLFW+Xvfb can segfault here. Prefer Mesa OSMesa.
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+if [[ "$(printf '%s' "${MUJOCO_GL}" | tr '[:upper:]' '[:lower:]')" == "osmesa" ]]; then
+  export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+  export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+fi
+export PHASE12_XVFB_SERVER_NUM="${PHASE12_XVFB_SERVER_NUM:-210}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export JEPA_WM_DISABLE_IMAGE_HEAD="${JEPA_WM_DISABLE_IMAGE_HEAD:-1}"
+
+# CX3 compute nodes often lack /vol/bitbucket; prefer RDS $HOME venv when GRPO_PYTHON unset or missing.
+if [[ -n "${GRPO_PYTHON:-}" && -x "${GRPO_PYTHON}" ]]; then
+  :
+else
+  GRPO_PYTHON=""
+  for _py in \
+    "${HOME}/.envs/lerobot_mw_py312/bin/python" \
+    "${HOME}/.envs/lerobot_mw_py310/bin/python" \
+    "/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python" \
+    "/rds/general/user/aa6622/home/.envs/lerobot_mw_py310/bin/python" \
+    "/vol/bitbucket/aa6622/.envs/lerobot_mw_py310/bin/python" \
+    "/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python"
+  do
+    if [[ -n "${_py}" && -x "${_py}" ]]; then
+      GRPO_PYTHON="${_py}"
+      break
+    fi
+  done
+fi
+if [[ -z "${GRPO_PYTHON:-}" || ! -x "${GRPO_PYTHON}" ]]; then
+  echo "error: no usable GRPO_PYTHON (set GRPO_PYTHON to your LeRobot venv python)" >&2
+  exit 2
+fi
+echo "[phase12-smoke] GRPO_PYTHON=${GRPO_PYTHON}"
+# CX3 nodes: prefer RDS HF cache + local JEPA clone (override with PHASE12_* if needed).
+CHECKPOINT="${PHASE12_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+JEPA_CKPT="${PHASE12_JEPA_CKPT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--facebook--jepa-wms/snapshots/9b9c41ef249466630dbf1a20e78391865d07b3b9/jepa_wm_metaworld.pth.tar}"
+JEPA_REPO="${PHASE12_JEPA_REPO:-/rds/general/user/aa6622/home/research/RESEARCH_PAPER_CLONES/jepa-wms}"
+TASK="${PHASE12_TASK:-push-v3}"
+ACTION_PROFILE="${PHASE12_ACTION_PROFILE:-official_jepa_mirror}"
+OUT="${PHASE12_OUT:-${PROJECT_ROOT}/artifacts/phase12_wm_chunk_grpo_smoke/${ACTION_PROFILE}}"
+DRY_RUN_FLAG=()
+if [[ "${PHASE12_DRY_RUN:-0}" == "1" ]]; then
+  DRY_RUN_FLAG+=(--dry-run)
+fi
+
+echo "[phase12-smoke] action_profile=${ACTION_PROFILE}"
+echo "[phase12-smoke] out=${OUT}"
+
+cmd=("${GRPO_PYTHON}" scripts/grpo/train_phase12_wm_chunk_grpo.py \
+  --checkpoint "${CHECKPOINT}" \
+  --jepa-ckpt "${JEPA_CKPT}" \
+  --jepa-repo "${JEPA_REPO}" \
+  --output-dir "${OUT}" \
+  --task "${TASK}" \
+  --env-backend official_lerobot_guarded \
+  --action-profile "${ACTION_PROFILE}" \
+  --chunk-len 25 \
+  --group-size 4 \
+  --num-episodes 1 \
+  --num-updates 1 \
+  --goal-latent-mode visual_proprio \
+  --proprio-alpha 0.1 \
+  --reward-key wm_latent_progress \
+  --ratio-mode chunk \
+  --action-transform no_tanh \
+  --reset-mismatch fail \
+  --decode-candidates selected \
+  "${DRY_RUN_FLAG[@]}")
+
+if [[ "$(printf '%s' "${MUJOCO_GL}" | tr '[:upper:]' '[:lower:]')" == "glfw" ]] && command -v xvfb-run >/dev/null 2>&1; then
+  xvfb-run -n "${PHASE12_XVFB_SERVER_NUM}" -s "-screen 0 1280x1024x24" "${cmd[@]}"
+else
+  "${cmd[@]}"
+fi
+
+test -f "${OUT}/train_manifest.json"
+test -f "${OUT}/progress.jsonl"
+
+echo "PHASE12_WM_CHUNK_GRPO_SMOKE_DONE profile=${ACTION_PROFILE} out=${OUT}"

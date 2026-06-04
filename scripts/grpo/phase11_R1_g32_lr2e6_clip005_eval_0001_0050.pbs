@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#PBS -N p11R1ev
+#PBS -l select=1:ncpus=32:mem=32gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase11_R1_g32_lr2e6_clip005_eval_0001_0050.out
+
+set -euo pipefail
+if [[ -f /etc/profile.d/modules.sh ]]; then . /etc/profile.d/modules.sh; fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+cd /rds/general/user/aa6622/home/project
+
+RUN_DIR="artifacts/phase11_pushv3_chunk5_g32_lr2e6_clip005_u50"
+BASE_CKPT="/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900"
+SWEEP_NAME="eval_sweep_0001_0050_20ep_nenv25_async"
+PYTHON_BIN="${GRPO_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+
+mkdir -p logs/pbs/grpo
+
+export PYTHONPATH=src
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+unset LIBGL_ALWAYS_SOFTWARE
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+export SMOLVLA_GRPO_ASYNC_MP_CONTEXT=forkserver
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "error: missing PYTHON_BIN=${PYTHON_BIN}" >&2
+  exit 2
+fi
+test -f "${RUN_DIR}/checkpoints/update_0050.pt"
+
+echo "[phase11-R1] eval updates 1-50 20ep nenv25 job=${PBS_JOBID:-local}"
+"${PYTHON_BIN}" scripts/grpo/eval_phase111_grpo_sweep.py \
+  --base-checkpoint "${BASE_CKPT}" \
+  --run-dir "${RUN_DIR}" \
+  --task push-v3 \
+  --episodes 20 \
+  --eval-seed-start 1000 \
+  --top-k 2 \
+  --top-k-episodes 100 \
+  --sweep-name "${SWEEP_NAME}" \
+  --execution-mode inprocess_vector \
+  --n-envs 25 \
+  --rollout-execution vector_async \
+  --chunk-len 5 \
+  --max-steps 120 \
+  --min-update 1 \
+  --max-update 50
+
+test -f "${RUN_DIR}/${SWEEP_NAME}/eval_sweep_summary.json"
+echo "PHASE11_R1_EVAL_DONE sweep=${RUN_DIR}/${SWEEP_NAME}"

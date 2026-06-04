@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#PBS -N p11spb4g16
+#PBS -l select=1:ncpus=64:mem=192gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=18:00:00
+#PBS -j oe
+#PBS -o logs/pbs/grpo/phase11_sparse_b4g16_lr25e6_clip005_moonshot_0050_ephemeral.out
+
+set -euo pipefail
+cd /rds/general/user/aa6622/home/project
+
+RUN_ID="${PBS_JOBID:-local}"
+export PHASE11_RUN_DIR="${PHASE11_RUN_DIR:-/rds/general/ephemeral/user/aa6622/ephemeral/smolvla_metaworld/phase11_sparse_b4g16_lr25e6_clip005_u50_${RUN_ID}}"
+export PHASE11_RUN_LABEL="sparse_b4g16_lr25e6_clip005_moonshot"
+export PHASE11_BATCH_SIZE=4
+export PHASE11_GROUP_SIZE=16
+export PHASE11_NUM_UPDATES=50
+export PHASE11_START_UPDATE=0
+export PHASE11_SAVE_EVERY=2
+export PHASE11_LR=2.5e-6
+export PHASE11_CLIP_EPS=0.05
+export PHASE11_INIT_LOG_STD=-2.5
+export PHASE11_EULER_NOISE=0.1
+export PHASE11_REWARD_MODE=sparse_success_delta
+export PHASE11_REWARD_COEF=1.0
+export PHASE11_USE_REL_REWARD=1
+export PHASE11_ROLLOUT_POLICY_BATCH_SIZE=32
+export PHASE11_LOGPROB_BATCH_SIZE=16
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+echo "[phase11-sparse-moonshot-A] run_dir=${PHASE11_RUN_DIR} job=${RUN_ID}"
+bash scripts/grpo/phase11_seedbatch_train_param.pbs

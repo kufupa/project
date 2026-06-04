@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# PBS (CX3): EGGROLL one-GPU train + eval for SmolVLA push-v3.
+#PBS -N p50eggfull
+#PBS -l select=1:ncpus=64:mem=192gb:ngpus=1:gpu_type=RTX6000
+#PBS -l walltime=18:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+if [[ -f /etc/profile.d/modules.sh ]]; then
+  # shellcheck source=/dev/null
+  . /etc/profile.d/modules.sh
+fi
+module purge >/dev/null 2>&1 || true
+module load tools/prod
+module load Python/3.12.3-GCCcore-13.3.0
+module load Mesa/24.1.3-GCCcore-13.3.0
+
+SUBMIT_ROOT="$(cd "${PBS_O_WORKDIR:-/rds/general/user/aa6622/home/project}" && pwd)"
+SCRATCH_ROOT="${TMPDIR:-${PBS_TMPDIR:-/tmp}}"
+RUN_NAME="${PHASE50_RUN_NAME:?PHASE50_RUN_NAME required}"
+PERSIST_OUT="${PHASE50_OUT:?PHASE50_OUT required}"
+WORK_OUT="${PHASE50_WORK_OUT:-${SCRATCH_ROOT}/phase50_eggroll/${RUN_NAME}}"
+WORK_SRC="${PHASE50_WORK_SRC:-${SCRATCH_ROOT}/phase50_eggroll_source/${RUN_NAME}}"
+
+mkdir -p "${PERSIST_OUT}" "${WORK_OUT}" "${WORK_SRC}"
+
+copy_source() {
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+      "${SUBMIT_ROOT}/src" \
+      "${SUBMIT_ROOT}/scripts" \
+      "${SUBMIT_ROOT}/requirements-smolvla-lock.txt" \
+      "${SUBMIT_ROOT}/requirements-smolvla-lock.py311.txt" \
+      "${SUBMIT_ROOT}/pytest.ini" \
+      "${WORK_SRC}/"
+  else
+    rm -rf "${WORK_SRC}/src" "${WORK_SRC}/scripts"
+    cp -a "${SUBMIT_ROOT}/src" "${SUBMIT_ROOT}/scripts" "${WORK_SRC}/"
+    cp -a "${SUBMIT_ROOT}/requirements-smolvla-lock.txt" "${SUBMIT_ROOT}/requirements-smolvla-lock.py311.txt" "${SUBMIT_ROOT}/pytest.ini" "${WORK_SRC}/" 2>/dev/null || true
+  fi
+}
+copy_source
+
+PROJECT_ROOT="${WORK_SRC}"
+export SLURM_SUBMIT_DIR="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+# shellcheck source=../slurm/common_env.sh
+source "${PROJECT_ROOT}/scripts/slurm/common_env.sh"
+slurm_resolve_project_root "scripts/eggroll/train_smolvla_eggroll.py"
+slurm_export_pythonpath
+slurm_export_hf_torch_cache "phase50-eggroll-overnight"
+
+export MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-osmesa}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}"
+export SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"
+
+EGGROLL_PYTHON="${EGGROLL_PYTHON:-/rds/general/user/aa6622/home/.envs/lerobot_mw_py312/bin/python}"
+if [[ ! -x "${EGGROLL_PYTHON}" ]]; then
+  echo "error: no usable EGGROLL_PYTHON=${EGGROLL_PYTHON}" >&2
+  exit 2
+fi
+
+CHECKPOINT="${PHASE50_CHECKPOINT:-/rds/general/user/aa6622/home/.cache/huggingface/hub/models--jadechoghari--smolvla_metaworld/snapshots/ef3089ecb84eeeb7d33fedab24f6c76180a68900}"
+RESUME="${PHASE50_RESUME:-}"
+TASK="${PHASE50_TASK:-push-v3}"
+EVAL_SWEEP_NAME="${PHASE50_EVAL_SWEEP_NAME:-eval_seeded50_every2}"
+
+sync_back() {
+  mkdir -p "${PERSIST_OUT}"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --partial "${WORK_OUT}/" "${PERSIST_OUT}/"
+  else
+    cp -a "${WORK_OUT}/." "${PERSIST_OUT}/"
+  fi
+}
+
+cleanup() {
+  set +e
+  if [[ -n "${SYNC_PID:-}" ]]; then
+    kill "${SYNC_PID}" >/dev/null 2>&1 || true
+  fi
+  sync_back
+}
+trap cleanup EXIT
+
+echo "[phase50-eggroll-overnight] submit_root=${SUBMIT_ROOT} project_root=${PROJECT_ROOT} HF_HOME=${HF_HOME:-} TORCH_HOME=${TORCH_HOME:-} host=$(hostname) job=${PBS_JOBID:-local}"
+echo "[phase50-eggroll-overnight] run=${RUN_NAME} work=${WORK_OUT} persist=${PERSIST_OUT} source=${WORK_SRC}"
+echo "[phase50-eggroll-overnight] reset_mode=${SMOLVLA_METAWORLD_RESET_MODE} python=${EGGROLL_PYTHON}"
+echo "[phase50-eggroll-overnight] pop=${PHASE50_POPULATION_SIZE:-32} batch=${PHASE50_POPULATION_BATCH_SIZE:-32} rank=${PHASE50_RANK:-2} sigma=${PHASE50_SIGMA:-0.01} alpha=${PHASE50_ALPHA:-0.01} episodes_per_member=${PHASE50_EPISODES_PER_MEMBER:-2}"
+echo "[phase50-eggroll-overnight] resume=${RESUME:-none}"
+
+sync_loop() {
+  while true; do
+    sleep "${PHASE50_SYNC_SECONDS:-120}"
+    sync_back || true
+  done
+}
+sync_loop &
+SYNC_PID=$!
+
+train_args=(
+  scripts/eggroll/train_smolvla_eggroll.py
+  --checkpoint "${CHECKPOINT}"
+  --output-dir "${WORK_OUT}"
+  --checkpoint-sync-dir "${PERSIST_OUT}"
+  --task "${TASK}"
+  --population-size "${PHASE50_POPULATION_SIZE:-32}"
+  --population-batch-size "${PHASE50_POPULATION_BATCH_SIZE:-32}"
+  --rank "${PHASE50_RANK:-2}"
+  --sigma "${PHASE50_SIGMA:-0.01}"
+  --alpha "${PHASE50_ALPHA:-0.01}"
+  --baseline-type "${PHASE50_BASELINE_TYPE:-mean}"
+  --fitness-shaping "${PHASE50_FITNESS_SHAPING:-rank}"
+  --episodes-per-member "${PHASE50_EPISODES_PER_MEMBER:-2}"
+  --num-iterations "${PHASE50_NUM_ITERATIONS:-36}"
+  --max-steps "${PHASE50_MAX_STEPS:-120}"
+  --action-chunk-size "${PHASE50_ACTION_CHUNK_SIZE:-5}"
+  --rollout-execution "${PHASE50_ROLLOUT_EXECUTION:-vector_async}"
+  --seed-mode "${PHASE50_SEED_MODE:-shared_per_iteration}"
+  --train-seed-base "${PHASE50_TRAIN_SEED_BASE:-2000}"
+  --noise-seed "${PHASE50_NOISE_SEED:-17}"
+  --flow-noise-seed "${PHASE50_FLOW_NOISE_SEED:-23}"
+  --save-every "${PHASE50_SAVE_EVERY:-2}"
+  --video-every "${PHASE50_VIDEO_EVERY:-10}"
+  --abort-update-norm "${PHASE50_ABORT_UPDATE_NORM:-0.05}"
+  --write-oracle-video
+)
+if [[ -n "${RESUME}" ]]; then
+  train_args+=(--resume "${RESUME}")
+fi
+
+"${EGGROLL_PYTHON}" "${train_args[@]}"
+sync_back
+
+test -f "${PERSIST_OUT}/train_manifest.json"
+test -f "${PERSIST_OUT}/progress.jsonl"
+test -f "${PERSIST_OUT}/timings.jsonl"
+test -f "${PERSIST_OUT}/checkpoints/latest.pt"
+
+MAX_UPDATE="$("${EGGROLL_PYTHON}" - "${PERSIST_OUT}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+vals = []
+for p in (Path(sys.argv[1]) / "checkpoints").glob("update_*.pt"):
+    match = re.match(r"update_(\d+)\.pt$", p.name)
+    if match:
+        vals.append(int(match.group(1)))
+print(max(vals) if vals else 0)
+PY
+)"
+if [[ "${MAX_UPDATE}" -lt 1 ]]; then
+  echo "error: no numbered checkpoints found in ${PERSIST_OUT}/checkpoints" >&2
+  exit 3
+fi
+
+"${EGGROLL_PYTHON}" scripts/grpo/eval_phase12_checkpoint_sweep.py \
+  --base-checkpoint "${PHASE50_EVAL_BASE_CHECKPOINT:-${CHECKPOINT}}" \
+  --run-dir "${PERSIST_OUT}" \
+  --task "${TASK}" \
+  --episodes "${PHASE50_EVAL_EPISODES:-50}" \
+  --eval-seed-start "${PHASE50_EVAL_SEED_START:-1000}" \
+  --sweep-name "${EVAL_SWEEP_NAME}" \
+  --min-update 0 \
+  --max-update "${MAX_UPDATE}" \
+  --stride "${PHASE50_EVAL_STRIDE:-2}" \
+  --execution-mode inprocess_vector \
+  --n-envs "${PHASE50_EVAL_N_ENVS:-25}" \
+  --rollout-execution "${PHASE50_ROLLOUT_EXECUTION:-vector_async}" \
+  --chunk-len "${PHASE50_ACTION_CHUNK_SIZE:-5}" \
+  --max-steps "${PHASE50_MAX_STEPS:-120}"
+
+test -f "${PERSIST_OUT}/${EVAL_SWEEP_NAME}/eval_sweep_summary.json"
+
+"${EGGROLL_PYTHON}" - "${PERSIST_OUT}" "${RUN_NAME}" "${EVAL_SWEEP_NAME}" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+out = Path(sys.argv[1])
+run_name = sys.argv[2]
+sweep = sys.argv[3]
+summary = json.loads((out / sweep / "eval_sweep_summary.json").read_text())
+rows = summary.get("rows", [])
+best = max(
+    rows,
+    key=lambda row: (float(row.get("pc_success", 0.0)), float(row.get("avg_sum_reward", 0.0))),
+) if rows else {}
+run_summary = {
+    "run_name": run_name,
+    "run_dir": str(out),
+    "sweep": sweep,
+    "best_eval_row": best,
+    "eval_rows": len(rows),
+}
+(out / "overnight_summary.json").write_text(json.dumps(run_summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(run_summary, indent=2, sort_keys=True))
+PY
+
+echo "PHASE50_EGGROLL_OVERNIGHT_DONE run_name=${RUN_NAME} out=${PERSIST_OUT}"

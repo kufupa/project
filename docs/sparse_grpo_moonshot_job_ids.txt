@@ -1,0 +1,3 @@
+# sparse GRPO moonshots 2026-05-29T09:21:36Z
+A_TRAIN=2882344.pbs-7 A_EVAL=2882345.pbs-7 A_RUN_DIR=/rds/general/ephemeral/user/aa6622/ephemeral/smolvla_metaworld/phase11_sparse_b4g16_lr25e6_clip005_u50_2882344.pbs-7
+B_TRAIN=2882346.pbs-7 B_EVAL=2882347.pbs-7 B_RUN_DIR=/rds/general/ephemeral/user/aa6622/ephemeral/smolvla_metaworld/phase11_sparse_g16_lr5e6_clip02_u50_2882346.pbs-7
