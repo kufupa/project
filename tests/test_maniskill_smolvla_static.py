@@ -199,19 +199,17 @@ def test_data_full_resume_uses_record_split_and_proc_offset() -> None:
 def test_data_full_uses_large24a_record_dir_and_render_cpu() -> None:
     data_full = _read("02_data_full.pbs")
     convert = _read("03_convert_full.pbs")
+    resume = _read("02_data_full_resume.pbs")
     assert "ncpus=32" in data_full
     assert 'MSM_FULL_NUM_PROCS="${MSM_FULL_NUM_PROCS:-32}"' in data_full
     assert 'MSM_FULL_RECORD_DIR="${MSM_FULL_RECORD_DIR:-${MSM_RAW_ROOT}/full_cpu124_v1}"' in data_full
     assert "--sim_backend cpu" in data_full
     assert "--render_backend cpu" in data_full
     assert "full_cpu124_v1" in convert
-    collect = (
-        PROJECT
-        / "RL4VLA/ManiSkill/mani_skill/examples/motionplanning/widowx/collect_simpler.py"
-    ).read_text(encoding="utf-8")
-    assert "record_split" in collect
-    assert "proc_id_offset" in collect
-    assert "record_split_name" in collect
+    assert "--record-split" in resume
+    assert "--proc-id-offset" in resume
+    assert "record_split=${MSM_RECORD_SPLIT}" in resume
+    assert "proc_id_offset=${MSM_PROC_ID_OFFSET}" in resume
 
 
 def test_cleanup_requires_verified_replacement_before_delete() -> None:
