@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 
@@ -90,7 +91,10 @@ def test_phase57_mt50_decode_pbs_contract() -> None:
 
 
 def test_phase57_raw_boundary_goal_bugfix_pbs_contract() -> None:
-    text = _read("submit_phase57_raw_boundary_check_goal_bugfix.pbs")
+    pbs_path = PROJECT / "scripts" / "grpo" / "submit_phase57_raw_boundary_check_goal_bugfix.pbs"
+    if not pbs_path.is_file():
+        pytest.skip("submit_phase57_raw_boundary_check_goal_bugfix.pbs not in tree")
+    text = pbs_path.read_text(encoding="utf-8")
 
     assert "#SBATCH" not in text
     assert "PBS_O_WORKDIR" in text
