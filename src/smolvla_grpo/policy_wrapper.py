@@ -605,12 +605,13 @@ class MetaWorldSmolVLAGRPOPolicy:
             np.mean(self.postprocessor_oob_excess(raw_np, action_low=self.action_low, action_high=self.action_high))
         )
         exec_t = self._executed_tensor_from_np(exec_np, ref=mean)
+        log_std_for_lp = self.clamp_log_std(log_std, self.min_log_std)
         if self.action_transform == "tanh_norm_ablation":
-            log_prob = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+            log_prob = self.calculate_log_prob(mean, log_std_for_lp, unsquashed, policy_tensor, eps=self.eps)
             logprob_action = unsquashed
         else:
             logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
-            log_prob = self.calculate_gaussian_log_prob(mean, log_std, logprob_action)
+            log_prob = self.calculate_gaussian_log_prob(mean, log_std_for_lp, logprob_action)
         return SampledStep(
             exec_action_np=exec_np,
             raw_postprocessed_action_np=raw_np,
@@ -745,12 +746,13 @@ class MetaWorldSmolVLAGRPOPolicy:
                 np.mean(self.postprocessor_oob_excess(raw_np, action_low=self.action_low, action_high=self.action_high))
             )
             exec_t = self._executed_tensor_from_np(exec_np, ref=m)
+            ls_for_lp = self.clamp_log_std(ls, self.min_log_std)
             if self.action_transform == "tanh_norm_ablation":
-                log_prob = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+                log_prob = self.calculate_log_prob(m, ls_for_lp, unsquashed, policy_tensor, eps=self.eps)
                 logprob_action = unsquashed
             else:
                 logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
-                log_prob = self.calculate_gaussian_log_prob(m, ls, logprob_action)
+                log_prob = self.calculate_gaussian_log_prob(m, ls_for_lp, logprob_action)
             raw_rows.append(np.asarray(raw_np, dtype=np.float32))
             exec_rows.append(np.asarray(exec_np, dtype=np.float32))
             policy_rows.append(policy_tensor.detach())
@@ -890,11 +892,13 @@ class MetaWorldSmolVLAGRPOPolicy:
         raw_postprocessed_action_np = np.stack(raw_rows, axis=0)
         if self.action_transform == "tanh_norm_ablation":
             logprob_action = unsquashed
-            log_prob_steps = self.calculate_log_prob(mean, log_std, unsquashed, policy_tensor, eps=self.eps)
+            log_std_for_lp = self.clamp_log_std(log_std, self.min_log_std)
+            log_prob_steps = self.calculate_log_prob(mean, log_std_for_lp, unsquashed, policy_tensor, eps=self.eps)
         else:
             exec_t = self._executed_tensor_from_np(exec_action_np, ref=mean)
             logprob_action = self._gaussian_scored_action(unsquashed=unsquashed, executed=exec_t)
-            log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std, logprob_action)
+            log_std_for_lp = self.clamp_log_std(log_std, self.min_log_std)
+            log_prob_steps = self.calculate_gaussian_log_prob(mean, log_std_for_lp, logprob_action)
         return SampledActionChunk(
             exec_action_np=exec_action_np,
             raw_postprocessed_action_np=raw_postprocessed_action_np,
@@ -954,12 +958,13 @@ class MetaWorldSmolVLAGRPOPolicy:
             std = torch.exp(ls)
             noise = torch.randn(m.shape, generator=gen, device=m.device, dtype=m.dtype)
             unsquashed = m + std * noise
+            ls_for_lp = self.clamp_log_std(ls, self.min_log_std)
             if self.action_transform == "tanh_norm_ablation":
                 policy_tensor = torch.tanh(unsquashed)
-                log_prob_steps = self.calculate_log_prob(m, ls, unsquashed, policy_tensor, eps=self.eps)
+                log_prob_steps = self.calculate_log_prob(m, ls_for_lp, unsquashed, policy_tensor, eps=self.eps)
             else:
                 policy_tensor = unsquashed
-                log_prob_steps = self.calculate_gaussian_log_prob(m, ls, unsquashed)
+                log_prob_steps = self.calculate_gaussian_log_prob(m, ls_for_lp, unsquashed)
 
             raw_steps: list[np.ndarray] = []
             exec_steps: list[np.ndarray] = []

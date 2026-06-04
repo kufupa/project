@@ -64,10 +64,10 @@ def test_train_and_eval_contracts() -> None:
 
     assert "scripts/grpo/eval_phase12_checkpoint_sweep.py" in eval_text
     assert "inprocess_vector" in eval_text
-    assert "vector_sync" in eval_text
+    assert "vector_async" in eval_text
     for text in (calib, train, eval_text, _read("submit_phase50_eggroll_smoke.pbs")):
         assert 'SMOLVLA_METAWORLD_RESET_MODE="${SMOLVLA_METAWORLD_RESET_MODE:-random_seeded}"' in text
     assert '--n-envs "${PHASE50_EVAL_N_ENVS:-3}"' in eval_text
-    assert "PHASE50_EGGROLL_EVAL_SWEEP_DONE" in eval_text
+    assert "PHASE50_EGGROLL_SEEDED_EVAL_SWEEP_DONE" in eval_text
     assert "MAX_UPDATE" in eval_text
     assert "PHASE50_ALLOW_BASE_EVAL" in eval_text
