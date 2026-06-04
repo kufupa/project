@@ -590,7 +590,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
 
         mean, log_std = self._policy.select_action_distr_params(proc_d)
-        log_std = self.clamp_log_std(log_std, self.min_log_std)
         std = torch.exp(log_std)
         if rng is None:
             noise = torch.randn_like(mean)
@@ -707,7 +706,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
 
         mean, log_std = self._policy.select_action_distr_params(proc_d)
-        log_std = self.clamp_log_std(log_std, self.min_log_std)
         b = int(mean.shape[0])
         if b != int(n_envs):
             raise ValueError(f"proc batch dim {b} != n_envs {int(n_envs)}")
@@ -861,7 +859,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             )
 
         mean, log_std = self._get_distr_params_chunk(proc_d, chunk_len=int(chunk_len))
-        log_std = self.clamp_log_std(log_std, self.min_log_std)
         std = torch.exp(log_std)
         if rng is None:
             noise = torch.randn_like(mean)
@@ -939,7 +936,6 @@ class MetaWorldSmolVLAGRPOPolicy:
             n_envs=b,
             chunk_len=int(chunk_len),
         )
-        log_std = self.clamp_log_std(log_std, self.min_log_std)
 
         policy_rows: list[torch.Tensor] = []
         unsq_rows: list[torch.Tensor] = []
