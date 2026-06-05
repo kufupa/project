@@ -60,7 +60,7 @@ cd "${PROJECT_ROOT}"
   --lr 7.5e-6 \
   --clip-eps 0.2 \
   --max-steps 120 \
-  --reward-mode sparse_success_delta \
+  --reward-mode dense_return \
   --rollout-unit chunk \
   --rollout-chunk-len 5 \
   --rollout-execution vector_async \
