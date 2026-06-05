@@ -21,7 +21,14 @@ Autonomous pipeline: implement → unit test → GPU smoke → train → 100ep e
 
 | Job | Script | Status |
 |-----|--------|--------|
-| **247457** | `submit_dgpo_chunk_grpo_smoke_a30.slurm` | RUNNING (2 updates + eval25) |
+| **247457** | `submit_dgpo_chunk_grpo_smoke_a30.slurm` | **FAILED** — see RCA below |
+| **247458** | smoke retry (`dense_return`) | queued |
+
+### Smoke 247457 RCA (2026-06-06)
+
+- **Symptom:** exit 20, `expected update_0002 checkpoint not found`
+- **Root cause:** both updates `skipped=zero_advantages` — `sparse_success_delta` + 0% success → all G=16 returns identical (0) → GRPO adv=0 → no optimize, no ckpt, no `[dgpo]` weight telemetry
+- **Fix:** smoke slurm → `--reward-mode dense_return` (train arms keep `sparse_success_delta`)
 
 ## Session start
 
