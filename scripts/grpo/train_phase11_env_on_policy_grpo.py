@@ -229,6 +229,57 @@ def _log_std_telemetry(policy) -> dict:
     }
 
 
+@torch.no_grad()
+def _compute_dgpo_chunk_weights(
+    ref_wrapper,
+    rollouts,
+    *,
+    chunk_len: int,
+    tau: float,
+    kappa: float,
+    device,
+):
+    """One DGPO weight per VALID chunk, per trajectory, aligned to the loss loop.
+
+    Current-policy Gaussian = stored chunk.distr_mean/distr_log_std (on-policy:
+    equals pi_theta at update start). Reference = frozen SFT, recomputed from the
+    stored flow-sde trace. Hellinger deviation -> unit-mean softmax over the
+    trajectory's valid chunks. Returns list[list[float]] (per traj, valid order).
+    """
+    from smolvla_grpo.dgpo import (
+        dgpo_redistribution_weights,
+        gaussian_hellinger_sq,
+        _normalized_entropy,
+    )
+
+    out: list[list[float]] = []
+    for traj in rollouts:
+        mu_c, ls_c, mu_r, ls_r = [], [], [], []
+        for chunk in traj.chunks:
+            if not bool(chunk.valid_action_mask.any()):
+                continue  # MUST mirror the loss loop's skip (:1117-1118)
+            mu_c.append(chunk.distr_mean.reshape(-1).float())       # [chunk_len*adim]
+            ls_c.append(chunk.distr_log_std.reshape(-1).float())
+            _, mr, lr = ref_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
+                [chunk.proc_snapshot], [chunk.flow_sde_trace], chunk_len=int(chunk_len)
+            )
+            mu_r.append(mr.reshape(-1).float())
+            ls_r.append(lr.reshape(-1).float())
+        if not mu_c:
+            out.append([])
+            continue
+        MC = torch.stack(mu_c).unsqueeze(0).to(device)   # [1, n_valid, D]
+        LC = torch.stack(ls_c).unsqueeze(0).to(device)
+        MR = torch.stack(mu_r).unsqueeze(0).to(device)
+        LR = torch.stack(ls_r).unsqueeze(0).to(device)
+        dev = gaussian_hellinger_sq(MC, MR, LC, LR)      # [1, n_valid]
+        mask = torch.ones_like(dev, dtype=torch.bool)
+        ent = _normalized_entropy(LC, mask) if kappa != 0.0 else None
+        w = dgpo_redistribution_weights(dev, mask, tau=tau, kappa=kappa, entropy_norm=ent)
+        out.append(w.reshape(-1).cpu().tolist())
+    return out
+
+
 def _fmt_metric(value: object) -> str:
     if value is None:
         return "null"
