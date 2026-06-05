@@ -716,6 +716,10 @@ def main() -> int:
         default=True,
         help="Sparse only: reward = delta of success indicator across steps.",
     )
+    p.add_argument("--dgpo", action="store_true", help="enable Distribution-Guided DGPO advantage redistribution")
+    p.add_argument("--dgpo-tau", type=float, default=0.5, help="DGPO softmax temperature")
+    p.add_argument("--dgpo-kappa", type=float, default=0.0, help="DGPO entropy-gate exponent (0 = deviation only; inert with global log_std)")
+    p.add_argument("--dgpo-ref", type=str, default="frozen_sft", choices=["frozen_sft", "rollout"], help="DGPO reference policy (Phase A implements frozen_sft only)")
     args = p.parse_args()
     if int(args.batch_size) < 1:
         raise SystemExit("--batch-size must be >= 1")
@@ -1201,6 +1205,17 @@ def main() -> int:
                     kappa=float(args.dgpo_kappa),
                     device=device,
                 )
+                if dgpo_weights is not None and any(dgpo_weights):
+                    import itertools
+                    flat = list(itertools.chain.from_iterable(dgpo_weights))
+                    if flat:
+                        wt = torch.tensor(flat)
+                        print(
+                            f"[dgpo] update={update} w_min={wt.min():.3f} "
+                            f"w_max={wt.max():.3f} w_std={wt.std():.3f} "
+                            f"tau={args.dgpo_tau} kappa={args.dgpo_kappa} ref={args.dgpo_ref}",
+                            flush=True,
+                        )
             optimize_t0 = time.perf_counter()
             last_new_log_probs: list[torch.Tensor] = []
             last_old_log_probs: list[torch.Tensor] = []
