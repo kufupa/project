@@ -1191,6 +1191,16 @@ def main() -> int:
                 raise RuntimeError("chunk rollout produced zero valid chunks")
 
             bundle.policy.train()
+            dgpo_weights = None
+            if getattr(args, "dgpo", False):
+                dgpo_weights = _compute_dgpo_chunk_weights(
+                    ref_wrapper,
+                    rollouts,
+                    chunk_len=int(args.rollout_chunk_len),
+                    tau=float(args.dgpo_tau),
+                    kappa=float(args.dgpo_kappa),
+                    device=device,
+                )
             optimize_t0 = time.perf_counter()
             last_new_log_probs: list[torch.Tensor] = []
             last_old_log_probs: list[torch.Tensor] = []
@@ -1203,10 +1213,18 @@ def main() -> int:
                 epoch_log_stds: list[torch.Tensor] = []
                 for gi, traj in enumerate(rollouts):
                     A = advantages[gi].reshape(()).float()
+                    w_list = dgpo_weights[gi] if dgpo_weights is not None else None
+                    vc = 0  # valid-chunk index, MUST track the same skips as below
                     for chunk in traj.chunks:
                         valid = chunk.valid_action_mask.reshape(1, -1).to(device)
                         if not bool(valid.any()):
                             continue
+                        A_eff = A
+                        if w_list is not None:
+                            if vc >= len(w_list):
+                                raise RuntimeError("dgpo weight/valid-chunk misalignment")
+                            A_eff = A * float(w_list[vc])
+                        vc += 1
                         new_steps, _mu_live, log_std_live = (
                             train_wrapper.get_flow_sde_log_probs_for_chunk_from_proc_list(
                                 [chunk.proc_snapshot],
@@ -1219,8 +1237,8 @@ def main() -> int:
                         old_lp = masked_chunk_sum(old_steps, valid)
                         new_lp = masked_chunk_sum(new_step, valid)
                         ratio = torch.exp((new_lp - old_lp).clamp(-20.0, 20.0))
-                        unclipped = ratio * A
-                        clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * A
+                        unclipped = ratio * A_eff
+                        clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * A_eff
                         chunk_loss = -torch.min(unclipped, clipped).sum() / max(int(valid_chunk_count), 1)
                         chunk_loss = apply_grpo_regularizers(
                             chunk_loss,

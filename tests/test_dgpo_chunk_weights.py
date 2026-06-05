@@ -46,3 +46,12 @@ def test_weights_align_to_valid_chunks_only():
     )
     assert len(out[0]) == 3                      # only 3 valid chunks
     assert abs(sum(out[0]) / 3 - 1.0) < 1e-4
+
+
+def test_uniform_weights_equal_grpo_advantage():
+    # all-equal deviation -> weights all 1.0 -> A*w == A (DGPO reduces to GRPO)
+    from smolvla_grpo.dgpo import dgpo_redistribution_weights
+    dev = torch.full((1, 8), 0.3)
+    mask = torch.ones(1, 8, dtype=torch.bool)
+    w = dgpo_redistribution_weights(dev, mask, tau=0.5, kappa=0.0)
+    assert torch.allclose(w, torch.ones(1, 8), atol=1e-5)
