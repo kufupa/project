@@ -741,6 +741,46 @@ def main() -> int:
     train_wrapper.set_log_std(args.init_log_std)
     train_wrapper.set_euler_step_noise_std(args.euler_step_noise_std)
     freeze_all_but_grpo_trainables(bundle.policy)
+
+    # --- DGPO frozen SFT reference policy (for Hellinger deviation) ---
+    ref_wrapper = None
+    if getattr(args, "dgpo", False):
+        if args.dgpo_ref != "frozen_sft":
+            raise NotImplementedError(
+                f"--dgpo-ref={args.dgpo_ref} not implemented in Phase A (use frozen_sft)"
+            )
+        ref_bundle, ref_action_dim = load_bundle_for_grpo(
+            args.checkpoint,
+            task=args.task,
+            env_backend=args.env_backend,
+            n_action_steps=(
+                int(args.rollout_chunk_len)
+                if args.rollout_unit == "chunk"
+                else int(args.action_chunk_size)
+            ),
+        )
+        ref_wrapper = MetaWorldSmolVLAGRPOPolicy(
+            ref_bundle,
+            task=args.task,
+            task_text=task_text,
+            camera_name=camera_name,
+            flip_corner2=flip_corner2,
+            action_dim=ref_action_dim,
+            action_transform=args.action_transform,
+            min_log_std=float(args.min_log_std),
+            gaussian_logprob_action=args.gaussian_logprob_action,
+            logprob_mode=args.logprob_mode,
+            flow_sde_noise_level=float(args.flow_sde_noise_level),
+            flow_sde_trace_step=int(args.flow_sde_trace_step),
+        )
+        ref_wrapper.assert_grpo_api()
+        ref_wrapper.set_log_std(args.init_log_std)
+        ref_wrapper.set_euler_step_noise_std(args.euler_step_noise_std)
+        for prm in ref_bundle.policy.parameters():
+            prm.requires_grad_(False)
+        ref_bundle.policy.eval()
+        print(f"[dgpo] frozen SFT reference ready (ref={args.dgpo_ref})", flush=True)
+
     trainable = [p for p in bundle.policy.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, betas=(0.9, 0.95))
 
