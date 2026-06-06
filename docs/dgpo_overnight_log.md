@@ -54,6 +54,12 @@ Autonomous pipeline: implement → unit test → GPU smoke → train → 100ep e
 - **Monitor:** `dgpo_overnight_monitor.sh` poll=120s → logs progress + RCA on fail
 - **Chain:** `dgpo_overnight_chain_e2_e3.sh` waiting E0/E1 done → E2/E3
 
+### Poll 2026-06-06T00:31Z (agent 120s loop active)
+
+- **247467 E0** u4 trained (6.25% succ), parity=1.0
+- **247468 E1** u4 trained (12.5% succ), `[dgpo] w_std=0.000` (early, pi~ref)
+- Poll log: `logs/dgpo_agent_poll.log`
+
 ## Session start
 
 - **2026-06-05T00:00:00Z** Plan loaded. RLinf repo: `/vol/bitbucket/aa6622/RLinf-smolvla-metaworld-ppo-grpo`.
@@ -168,3 +174,5 @@ RLINF_DGPO_MOONSHOT_SUBMIT_OK m5_throughput=247320 rca=unknown mem=50G exclude=n
 RLINF_DGPO_MOONSHOT_SUBMIT_OK m2_giant_group=247321 rca=unknown mem=50G exclude=none
 [2026-06-06T00:27:23Z] monitor start jobs=247467 247468 poll=120s
 [2026-06-06T00:27:23Z] poll 247467: RUNNING last=phase111_grpo_update update=3 mode=vector_async unit=chunk label=flow_sde_chunk_grpo_moonshot_sparse30_seed1000 seed=2003 avg_return=0 success_rate=0.000 rollout_s=228.54 opt_s=0.00 update_s=228.76 skipped=zero_advantages
+[2026-06-06T00:29:23Z] poll 247467: RUNNING last=phase111_grpo_update update=3 mode=vector_async unit=chunk label=flow_sde_chunk_grpo_moonshot_sparse30_seed1000 seed=2003 avg_return=0 success_rate=0.000 rollout_s=228.54 opt_s=0.00 update_s=228.76 skipped=zero_advantages
+[2026-06-06T00:31:23Z] poll 247467: RUNNING last=phase111_grpo_update update=4 mode=vector_async unit=chunk label=flow_sde_chunk_grpo_moonshot_sparse30_seed1000 seed=2004 avg_return=0.0625 success_rate=0.062 episode_lengths=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 64, 120] env_steps=1864 chunks=373 valid_chunks=373 parity_mean_ratio=1.0000 rollout_s=223.35 opt_s=65.74 update_s=325.98 rss_tree_mb=6170.7 vmem_tree_mb=71737.5
