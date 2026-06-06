@@ -22,7 +22,7 @@ Autonomous pipeline: implement → unit test → GPU smoke → train → 100ep e
 | Job | Script | Status |
 |-----|--------|--------|
 | **247457** | `submit_dgpo_chunk_grpo_smoke_a30.slurm` | **FAILED** — see RCA below |
-| **247458** | smoke retry (`dense_return`) | queued |
+| **247459** | smoke retry (`dense_return`) | **CORE GREEN** — DGPO weights ok, train ok; slurm ckpt path check failed (fixed) |
 
 ### Smoke 247457 RCA (2026-06-06)
 

@@ -78,8 +78,8 @@ cd "${PROJECT_ROOT}"
   --dgpo-ref "${DGPO_REF:-frozen_sft}"
 
 CKPT_DIR="${TRAIN_OUT}/checkpoints"
-if [[ ! -d "${CKPT_DIR}" || ! -f "${CKPT_DIR}/update_0002/trainable_model/model.safetensors" ]]; then
-  echo "error: expected update_0002 checkpoint not found in ${CKPT_DIR}" >&2
+if [[ ! -f "${CKPT_DIR}/update_0002.pt" ]]; then
+  echo "error: expected update_0002.pt not found in ${CKPT_DIR}" >&2
   exit 20
 fi
 
