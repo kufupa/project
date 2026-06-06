@@ -30,6 +30,22 @@ Autonomous pipeline: implement → unit test → GPU smoke → train → 100ep e
 - **Root cause:** both updates `skipped=zero_advantages` — `sparse_success_delta` + 0% success → all G=16 returns identical (0) → GRPO adv=0 → no optimize, no ckpt, no `[dgpo]` weight telemetry
 - **Fix:** smoke slurm → `--reward-mode dense_return` (train arms keep `sparse_success_delta`)
 
+### Smoke 247459 RCA #2
+
+- **Symptom:** exit 20 after successful train (`update_0002.pt` exists)
+- **Root cause:** slurm guard looked for `update_0002/trainable_model/model.safetensors`; trainer writes `update_0002.pt`
+- **Fix:** guard → `update_XXXX.pt` in smoke + train slurms
+- **DGPO validated:** `w_std=0.045` update 1, finite loss, parity=1.0
+
+### A7 experiment queue (2026-06-06)
+
+| Arm | Job | Config |
+|-----|-----|--------|
+| E0 control (flow-sde GRPO) | **247467** | no `--dgpo`, sparse_success_delta |
+| E1 DGPO primary | **247468** | tau=0.5 kappa=0 frozen_sft |
+| E2 tau flat | pending | DGPO_TAU=1.0 |
+| E3 tau sharp | pending | DGPO_TAU=0.25 |
+
 ## Session start
 
 - **2026-06-05T00:00:00Z** Plan loaded. RLinf repo: `/vol/bitbucket/aa6622/RLinf-smolvla-metaworld-ppo-grpo`.
