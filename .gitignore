@@ -38,6 +38,11 @@ poetry.lock
 # Project log directory (Slurm copies, ad-hoc logs)
 logs/
 
+# Local-only notes and thesis trees (not versioned)
+docs/
+imperial_latex/
+src/imperial_latex/
+
 # Ad-hoc dotfile scratch (pilots, listing runs, agent temp)
 /.all_runs_*.txt
 /.hf_paths.txt

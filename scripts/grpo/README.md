@@ -1,16 +1,8 @@
 # Phase111 SmolVLA GRPO
 
-## LeRobot fork (required for true GRPO)
+Repo overview, venv setup, and LeRobot fork pin: see **[README.md](../../README.md)** at repo root (`jsnchon/lerobot` @ `f30fc2a`).
 
-Safe-robot-steering pins `jsnchon/lerobot` at commit `f30fc2a1b904bb2ccd752cfff94f6f4423bd523b` for `select_action_distr_params` and `model.log_std`.
-
-**IC / Phase11 default:** use **`/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python`** with SmolVLA GRPO hooks patched in that venv’s `site-packages/lerobot` (see Phase11 plan amendment). Below is only for **greenfield** setups elsewhere:
-
-```bash
-# Example: fresh venv + install forked lerobot at pinned commit (not required on IC if the MetaWorld venv patch is already applied)
-pip install -U pip
-pip install "git+https://github.com/jsnchon/lerobot.git@f30fc2a1b904bb2ccd752cfff94f6f4423bd523b"
-```
+**IC default:** `/vol/bitbucket/aa6622/.envs/lerobot_mw_py312/bin/python` (or `lerobot_mw_py310`) with GRPO hooks in that venv’s `site-packages/lerobot`.
 
 ## API smoke (CPU)
 
