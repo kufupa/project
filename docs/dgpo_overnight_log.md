@@ -46,6 +46,14 @@ Autonomous pipeline: implement → unit test → GPU smoke → train → 100ep e
 | E2 tau flat | pending | DGPO_TAU=1.0 |
 | E3 tau sharp | pending | DGPO_TAU=0.25 |
 
+### Poll 2026-06-06 ~00:25Z
+
+- **247467 E0** RUNNING ~18m — u0/u1/u3 skipped (zero adv), **u2 trained** (12.5% success, parity=1.0)
+- **247468 E1** RUNNING ~18m — u0–u3 all skipped (sparse, no success variance yet); ref loaded OK
+- **247454** unrelated RLinf job still on hopper
+- **Monitor:** `dgpo_overnight_monitor.sh` poll=120s → logs progress + RCA on fail
+- **Chain:** `dgpo_overnight_chain_e2_e3.sh` waiting E0/E1 done → E2/E3
+
 ## Session start
 
 - **2026-06-05T00:00:00Z** Plan loaded. RLinf repo: `/vol/bitbucket/aa6622/RLinf-smolvla-metaworld-ppo-grpo`.
@@ -158,3 +166,5 @@ RLINF_DGPO_MOONSHOT_SUBMIT_OK m2_giant_group=247319 rca=unknown mem=50G exclude=
 RLINF_DGPO_MOONSHOT_SUBMIT_OK m5_throughput=247320 rca=unknown mem=50G exclude=none
 - **2026-06-05T07:49:02Z** resubmit m2_giant_group job_id=submitted m2_giant_group job=247321 mem=50G exclude=none
 RLINF_DGPO_MOONSHOT_SUBMIT_OK m2_giant_group=247321 rca=unknown mem=50G exclude=none
+[2026-06-06T00:27:23Z] monitor start jobs=247467 247468 poll=120s
+[2026-06-06T00:27:23Z] poll 247467: RUNNING last=phase111_grpo_update update=3 mode=vector_async unit=chunk label=flow_sde_chunk_grpo_moonshot_sparse30_seed1000 seed=2003 avg_return=0 success_rate=0.000 rollout_s=228.54 opt_s=0.00 update_s=228.76 skipped=zero_advantages
